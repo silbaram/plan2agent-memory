@@ -65,7 +65,6 @@ devsync-design/
 ```
 .claude/skills/devsync-design/       ← canonical skill directory for Claude Code
 .agents/skills/devsync-design        ← Codex repo skill symlink to the same package
-devsync-design                       ← convenience symlink for humans/tools
 ```
 
 ---

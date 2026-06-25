@@ -40,4 +40,4 @@ Read only the files needed for the task:
 
 This package follows the Agent Skills format: the folder name and `name` are `devsync-design`, `SKILL.md` contains the required `name` and `description`, and detailed material lives in `references/`, `assets/`, and `ui_kits/` for progressive disclosure.
 
-In this repo, the actual skill directory is `.claude/skills/devsync-design` for Claude Code project discovery. Codex discovers the same package through `.agents/skills/devsync-design`, which is a symlink to the Claude Code directory. The root `devsync-design` path is a convenience symlink to the same package. Codex-specific UI metadata lives in `agents/openai.yaml`.
+In this repo, the actual skill directory is `.claude/skills/devsync-design` for Claude Code project discovery. Codex discovers the same package through `.agents/skills/devsync-design`, which is a symlink to the Claude Code directory. Codex-specific UI metadata lives in `agents/openai.yaml`.
