@@ -1,0 +1,213 @@
+{
+  "schema_version": "p2a.spec.v1",
+  "project_id": "p2a-local-artifact-store",
+  "source_intake": "artifacts/p2a-local-artifact-store/gate-a-intake/intake.json",
+  "product": {
+    "problem": "P2A는 계획 문서, task graph, run 기록, proposal, review를 로컬 md/json 파일로 남기지만, 파일만으로는 project, iteration, task, run, document 사이의 관계형 조회와 검색, 향후 RAG/회고 기반 자기고도화 준비가 어렵다. 이 서버는 로컬 파일을 원본으로 유지하면서 산출물을 동기화하고 검색하기 위한 보조 저장소를 제공한다.",
+    "target_users": [
+      "로컬에서 P2A CLI/GUI를 사용하는 단일 개발자",
+      "향후 P2A GUI 또는 CLI 동기화 기능",
+      "P2A run과 planning artifact를 회고하거나 검색하려는 운영자"
+    ],
+    "goals": [
+      "project, iteration, task, run, document 관계를 보존한다.",
+      "문서 스냅샷, task graph, task, run, chunk를 REST API로 저장한다.",
+      "content hash 기반으로 중복 저장을 방지하고 idempotent sync를 지원한다.",
+      "projectId, iterationId, taskId, runId, artifactType, sourcePath 기준 조회를 제공한다.",
+      "PostgreSQL keyword 검색과 pgvector 기반 vector 검색 준비를 제공한다.",
+      "embedding은 외부에서 주입된 값을 저장하고 서버 내부에서 AI API를 호출하지 않는다.",
+      "Docker Compose와 Testcontainers 기반 로컬 개발/검증 흐름을 제공한다."
+    ],
+    "non_goals": [
+      "로컬 md/json 파일을 대체하지 않는다.",
+      "P2A 하네스 또는 AI agent를 직접 실행하지 않는다.",
+      "embedding 생성, RAG 응답 생성, 자동 개선 적용은 하지 않는다.",
+      "다중 사용자 권한, OAuth, cloud deployment, queue 기반 ingestion은 MVP 범위가 아니다.",
+      "proposal 자동 적용은 MVP 범위가 아니며 후속 단계에서도 proposal 생성까지만 고려한다."
+    ],
+    "core_flows": [
+      "클라이언트가 프로젝트를 등록하고 서버는 stable projectId를 반환하거나 수락한다.",
+      "클라이언트가 iteration을 등록하고 프로젝트와 연결한다.",
+      "클라이언트가 sourcePath, artifactType, contentHash, raw content 또는 metadata를 포함한 문서 스냅샷을 저장한다.",
+      "클라이언트가 task graph JSON과 graph 내 task 목록을 저장한다.",
+      "클라이언트가 task별 run 기록과 산출물 참조를 저장한다.",
+      "클라이언트가 문서 chunk와 선택적 embedding을 bulk 저장한다.",
+      "클라이언트가 관계형 필터 또는 keyword/vector query로 산출물을 조회한다."
+    ],
+    "screens_or_interfaces": [
+      "POST /api/projects: 프로젝트 등록 또는 upsert",
+      "POST /api/projects/{projectId}/iterations: iteration 등록 또는 upsert",
+      "POST /api/documents/snapshots: 문서/산출물 스냅샷 저장",
+      "POST /api/task-graphs: task graph 저장",
+      "POST /api/tasks/bulk: task 저장 또는 task graph에서 추출한 task upsert",
+      "POST /api/runs: run 기록 저장",
+      "POST /api/document-chunks/bulk: chunk와 선택적 embedding 저장",
+      "GET /api/artifacts: projectId, iterationId, taskId, runId, artifactType, sourcePath 필터 조회",
+      "GET /api/search/keyword: keyword 검색",
+      "POST /api/search/vector: 외부 주입 query embedding 기반 vector 검색",
+      "GET /actuator/health: 로컬 개발용 health check"
+    ],
+    "data_model_draft": [
+      "projects: projectId, name, rootPath, metadata, timestamps",
+      "iterations: iterationId, projectId, label, status, metadata, timestamps",
+      "documents: documentId, projectId, iterationId, artifactType, sourcePath, contentHash, snapshotVersion, content, metadata, timestamps",
+      "task_graphs: taskGraphId, projectId, iterationId, sourceDocumentId, graphHash, graphJson, timestamps",
+      "tasks: taskId, projectId, iterationId, taskGraphId, title, status, targetArea, dependenciesJson, acceptanceCriteriaJson, metadata",
+      "runs: runId, projectId, iterationId, taskId, status, agentTool, startedAt, finishedAt, runJson, artifactRefsJson",
+      "document_chunks: chunkId, documentId, projectId, iterationId, taskId, runId, artifactType, sourcePath, chunkIndex, chunkHash, content, tokenEstimate, embeddingModel, embeddingDimension, embedding vector, metadata",
+      "content hash 중복 방지는 logical scope와 hash를 함께 사용한다. 같은 sourcePath/artifactType에 다른 hash가 들어오면 overwrite가 아니라 새 snapshotVersion을 만든다."
+    ],
+    "external_integrations": [
+      "PostgreSQL with pgvector: 관계형 저장과 vector 컬럼을 한 데이터베이스에 둔다. pgvector는 Postgres 클라이언트와 함께 사용할 수 있고 vector distance operator와 HNSW/IVFFlat 인덱스를 제공한다. [WEB-1]",
+      "P2A CLI/GUI: 후속 연동 클라이언트이며 MVP 서버는 REST API만 제공한다.",
+      "Docker Compose: 로컬 PostgreSQL + pgvector 실행을 제공한다.",
+      "Testcontainers: 통합 테스트에서 pgvector 이미지 기반 PostgreSQL을 실행한다. [WEB-3]",
+      "AI API: 서버가 직접 호출하지 않는다."
+    ],
+    "success_criteria": [
+      "Docker Compose로 pgvector가 활성화된 PostgreSQL을 띄우고 서버가 연결된다.",
+      "프로젝트, iteration, document, task graph, task, run, chunk 저장 API가 idempotent하게 동작한다.",
+      "동일 contentHash의 중복 저장이 추가 blob/chunk 중복을 만들지 않는다.",
+      "요구된 필터 기준 조회가 가능하다.",
+      "keyword 검색이 document/chunk content를 대상으로 동작한다.",
+      "외부에서 embedding을 주입하면 vector 검색 API가 저장된 chunk를 반환한다.",
+      "Testcontainers 기반 통합 테스트가 migration, 저장, 조회, 검색, 중복 방지 경로를 검증한다."
+    ],
+    "constraints": [
+      "로컬 파일이 원본이고 서버는 보조 저장소다.",
+      "서버는 P2A 하네스와 AI agent를 실행하지 않는다.",
+      "초기 단일 사용자 로컬 개발용이다.",
+      "인증은 단순 API key 또는 local token이다.",
+      "서버는 embedding을 생성하지 않고 외부 입력만 저장한다.",
+      "자동 개선 적용은 하지 않는다.",
+      "Gate B 승인 전에는 task graph 산출물을 만들지 않는다."
+    ]
+  },
+  "implementation": {
+    "architecture": [
+      "Kotlin Spring Boot REST 애플리케이션 하나로 시작한다. 모듈은 controller, service, repository, migration, test fixture로 나눈다.",
+      "persistence는 PostgreSQL을 기준으로 두고, schema migration은 Flyway로 관리한다. Spring Boot는 PostgreSQL 같은 외부 DB에서 Flyway 모듈을 사용할 때 database-specific module을 요구하므로 flyway-database-postgresql을 포함한다. [WEB-4]",
+      "repository 계층은 Spring JdbcClient 또는 NamedParameterJdbcTemplate 중심으로 둔다. vector search, JSONB, upsert, content hash constraint는 명시 SQL이 단순하고 예측 가능하다. Spring Framework는 JdbcClient를 JDBC query/update용 통합 fluent API로 제공한다. [WEB-5]",
+      "CREATE EXTENSION IF NOT EXISTS vector를 첫 migration에 포함한다. pgvector는 vector(n)뿐 아니라 모델별 차원이 다를 때 vector 타입을 사용할 수 있고, 차원별 partial/expression index를 나중에 만들 수 있다. [WEB-1]",
+      "MVP vector 검색은 exact search를 기본으로 하고, embedding model/dimension이 안정화된 뒤 HNSW 또는 IVFFlat 인덱스를 migration으로 추가한다. pgvector 문서는 기본 exact search와 approximate index의 recall/speed trade-off를 구분한다. [WEB-1]",
+      "인증은 단일 local token/API key를 application config에서 읽고, 요청 header를 검증하는 얇은 filter/interceptor로 처리한다."
+    ],
+    "interfaces": [
+      "request/response DTO는 외부 식별자를 문자열로 받는다. 서버 생성 UUID는 보조 경로로만 사용한다.",
+      "모든 write API는 contentHash, sourcePath, artifactType, 관계 ID를 명시적으로 받는다.",
+      "POST /api/documents/snapshots는 같은 logical artifact와 contentHash에 대해 기존 snapshot을 반환하고, contentHash가 다르면 새 snapshotVersion을 만든다.",
+      "POST /api/document-chunks/bulk는 chunkHash 기준으로 idempotent하게 저장하고 embedding이 없으면 keyword 검색 대상만 된다.",
+      "POST /api/search/vector는 query embedding 배열, distance metric, limit, metadata filters를 받는다.",
+      "error response는 validation error, auth error, conflict, not found를 구분한다."
+    ],
+    "data_flow": [
+      "P2A CLI/GUI가 로컬 파일 산출물을 읽고 metadata와 contentHash를 계산한다.",
+      "클라이언트가 project와 iteration을 먼저 upsert한다.",
+      "클라이언트가 문서 스냅샷과 task graph를 저장하고, task graph 내 task를 bulk upsert한다.",
+      "run 종료 시 클라이언트가 run JSON과 artifact refs를 저장한다.",
+      "chunking과 embedding 생성은 클라이언트 또는 별도 외부 프로세스가 수행하고, 서버는 chunk content와 embedding 값을 저장한다.",
+      "검색 API는 filters를 먼저 적용한 뒤 keyword 또는 vector ranking을 수행한다."
+    ],
+    "dependencies": [
+      "Kotlin, Spring Boot Web, Validation, JDBC, Actuator",
+      "PostgreSQL JDBC driver",
+      "Flyway core와 PostgreSQL database module",
+      "PostgreSQL + pgvector Docker image for Compose",
+      "Testcontainers PostgreSQL module과 Spring Boot Testcontainers service connection 지원. Spring Boot는 Testcontainers service connection 정보를 자동으로 application connection details에 반영할 수 있다. [WEB-2]",
+      "Testcontainers PostgreSQL module은 pgvector/pgvector 이미지를 compatible image로 사용할 수 있다. [WEB-3]",
+      "AI SDK 또는 embedding API client는 포함하지 않는다."
+    ],
+    "edge_cases": [
+      "같은 sourcePath/artifactType에 같은 contentHash가 반복 저장되면 기존 snapshot을 반환한다.",
+      "같은 sourcePath/artifactType에 다른 contentHash가 저장되면 새 version으로 보존한다.",
+      "서로 다른 sourcePath에 같은 contentHash가 나타나면 content blob dedup은 가능하지만 document relationship은 별도로 유지한다.",
+      "embedding이 null인 chunk는 keyword 검색에만 포함한다.",
+      "query embedding dimension과 stored embedding dimension이 다르면 400 validation error 또는 같은 dimension 필터로 제한한다.",
+      "task graph가 없는 task 저장 요청은 400으로 거부하거나 explicit standalone flag가 있을 때만 허용한다.",
+      "로컬 파일 삭제는 MVP에서 서버 삭제로 자동 반영하지 않고 tombstone API는 후속으로 둔다.",
+      "sourcePath는 OS별 separator 차이를 줄이기 위해 normalizedPath와 rawSourcePath를 함께 보존한다."
+    ],
+    "verification": [
+      "schema migration test: Testcontainers pgvector PostgreSQL에서 Flyway migration, vector extension, 주요 unique index를 검증한다.",
+      "repository integration test: project/iteration/document/taskGraph/task/run/chunk upsert와 content hash idempotency를 검증한다.",
+      "API integration test: local token 인증, validation error, filter 조회, keyword 검색, vector 검색을 검증한다.",
+      "Docker Compose smoke test: 로컬 DB 시작과 서버 health check를 검증한다.",
+      "negative test: embedding dimension mismatch, 누락된 relation id, 잘못된 artifactType, 중복 logical key 처리.",
+      "no-AI guarantee: 서버 코드와 테스트에 외부 AI API 호출 경로가 없음을 검증한다."
+    ]
+  },
+  "clarifying_question_disposition": [
+    {
+      "id": "CQ-1",
+      "status": "assumed",
+      "rationale": "P2A 파일 산출물과 재동기화하려면 외부 ID가 우선이어야 하지만, 로컬 단일 사용자 MVP에서 일부 ID 누락을 허용하는 것이 API 사용성을 높인다.",
+      "affects": [
+        "interfaces",
+        "data_model_draft"
+      ],
+      "assumption": "서버는 클라이언트 제공 ID를 우선 수락하고, 누락된 ID에 대해서만 서버 UUID를 생성한다."
+    },
+    {
+      "id": "CQ-2",
+      "status": "assumed",
+      "rationale": "embedding은 외부 주입이고 모델이 아직 고정되지 않았으므로, 모델/차원 metadata를 저장하고 exact search를 먼저 제공하는 편이 MVP 목적에 맞다.",
+      "affects": [
+        "data_model_draft",
+        "architecture",
+        "interfaces"
+      ],
+      "assumption": "초기 vector 검색은 cosine distance를 기본값으로 두고, 모델/차원별 ANN index 최적화는 후속 단계로 미룬다."
+    },
+    {
+      "id": "CQ-3",
+      "status": "assumed",
+      "rationale": "로컬 파일이 원본이라는 제약을 유지하려면 서버가 임의로 최신 상태를 덮어쓰기보다 snapshot 이력을 보존해야 한다.",
+      "affects": [
+        "core_flows",
+        "data_model_draft",
+        "edge_cases"
+      ],
+      "assumption": "같은 sourcePath와 artifactType에 다른 content hash가 들어오면 새 snapshotVersion으로 저장한다."
+    }
+  ],
+  "open_decisions": [],
+  "approval": "draft",
+  "evidence": [
+    {
+      "source_id": "USER-1",
+      "title": "사용자 요구사항: P2A 로컬 산출물 저장 서버",
+      "url": "conversation://user-request/2026-06-26",
+      "used_for": "MVP 범위, 제약, 기술 스택, 비목표, 인증 및 테스트 요구사항 정의"
+    },
+    {
+      "source_id": "WEB-1",
+      "title": "pgvector README",
+      "url": "https://github.com/pgvector/pgvector",
+      "used_for": "pgvector extension, vector column, distance operator, exact/approximate search, HNSW/IVFFlat, variable dimension storage 전략 근거"
+    },
+    {
+      "source_id": "WEB-2",
+      "title": "Spring Boot Testcontainers Reference",
+      "url": "https://docs.spring.io/spring-boot/reference/testing/testcontainers.html",
+      "used_for": "Spring Boot Testcontainers service connection 기반 통합 테스트 전략 근거"
+    },
+    {
+      "source_id": "WEB-3",
+      "title": "Testcontainers for Java Postgres Module",
+      "url": "https://java.testcontainers.org/modules/databases/postgres/",
+      "used_for": "PostgreSQLContainer와 pgvector compatible image 사용 근거"
+    },
+    {
+      "source_id": "WEB-4",
+      "title": "Spring Boot Database Initialization",
+      "url": "https://docs.spring.io/spring-boot/how-to/data-initialization.html",
+      "used_for": "Flyway migration과 PostgreSQL database-specific module 사용 근거"
+    },
+    {
+      "source_id": "WEB-5",
+      "title": "Spring Framework JDBC Core Reference",
+      "url": "https://docs.spring.io/spring-framework/reference/data-access/jdbc/core.html",
+      "used_for": "JdbcClient 기반 명시 SQL repository 설계 근거"
+    }
+  ]
+}
