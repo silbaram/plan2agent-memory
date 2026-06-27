@@ -1,0 +1,38 @@
+{
+  "schema_version": "p2a.project_config.v1",
+  "packageManager": null,
+  "installCommand": null,
+  "testCommand": null,
+  "lintCommand": null,
+  "typecheckCommand": null,
+  "taskGraph": ".plan2agent/artifacts/p2a-local-artifact-store/gate-c-task-graph/task-graph.json",
+  "runTracking": {
+    "runsDir": ".plan2agent/runs",
+    "defaultIsolation": "none",
+    "branchPattern": "p2a/<taskId>-<runId>",
+    "worktreePattern": "../.worktrees/<taskId>-<runId>"
+  },
+  "teamBigFive": {
+    "enabled": false
+  },
+  "providerNativeCapabilities": {
+    "codex": {
+      "skills": "manual_check",
+      "customAgents": "manual_check",
+      "explicitSubagentPrompt": "manual_check"
+    },
+    "claude": {
+      "subagents": "manual_check",
+      "skills": "manual_check",
+      "agentTeams": "manual_check"
+    },
+    "gemini": {
+      "extensions": "manual_check",
+      "customCommands": "manual_check",
+      "geminiContext": "manual_check"
+    }
+  },
+  "notes": [
+    "TODO: fill install/test/lint/typecheck commands after project stack is chosen"
+  ]
+}

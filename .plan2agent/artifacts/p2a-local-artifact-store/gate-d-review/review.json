@@ -1,0 +1,31 @@
+{
+  "schema_version": "p2a.review.v1",
+  "projectId": "p2a-local-artifact-store",
+  "sourceSpec": ".plan2agent/artifacts/p2a-local-artifact-store/gate-b-spec/spec.json",
+  "sourceTaskGraph": ".plan2agent/artifacts/p2a-local-artifact-store/gate-c-task-graph/task-graph.json",
+  "blocking_issues": [],
+  "non_blocking_risks": [],
+  "missing_tests_or_acceptance_criteria": [],
+  "oversized_tasks": [],
+  "dependency_issues": [
+    "No blocking dependency issues found. Mechanical check: 17 tasks, no missing dependency IDs, no dependency cycles, and every task has acceptance criteria and sourceSpecRefs."
+  ],
+  "schema_or_gate_issues": [
+    "spec.approval is approved and spec.open_decisions is empty.",
+    "status.md includes the Gate B approval audit with Approved by, Approved at, Approved artifacts, and Approval note.",
+    "Intake CQ-1, CQ-2, and CQ-3 each appear exactly once in spec.clarifying_question_disposition.",
+    "No raw CQ-n id appears in spec.open_decisions.",
+    "Gate B Technology Reconnaissance is present in implementation-plan.md.",
+    "Gate B/C include the document_chunks, embedding_sets, chunk_embeddings storage model.",
+    "Gate B/C include RAG-oriented keyword search semantics.",
+    "Gate C task graph splits the former broad application use case, REST adapter, and integration test tasks into smaller execution units.",
+    "Gate C task graph includes normalizedPath/rawSourcePath tests and backend-opaque keyword score tests."
+  ],
+  "evidence_or_citation_issues": [
+    "No blocking evidence or citation issues found. WEB evidence entries include title, URL, and used_for fields, and material technology choices have current primary-source evidence."
+  ],
+  "recommended_changes": [
+    "Proceed with implementation from task-1.",
+    "Keep the split task boundaries during execution so reviews stay small and concrete."
+  ]
+}

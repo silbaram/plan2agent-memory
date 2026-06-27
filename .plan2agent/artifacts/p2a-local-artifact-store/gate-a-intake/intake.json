@@ -1,0 +1,96 @@
+{
+  "schema_version": "p2a.intake.v1",
+  "idea": "P2A 로컬 산출물 저장 서버를 개발한다. 로컬 md/json 파일 기반 구조는 원본으로 유지하되 Kotlin, Spring Boot, PostgreSQL, pgvector 기반 REST 저장 서버에 project, iteration, task, run, document 관계를 보존해 동기화하고 검색 기반을 만든다.",
+  "summary": "P2A가 생성하는 기획 문서, task graph, run 기록, proposal, review 같은 로컬 파일 산출물을 원본으로 유지하면서, 별도 로컬 저장 서버가 이를 보조 저장소로 동기화한다. MVP는 RAG 완성이나 자동 자기고도화 실행이 아니라 향후 RAG와 회고, proposal 생성 기반을 만들기 위한 관계형 저장, content hash 기반 중복 방지, keyword 검색, vector 검색 준비를 제공한다.",
+  "known_facts": [
+    "현재 P2A 산출물은 로컬 md/json 파일로 저장된다.",
+    "파일 기반 구조와 로컬 파일 원본 원칙은 유지한다.",
+    "저장 서버는 project, iteration, task, run, document 관계를 보존한다.",
+    "1차 목표는 RAG 완성이 아니라 향후 RAG와 자기고도화를 위한 저장 기반이다.",
+    "기술 스택은 Kotlin, Spring Boot, PostgreSQL, pgvector다.",
+    "서버는 REST API를 제공하고 P2A CLI/GUI가 나중에 연동할 수 있어야 한다.",
+    "서버에는 별도 웹 UI를 만들지 않고, P2A GUI/CLI가 git client처럼 local artifact working tree와 server canonical store를 동기화하는 공식 클라이언트로 발전한다.",
+    "MVP 범위는 프로젝트 등록, iteration 등록, 문서 스냅샷 저장, task graph 저장, task 저장, run 기록 저장, 문서 chunk 저장, content hash 기반 중복 방지다.",
+    "canonical projectId, iterationId, taskId, runId와 source*Id, artifactType, sourcePath 기준 조회가 필요하다.",
+    "keyword 검색이 필요하다.",
+    "vector 검색을 위한 pgvector 스키마 준비가 필요하다.",
+    "embedding 값은 초기에는 외부에서 주입 가능한 형태로만 저장하고 서버가 AI API를 직접 호출하지 않는다.",
+    "모든 자동 개선 적용은 하지 않고, 자기고도화는 후속 단계에서 proposal 생성까지만 고려한다.",
+    "서버는 P2A 하네스나 AI agent를 직접 실행하지 않는다.",
+    "초기에는 로컬 개발용 단일 사용자 기준이다.",
+    "인증은 단순 API key 또는 local token이면 충분하다.",
+    "Docker Compose로 PostgreSQL과 pgvector를 실행할 수 있어야 한다.",
+    "테스트는 Testcontainers 기반으로 작성한다."
+  ],
+  "assumptions": [
+    {
+      "id": "A-1",
+      "statement": "로컬 파일은 content source of truth로 유지하고, 서버는 동기화된 artifact의 canonical ID, version lineage, 관계, 검색 index를 관리하는 headless metadata/search store로 동작한다.",
+      "risk": "low",
+      "confirmation_needed": false
+    },
+    {
+      "id": "A-2",
+      "statement": "MVP 서버는 하나의 headless Spring Boot REST 애플리케이션과 PostgreSQL 데이터베이스로 구성하며, 서버 내장 웹 UI, queue, worker, agent runtime은 포함하지 않는다. 단, P2A GUI/CLI는 후속 공식 클라이언트로 발전해 git client처럼 local artifact working tree와 server canonical store의 status/diff/push/pull/conflict/history 기능을 제공한다.",
+      "risk": "low",
+      "confirmation_needed": false
+    },
+    {
+      "id": "A-3",
+      "statement": "서버는 모든 artifact에 canonical server ID를 부여하고, P2A CLI/GUI가 전달하는 projectId, iterationId, taskId, runId 같은 로컬/P2A 식별자는 sourceProjectId, sourceIterationId, sourceTaskId, sourceRunId 같은 source reference로 보존한다.",
+      "risk": "medium",
+      "confirmation_needed": false
+    },
+    {
+      "id": "A-4",
+      "statement": "embedding 모델과 차원은 초기에는 고정하지 않고, chunk별 embeddingModel, embeddingDimension, embeddingVersion, embedding 값을 함께 저장한다.",
+      "risk": "medium",
+      "confirmation_needed": false
+    },
+    {
+      "id": "A-5",
+      "statement": "keyword 검색은 MVP에서 PostgreSQL 기반 검색으로 제공하고, OpenSearch/Elasticsearch 같은 별도 검색 엔진은 후속 adapter 후보로만 둔다.",
+      "risk": "low",
+      "confirmation_needed": false
+    }
+  ],
+  "clarifying_questions": [
+    {
+      "id": "CQ-1",
+      "question": "P2A CLI/GUI가 모든 projectId, iterationId, taskId, runId를 외부에서 안정적으로 전달할 예정인가, 아니면 서버 생성 ID도 공식 계약으로 열어둘 것인가?",
+      "why_it_matters": "API upsert 방식, canonical ID와 source reference 경계, unique constraint, 조회 key 설계가 달라진다.",
+      "blocks": [
+        "API 계약 세부화",
+        "idempotent sync 세부 구현"
+      ]
+    },
+    {
+      "id": "CQ-2",
+      "question": "초기 vector 검색의 기본 distance metric은 cosine으로 두고 exact search를 먼저 제공하며, embedding 모델/차원/버전별 인덱스 최적화는 후속 단계로 미뤄도 되는가?",
+      "why_it_matters": "pgvector operator, index 전략, query DTO 기본값에 영향을 준다.",
+      "blocks": [
+        "vector search tuning",
+        "인덱스 최적화"
+      ]
+    },
+    {
+      "id": "CQ-3",
+      "question": "같은 sourcePath와 artifactType에 다른 content hash가 들어오면 기존 레코드를 덮어쓰지 않고 새 snapshot/version으로 저장하는 정책이면 충분한가?",
+      "why_it_matters": "로컬 파일 원본 원칙을 지키면서 충돌과 변경 이력을 어떻게 표현할지 결정한다.",
+      "blocks": [
+        "문서 스냅샷 버전 정책",
+        "중복 방지 정책"
+      ]
+    }
+  ],
+  "needs_user_decision": [],
+  "status": "ready_for_spec",
+  "evidence": [
+    {
+      "source_id": "USER-1",
+      "title": "사용자 요구사항: P2A 로컬 산출물 저장 서버",
+      "url": "conversation://user-request/2026-06-26",
+      "used_for": "MVP 범위, 제약, 기술 스택, 비목표, 인증 및 테스트 요구사항 정의"
+    }
+  ]
+}

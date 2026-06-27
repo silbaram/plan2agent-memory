@@ -1,0 +1,27 @@
+# Plan2Agent: plan artifacts, scripts, schemas, and source code are tracked.
+# Run logs (machine-specific paths/timestamps) and build outputs are not.
+
+# Plan2Agent run logs
+.plan2agent/runs/
+.plan2agent/artifacts/**/runs/
+
+# Dependencies / build outputs
+node_modules/
+build/
+dist/
+out/
+target/
+.gradle/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Claude Code local machine settings
+.claude/settings.local.json

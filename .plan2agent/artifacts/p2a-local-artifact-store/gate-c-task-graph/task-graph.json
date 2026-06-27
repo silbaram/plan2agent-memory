@@ -1,0 +1,434 @@
+{
+  "schema_version": "p2a.task_graph.v1",
+  "projectId": "p2a-local-artifact-store",
+  "version": "2026-06-27-gate-c-split-oversized-tasks",
+  "sourceSpec": ".plan2agent/artifacts/p2a-local-artifact-store/gate-b-spec/spec.json",
+  "tasks": [
+    {
+      "id": "task-1",
+      "title": "Bootstrap Kotlin Spring Boot service",
+      "description": "Create the Kotlin Spring Boot project skeleton, build configuration, package layout, application config, and local Docker Compose baseline for a single REST service.",
+      "status": "done",
+      "dependencies": [],
+      "acceptanceCriteria": [
+        "Gradle Kotlin DSL project is present with build.gradle.kts, settings.gradle.kts, Spring Boot Gradle plugin 4.1.0, Spring WebMVC, Validation, JDBC, Actuator, Flyway, PostgreSQL JDBC driver, and Testcontainers dependencies.",
+        "Java toolchain and runtime baseline are configured for Java 25 LTS, and Gradle uses 9.1.0 or later 9.x.",
+        "Dependency versions use Spring Boot managed versions/BOM by default, with direct version pins only for Gradle/Kotlin plugins, Docker image tags, libraries outside the Spring Boot BOM, or required security patches.",
+        "Application entrypoint and package skeleton exist for domain, application ports/use cases, REST adapters, PostgreSQL/search adapters, security adapter, and config.",
+        "Local config includes database connection settings and a configurable local token/API key without committing secrets.",
+        "Docker Compose defines PostgreSQL with pgvector for local development.",
+        "No server-rendered UI, static frontend bundle, or separate browser UI scaffold is added.",
+        "Spring WebFlux, R2DBC, Spring Data R2DBC, JPA/Hibernate, Spring Security, and OAuth security dependencies are not added for MVP."
+      ],
+      "targetArea": "project bootstrap",
+      "suggestedAgentPrompt": "Bootstrap the Kotlin Spring Boot service described by the approved spec. Add the Gradle project, package layout, application entrypoint, local configuration, and Docker Compose pgvector baseline. Keep the application core independent from Spring MVC/JDBC implementation details.",
+      "sourceSpecRefs": [
+        "implementation.dependencies",
+        "implementation.architecture",
+        "product.constraints"
+      ]
+    },
+    {
+      "id": "task-2",
+      "title": "Define domain model and application ports",
+      "description": "Define domain value objects, command/result types, inbound use case interfaces, and outbound port contracts for artifact storage, search, and deduplication.",
+      "status": "todo",
+      "dependencies": [
+        "task-1"
+      ],
+      "acceptanceCriteria": [
+        "Domain model covers projects, iterations, documents, task graphs, tasks, runs, document chunks, artifact types, content hashes, embeddings, canonical server IDs, and source references.",
+        "Inbound ports exist for all approved use cases without depending on REST DTOs or Spring MVC.",
+        "Outbound ports separate storage, artifact querying, keyword search, vector search, and content hash deduplication.",
+        "Core packages do not import PostgreSQL, pgvector SQL, JDBC, or REST adapter classes."
+      ],
+      "targetArea": "application core",
+      "suggestedAgentPrompt": "Implement the domain and application port layer for the local artifact store. Model the approved entities and use case contracts, keeping the application core independent from adapters and framework DTOs.",
+      "sourceSpecRefs": [
+        "product.data_model_draft",
+        "implementation.architecture",
+        "implementation.interfaces"
+      ]
+    },
+    {
+      "id": "task-3",
+      "title": "Add PostgreSQL and pgvector migrations",
+      "description": "Create Flyway migrations for pgvector extension, relational tables, JSONB columns, idempotency constraints, and baseline indexes.",
+      "status": "todo",
+      "dependencies": [
+        "task-1",
+        "task-2"
+      ],
+      "acceptanceCriteria": [
+        "First migration creates the vector extension with CREATE EXTENSION IF NOT EXISTS vector.",
+        "Tables exist for projects, iterations, documents, task_graphs, tasks, runs, document_chunks, embedding_sets, and chunk_embeddings with canonical server IDs and required relationship keys.",
+        "Unique constraints support source reference resolution, project/iteration upsert, logical document snapshot idempotency, task graph hash idempotency, task upsert, run upsert, chunkHash idempotency, embedding set uniqueness, and chunkId + embeddingSetId uniqueness.",
+        "Schema preserves snapshotVersion history for changed contentHash and keeps document_chunks separate from embedding_sets and chunk_embeddings.",
+        "embedding_sets stores embeddingModel, embeddingDimension, embeddingVersion, distanceMetric, and storageType; chunk_embeddings stores the pgvector value and optional embeddingHash.",
+        "Baseline indexes support artifact filters, keyword search, and exact vector search without requiring ANN indexes in MVP."
+      ],
+      "targetArea": "database schema",
+      "suggestedAgentPrompt": "Add Flyway migrations for the approved PostgreSQL/pgvector schema. Include relationship tables, JSONB metadata, content hash idempotency, snapshot versioning, keyword search support, embedding_sets, and chunk_embeddings for exact vector search.",
+      "sourceSpecRefs": [
+        "product.data_model_draft",
+        "implementation.architecture",
+        "implementation.edge_cases"
+      ]
+    },
+    {
+      "id": "task-4",
+      "title": "Implement project, iteration, document, and task graph adapters",
+      "description": "Implement PostgreSQL outbound adapters for project and iteration upsert, document snapshot storage, task graph storage, and task bulk upsert.",
+      "status": "todo",
+      "dependencies": [
+        "task-2",
+        "task-3"
+      ],
+      "acceptanceCriteria": [
+        "Adapters implement ProjectStorePort, IterationStorePort, DocumentSnapshotStorePort, TaskGraphStorePort, and TaskStorePort.",
+        "Document snapshot adapter returns an existing snapshot for the same logical artifact and contentHash.",
+        "Document snapshot adapter creates the next snapshotVersion when the same sourcePath and artifactType has a different contentHash.",
+        "Task graph and task adapters preserve graph JSON, dependencies, acceptance criteria, metadata, and source-to-canonical ID mappings.",
+        "Adapters keep SQL and JDBC concerns inside adapter/out/postgres."
+      ],
+      "targetArea": "postgres adapter",
+      "suggestedAgentPrompt": "Implement the PostgreSQL storage adapters for projects, iterations, document snapshots, task graphs, and tasks. Use explicit SQL through the repo's chosen JDBC abstraction and preserve idempotent sync behavior.",
+      "sourceSpecRefs": [
+        "implementation.architecture",
+        "implementation.data_flow",
+        "implementation.edge_cases"
+      ]
+    },
+    {
+      "id": "task-5",
+      "title": "Implement run and document chunk adapters",
+      "description": "Implement PostgreSQL outbound adapters for run records, bulk document chunk storage, embedding set resolution, and chunk embedding storage.",
+      "status": "todo",
+      "dependencies": [
+        "task-2",
+        "task-3"
+      ],
+      "acceptanceCriteria": [
+        "Run adapter stores run status, agentTool, timestamps, raw run JSON, and artifactRefs JSON.",
+        "Document chunk adapter supports bulk upsert by document relationship and chunkHash without storing vector values on document_chunks.",
+        "Chunks without embedding are accepted and remain eligible for keyword search.",
+        "EmbeddingSet adapter resolves or creates embedding sets by embeddingModel, embeddingDimension, embeddingVersion, and distanceMetric.",
+        "ChunkEmbedding adapter stores vector values in chunk_embeddings by chunkId + embeddingSetId only when provided by the caller.",
+        "New embedding models or versions can be stored as additional embedding sets and chunk_embeddings rows without overwriting existing chunk embeddings.",
+        "Repeated writes for the same chunkId + embeddingSetId are idempotent when embeddingHash matches and return conflict when a different vector/hash is supplied without an explicit overwrite policy.",
+        "Adapter rejects or clearly surfaces invalid relation references and source ID conflicts according to the port contract."
+      ],
+      "targetArea": "postgres adapter",
+      "suggestedAgentPrompt": "Implement run record, document chunk, embedding set, and chunk embedding persistence adapters. Support bulk chunk writes, nullable externally supplied embeddings, chunkHash idempotency, chunkId + embeddingSetId idempotency, and JSON metadata/artifact refs.",
+      "sourceSpecRefs": [
+        "product.data_model_draft",
+        "implementation.data_flow",
+        "implementation.edge_cases"
+      ]
+    },
+    {
+      "id": "task-6",
+      "title": "Implement write application use cases and transactions",
+      "description": "Implement write-side application services for project, iteration, document snapshot, task graph, task, run, and chunk persistence with transaction boundaries.",
+      "status": "todo",
+      "dependencies": [
+        "task-4",
+        "task-5"
+      ],
+      "acceptanceCriteria": [
+        "Use case implementations exist for project registration, iteration registration, document snapshot save, task graph save, task bulk save, run record save, and document chunk bulk save.",
+        "Write use cases enforce content hash idempotency, snapshotVersion creation, source reference resolution, relationship validation, and chunkHash idempotency before calling outbound adapters.",
+        "Run save handles run JSON and artifact refs in a single application transaction.",
+        "Document chunk save coordinates chunk persistence, embedding set resolution, and chunk embedding persistence without generating embeddings.",
+        "No write use case calls AI APIs, runs P2A harness/agent code, or references controller/persistence implementation classes."
+      ],
+      "targetArea": "application use cases",
+      "suggestedAgentPrompt": "Implement the write-side application use cases and transaction boundaries. Enforce content hash, snapshot versioning, relation validation, embedding-set persistence coordination, and no-AI rules while keeping the core independent from adapters.",
+      "sourceSpecRefs": [
+        "implementation.data_flow",
+        "implementation.interfaces",
+        "product.non_goals"
+      ]
+    },
+    {
+      "id": "task-7",
+      "title": "Implement artifact query and search use cases",
+      "description": "Implement read-side application services for artifact lookup, keyword search, and vector search around the approved port contracts.",
+      "status": "todo",
+      "dependencies": [
+        "task-4",
+        "task-5"
+      ],
+      "acceptanceCriteria": [
+        "Use case implementations exist for artifact lookup, keyword search, and vector search.",
+        "Artifact lookup applies canonical/source ID, artifactType, sourcePath, taskId, and runId filters through ArtifactQueryPort.",
+        "Keyword search use case validates non-empty q, limit, and filters before delegating to KeywordSearchPort.",
+        "Vector search use case validates query embedding presence, embeddingModel, embeddingDimension, embeddingVersion, distance metric, and limit before delegating to VectorSearchPort.",
+        "Read use cases return canonical/source metadata needed for P2A GUI/CLI history and RAG retrieval without depending on REST DTOs or persistence implementation classes."
+      ],
+      "targetArea": "application use cases",
+      "suggestedAgentPrompt": "Implement the read-side artifact query, keyword search, and vector search use cases. Keep validation and result contracts in the application layer while leaving backend-specific ranking and SQL details to outbound adapters.",
+      "sourceSpecRefs": [
+        "implementation.data_flow",
+        "implementation.interfaces",
+        "implementation.edge_cases"
+      ]
+    },
+    {
+      "id": "task-8",
+      "title": "Implement artifact query, keyword search, and vector search adapters",
+      "description": "Implement filter-based artifact lookup, RAG-oriented PostgreSQL lexical keyword search, and exact pgvector search behind replaceable search ports.",
+      "status": "todo",
+      "dependencies": [
+        "task-5",
+        "task-7"
+      ],
+      "acceptanceCriteria": [
+        "ArtifactQueryPort supports filters for canonical projectId, iterationId, taskId, runId, source IDs, artifactType, and sourcePath.",
+        "KeywordSearchPort implements deterministic lexical retrieval for RAG/history lookup, searching document_chunks.content as the primary target and documents.content, sourcePath, and artifactType as secondary targets.",
+        "Keyword search accepts q, limit, projectId, iterationId, artifactType, sourcePath, taskId, and runId filters, combines filters with AND semantics, and rejects empty or whitespace-only q with a validation error.",
+        "Keyword search returns chunkId, documentId, projectId, iterationId, artifactType, sourcePath, chunkIndex, content, backend-specific score, matchReason, and metadata.",
+        "MVP keyword search uses PostgreSQL case-insensitive normalized substring matching, but the port contract treats score as opaque and does not expose ILIKE as stable API behavior.",
+        "Keyword search ordering prioritizes stronger lexical matches, then latest snapshotVersion/timestamp, then chunkIndex when applicable.",
+        "VectorSearchPort performs cosine exact pgvector search from externally supplied query embeddings by default.",
+        "Vector search requires embeddingModel, embeddingDimension, and embeddingVersion or explicitly filters to the requested embedding set.",
+        "Vector search validates model/dimension/version compatibility and returns a clear validation error on mismatch.",
+        "Search implementation remains behind ports so OpenSearch or Elasticsearch can add BM25 ranking, analyzer, phrase search, highlight/snippet, facets, recency boost, or hybrid retrieval later without changing use case contracts."
+      ],
+      "targetArea": "search adapter",
+      "suggestedAgentPrompt": "Implement artifact filter lookup, RAG-oriented PostgreSQL lexical keyword search, and exact pgvector vector search behind the approved search ports. Keep backend-specific scoring and PostgreSQL matching behavior inside the adapter layer.",
+      "sourceSpecRefs": [
+        "product.goals",
+        "implementation.architecture",
+        "implementation.edge_cases"
+      ]
+    },
+    {
+      "id": "task-9",
+      "title": "Implement write REST API adapters",
+      "description": "Implement REST controllers, request/response DTOs, validation, and error mapping for write endpoints.",
+      "status": "todo",
+      "dependencies": [
+        "task-6"
+      ],
+      "acceptanceCriteria": [
+        "REST endpoints exist for project upsert, iteration upsert, document snapshots, task graph save, tasks bulk save, runs, and document chunks bulk save.",
+        "Controllers map HTTP DTOs to write application commands/results without directly calling persistence adapters.",
+        "Validation covers required IDs, contentHash, sourcePath, artifactType, chunk content, embedding arrays, embedding metadata, and relation references.",
+        "Write error responses distinguish validation error, auth error placeholder, conflict, and not found.",
+        "Write API responses expose canonical server IDs and local/P2A source IDs together where applicable.",
+        "Write API responses include contentHash, snapshotVersion, lineage, timestamps, sourcePath, and source reference metadata needed for P2A GUI/CLI sync views."
+      ],
+      "targetArea": "rest adapter",
+      "suggestedAgentPrompt": "Implement REST inbound adapters for write endpoints only. Add DTOs, validation, response mapping, and error handling while routing all behavior through write use case ports.",
+      "sourceSpecRefs": [
+        "product.screens_or_interfaces",
+        "implementation.interfaces",
+        "implementation.data_flow"
+      ]
+    },
+    {
+      "id": "task-10",
+      "title": "Implement query and search REST API adapters",
+      "description": "Implement REST controllers, request/response DTOs, validation, and error mapping for artifact lookup, keyword search, vector search, and health exposure.",
+      "status": "todo",
+      "dependencies": [
+        "task-7",
+        "task-8"
+      ],
+      "acceptanceCriteria": [
+        "REST endpoints exist for artifact lookup, keyword search, vector search, and health.",
+        "Controllers map HTTP DTOs to query/search application commands/results without directly calling persistence adapters.",
+        "Validation covers keyword q, embedding arrays, embeddingModel, embeddingDimension, embeddingVersion, distance metric, limit, and metadata filters.",
+        "Query/search error responses distinguish validation error, auth error placeholder, conflict, and not found.",
+        "Artifact lookup responses include canonical/source IDs, contentHash, snapshotVersion, lineage, timestamps, sourcePath, and source reference metadata.",
+        "Keyword search responses include RAG-ready chunk/document content, matchReason, opaque score, and canonical/source metadata."
+      ],
+      "targetArea": "rest adapter",
+      "suggestedAgentPrompt": "Implement REST inbound adapters for query and search endpoints only. Preserve the backend-agnostic keyword score contract and route all behavior through query/search use case ports.",
+      "sourceSpecRefs": [
+        "product.screens_or_interfaces",
+        "implementation.interfaces",
+        "implementation.data_flow"
+      ]
+    },
+    {
+      "id": "task-11",
+      "title": "Implement local token security adapter",
+      "description": "Add simple local token or API key authentication as an adapter, with configuration and test-friendly behavior.",
+      "status": "todo",
+      "dependencies": [
+        "task-9",
+        "task-10"
+      ],
+      "acceptanceCriteria": [
+        "Requests require the configured local token/API key header for protected API endpoints.",
+        "Health check remains usable for local development according to the chosen configuration.",
+        "Missing or invalid token returns a distinct auth error response.",
+        "Token configuration is externalized and no secret value is committed.",
+        "Authentication is implemented with a custom servlet Filter or HandlerInterceptor rather than Spring Security.",
+        "Security code stays in adapter/out/security or equivalent adapter package and does not leak into application core."
+      ],
+      "targetArea": "security adapter",
+      "suggestedAgentPrompt": "Implement the simple local token/API key authentication adapter. Keep it configurable, local-development friendly, and isolated from the application core.",
+      "sourceSpecRefs": [
+        "product.constraints",
+        "implementation.architecture",
+        "implementation.interfaces"
+      ]
+    },
+    {
+      "id": "task-12",
+      "title": "Add core use case and architecture tests",
+      "description": "Add tests for application core behavior, idempotency rules, relation validation, query/search validation, and adapter boundary constraints.",
+      "status": "todo",
+      "dependencies": [
+        "task-6",
+        "task-7"
+      ],
+      "acceptanceCriteria": [
+        "Use case tests run with mock outbound ports and do not require PostgreSQL.",
+        "Tests cover content hash idempotency, snapshotVersion increment, source reference resolution, relation validation, run artifact refs, chunk embedding absence, keyword query validation, vector query validation, and no-AI behavior.",
+        "Architecture test verifies application core does not import Spring MVC, JDBC, PostgreSQL, pgvector, or adapter packages.",
+        "Negative cases cover missing relation IDs, invalid artifactType, duplicate logical keys, conflicting source ID mappings, empty keyword q, and embedding model/dimension/version mismatch."
+      ],
+      "targetArea": "tests",
+      "suggestedAgentPrompt": "Add focused application core tests and architecture boundary tests. Verify idempotency, snapshot versioning, relation validation, query/search validation, no-AI guarantees, and dependency direction.",
+      "sourceSpecRefs": [
+        "implementation.verification",
+        "implementation.edge_cases",
+        "product.success_criteria"
+      ]
+    },
+    {
+      "id": "task-13",
+      "title": "Add PostgreSQL migration and storage integration tests",
+      "description": "Add Testcontainers integration tests for Flyway migration, PostgreSQL storage adapters, idempotency, source path normalization, and embedding persistence.",
+      "status": "todo",
+      "dependencies": [
+        "task-4",
+        "task-5"
+      ],
+      "acceptanceCriteria": [
+        "Testcontainers starts a pgvector-compatible PostgreSQL image and runs Flyway migrations.",
+        "Migration tests verify vector extension, key tables, canonical/source ID columns, unique constraints, and indexes.",
+        "Adapter tests cover project, iteration, document, task graph, task, run, chunk persistence, and source-to-canonical ID mapping.",
+        "Storage tests cover contentHash idempotency, snapshotVersion changes, chunkHash idempotency, and repeated writes not creating duplicate snapshots or chunks.",
+        "Embedding persistence tests cover repeated chunkHash writes, multiple embedding sets for the same chunk, chunkId + embeddingSetId idempotency, and conflict on different embeddingHash for the same chunk embedding.",
+        "Path tests cover rawSourcePath preservation, normalizedPath lookup, OS path separator normalization, and duplicate snapshot prevention for equivalent source paths."
+      ],
+      "targetArea": "integration tests",
+      "suggestedAgentPrompt": "Add Testcontainers integration tests for migrations and PostgreSQL storage adapters. Verify schema, source reference mapping, path normalization, idempotent writes, and embedding-set persistence using a pgvector-compatible image.",
+      "sourceSpecRefs": [
+        "implementation.dependencies",
+        "implementation.verification",
+        "implementation.edge_cases",
+        "product.success_criteria"
+      ]
+    },
+    {
+      "id": "task-14",
+      "title": "Add keyword and vector search integration tests",
+      "description": "Add Testcontainers integration tests for PostgreSQL keyword search and pgvector exact vector search semantics.",
+      "status": "todo",
+      "dependencies": [
+        "task-8",
+        "task-13"
+      ],
+      "acceptanceCriteria": [
+        "Search tests cover keyword filters, keyword target fields, case-insensitive lexical matching, empty keyword validation, keyword result metadata, and backend-opaque score behavior.",
+        "Keyword search tests prove document_chunks.content is the primary target and documents.content, sourcePath, and artifactType are secondary targets.",
+        "Keyword search tests prove filters combine with AND semantics and do not rely on PostgreSQL ILIKE as a stable API contract.",
+        "Vector search tests cover cosine ranking, empty embedding handling, embedding set filtering, and model/dimension/version mismatch behavior.",
+        "Search adapter tests preserve the port boundary so OpenSearch/Elasticsearch adapters can be added later without changing application use cases."
+      ],
+      "targetArea": "integration tests",
+      "suggestedAgentPrompt": "Add Testcontainers integration tests for keyword and vector search adapters. Verify RAG-oriented lexical retrieval, backend-opaque score behavior, exact pgvector ranking, and embedding set validation.",
+      "sourceSpecRefs": [
+        "implementation.dependencies",
+        "implementation.verification",
+        "implementation.edge_cases",
+        "product.success_criteria"
+      ]
+    },
+    {
+      "id": "task-15",
+      "title": "Add API integration and smoke tests",
+      "description": "Add end-to-end API tests for authentication, validation, writes, queries, search, and local Docker Compose smoke behavior.",
+      "status": "todo",
+      "dependencies": [
+        "task-9",
+        "task-10",
+        "task-11",
+        "task-13",
+        "task-14"
+      ],
+      "acceptanceCriteria": [
+        "API tests cover all write endpoints, artifact filter lookup, keyword search, vector search, and health check.",
+        "API tests verify auth success, auth failure, validation errors, conflicts, and not found behavior.",
+        "API tests verify sync metadata needed by the P2A GUI/CLI is present in relevant responses.",
+        "A smoke test or documented command verifies the app can connect to Docker Compose PostgreSQL and report health.",
+        "End-to-end tests demonstrate an idempotent sync flow from project to iteration to document/task graph/task/run/chunk."
+      ],
+      "targetArea": "api tests",
+      "suggestedAgentPrompt": "Add API-level integration tests and a Docker Compose smoke path. Verify auth, validation, all approved endpoints, search, health, and a full idempotent sync flow.",
+      "sourceSpecRefs": [
+        "product.screens_or_interfaces",
+        "implementation.verification",
+        "product.success_criteria"
+      ]
+    },
+    {
+      "id": "task-16",
+      "title": "Document REST contract and local development workflow",
+      "description": "Document endpoint contracts, request examples, idempotency behavior, Docker Compose startup, test execution, and non-goals.",
+      "status": "todo",
+      "dependencies": [
+        "task-9",
+        "task-10",
+        "task-11",
+        "task-15"
+      ],
+      "acceptanceCriteria": [
+        "Documentation is written in Korean while preserving API paths, JSON field names, class names, and package names in their original form.",
+        "Documentation lists all REST endpoints, required headers, core request fields, and response semantics.",
+        "Documentation explains content hash idempotency, snapshotVersion behavior, rawSourcePath/normalizedPath behavior, chunk embeddings, keyword search semantics for RAG/history lookup, vector search semantics, and search filters.",
+        "Documentation explains that P2A GUI/CLI is the git-like sync client for status, diff, push, pull, conflict resolution, and history.",
+        "Local run guide covers Docker Compose startup, application configuration, health check, and test commands.",
+        "Documentation states that local files remain the source of truth and the server does not run AI APIs, agents, or P2A harnesses."
+      ],
+      "targetArea": "documentation",
+      "suggestedAgentPrompt": "Write concise developer documentation for the REST contract and local workflow. Include endpoint examples, idempotency semantics, path normalization, Docker Compose setup, tests, and MVP non-goals.",
+      "sourceSpecRefs": [
+        "product.screens_or_interfaces",
+        "product.constraints",
+        "product.non_goals"
+      ]
+    },
+    {
+      "id": "task-17",
+      "title": "Run final verification and readiness review",
+      "description": "Run the full verification suite, check architecture boundaries and no-AI constraints, and record remaining risks before handoff.",
+      "status": "todo",
+      "dependencies": [
+        "task-12",
+        "task-15",
+        "task-16"
+      ],
+      "acceptanceCriteria": [
+        "Full test suite passes or any failure is documented with a concrete blocking reason.",
+        "Architecture boundary and no-AI guarantee checks pass.",
+        "Docker Compose smoke path and health check are verified.",
+        "Implementation is reviewed against Gate B success criteria with any residual risks documented.",
+        "No Gate B non-goal is implemented accidentally, including server-side web UI or separate browser UI."
+      ],
+      "targetArea": "verification",
+      "suggestedAgentPrompt": "Perform final verification for the local artifact store. Run tests and smoke checks, confirm architecture/no-AI constraints, compare implementation against Gate B success criteria, and document residual risks.",
+      "sourceSpecRefs": [
+        "product.success_criteria",
+        "implementation.verification",
+        "product.non_goals"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,410 @@
+{
+  "schema_version": "p2a.spec.v1",
+  "project_id": "p2a-local-artifact-store",
+  "source_intake": ".plan2agent/artifacts/p2a-local-artifact-store/gate-a-intake/intake.json",
+  "product": {
+    "problem": "P2A는 계획 문서, task graph, run 기록, proposal, review를 로컬 md/json 파일로 남기지만, 파일만으로는 project, iteration, task, run, document 사이의 관계형 조회와 검색, 향후 RAG/회고 기반 자기고도화 준비가 어렵다. 이 서버는 로컬 파일을 원본으로 유지하면서 산출물을 동기화하고 검색하기 위한 보조 저장소를 제공한다.",
+    "target_users": [
+      "로컬에서 P2A CLI/GUI를 사용하는 단일 개발자",
+      "향후 P2A GUI 또는 CLI 동기화 기능",
+      "P2A run과 planning artifact를 회고하거나 검색하려는 운영자"
+    ],
+    "goals": [
+      "project, iteration, task, run, document 관계를 보존한다.",
+      "각 artifact에 canonical server ID와 version lineage를 부여하고, 로컬/P2A ID는 source reference로 보존한다.",
+      "P2A GUI/CLI가 git client처럼 local artifact working tree와 server canonical store를 동기화할 수 있는 저장/조회 기반을 제공한다.",
+      "문서 스냅샷, task graph, task, run, chunk를 REST API로 저장한다.",
+      "content hash 기반으로 중복 저장을 방지하고 idempotent sync를 지원한다.",
+      "canonical projectId, iterationId, taskId, runId와 source*Id, artifactType, sourcePath 기준 조회를 제공한다.",
+      "RAG/회고용 이전 이력 조회를 위해 deterministic lexical retrieval인 keyword 검색과 pgvector 기반 vector 검색 준비를 제공한다.",
+      "저장소와 검색 backend를 port/adapter 경계로 분리해 pgvector에서 OpenSearch/Elasticsearch 같은 후속 검색 adapter로 확장할 수 있게 한다.",
+      "embedding은 외부에서 주입된 값을 저장하고 서버 내부에서 AI API를 호출하지 않는다.",
+      "Docker Compose와 Testcontainers 기반 로컬 개발/검증 흐름을 제공한다."
+    ],
+    "non_goals": [
+      "로컬 md/json 파일을 대체하지 않는다.",
+      "P2A 하네스 또는 AI agent를 직접 실행하지 않는다.",
+      "embedding 생성, RAG 응답 생성, 자동 개선 적용은 하지 않는다.",
+      "서버 내장 웹 UI 또는 별도 브라우저 UI를 만들지 않는다.",
+      "다중 사용자 권한, OAuth, cloud deployment, queue 기반 ingestion은 MVP 범위가 아니다.",
+      "proposal 자동 적용은 MVP 범위가 아니며 후속 단계에서도 proposal 생성까지만 고려한다."
+    ],
+    "core_flows": [
+      "클라이언트가 프로젝트를 등록하면 서버는 canonical projectId를 부여하고, 클라이언트가 보낸 로컬/P2A projectId는 sourceProjectId로 보존한다.",
+      "클라이언트가 iteration을 등록하면 서버는 canonical iterationId를 부여하고, sourceIterationId와 canonical projectId를 연결한다.",
+      "클라이언트가 sourcePath, artifactType, contentHash, raw content 또는 metadata를 포함한 문서 스냅샷을 저장한다.",
+      "클라이언트가 task graph JSON과 graph 내 task 목록을 저장한다.",
+      "클라이언트가 task별 run 기록과 산출물 참조를 저장한다.",
+      "클라이언트가 문서 chunk와 선택적 embedding을 bulk 저장한다.",
+      "클라이언트가 관계형 필터 또는 keyword/vector query로 산출물을 조회한다."
+    ],
+    "screens_or_interfaces": [
+      "POST /api/projects: 프로젝트 등록 또는 upsert",
+      "POST /api/projects/{projectId}/iterations: iteration 등록 또는 upsert",
+      "POST /api/documents/snapshots: 문서/산출물 스냅샷 저장",
+      "POST /api/task-graphs: task graph 저장",
+      "POST /api/tasks/bulk: task 저장 또는 task graph에서 추출한 task upsert",
+      "POST /api/runs: run 기록 저장",
+      "POST /api/document-chunks/bulk: chunk와 선택적 embedding 저장",
+      "GET /api/artifacts: canonical projectId, iterationId, taskId, runId, source*Id, artifactType, sourcePath 필터 조회",
+      "GET /api/search/keyword: RAG 후보 검색용 keyword 검색. query q, limit, projectId, iterationId, artifactType, sourcePath, taskId, runId 필터를 받고, chunkId, documentId, projectId, iterationId, artifactType, sourcePath, chunkIndex, content, backend-specific score, matchReason, metadata를 반환한다.",
+      "POST /api/search/vector: 외부 주입 query embedding 기반 vector 검색. 요청은 embeddingModel, embeddingDimension, embeddingVersion을 포함하고 같은 embedding set 안에서 검색한다.",
+      "GET /actuator/health: 로컬 개발용 health check",
+      "서버 내장 화면은 제공하지 않는다. status, diff, push, pull, conflict resolution, history 화면은 후속 P2A GUI/CLI 기능으로 제공한다."
+    ],
+    "data_model_draft": [
+      "projects: projectId(canonical server UUID), sourceProjectId, name, rootPath, metadata, timestamps",
+      "iterations: iterationId(canonical server UUID), sourceIterationId, projectId, label, status, metadata, timestamps",
+      "documents: documentId(canonical server UUID), sourceDocumentId, projectId, iterationId, artifactType, sourcePath, contentHash, snapshotVersion, content, metadata, timestamps",
+      "task_graphs: taskGraphId(canonical server UUID), sourceTaskGraphId, projectId, iterationId, sourceDocumentId, graphHash, graphJson, timestamps",
+      "tasks: taskId(canonical server UUID), sourceTaskId, projectId, iterationId, taskGraphId, title, status, targetArea, dependenciesJson, acceptanceCriteriaJson, metadata",
+      "runs: runId(canonical server UUID), sourceRunId, projectId, iterationId, taskId, status, agentTool, startedAt, finishedAt, runJson, artifactRefsJson",
+      "document_chunks: chunkId(canonical server UUID), sourceChunkId, documentId, projectId, iterationId, taskId, runId, artifactType, sourcePath, chunkIndex, chunkHash, content, tokenEstimate, metadata",
+      "embedding_sets: embeddingSetId(canonical server UUID), embeddingModel, embeddingDimension, embeddingVersion, distanceMetric, storageType, metadata, timestamps. unique key는 embeddingModel + embeddingDimension + embeddingVersion + distanceMetric이다.",
+      "chunk_embeddings: chunkEmbeddingId(canonical server UUID), chunkId, embeddingSetId, embedding vector, embeddingHash(optional), metadata, timestamps. unique key는 chunkId + embeddingSetId다.",
+      "content hash 중복 방지는 logical scope와 hash를 함께 사용한다. 같은 sourcePath/artifactType에 다른 hash가 들어오면 overwrite가 아니라 새 snapshotVersion을 만든다.",
+      "서버 내부 관계, 검색, 회고, 자기고도화 metadata는 canonical server ID와 version lineage를 기준으로 삼고, source*Id와 sourcePath는 로컬 파일 세계로 되돌아가기 위한 reference로 사용한다.",
+      "embedding은 document_chunks에 직접 저장하지 않고 embedding_sets와 chunk_embeddings로 분리한다. 모델 전환과 재색인을 위해 embeddingModel, embeddingDimension, embeddingVersion, distanceMetric으로 embedding set을 구분하고, vector 검색은 기본적으로 같은 embedding set 안에서만 수행한다."
+    ],
+    "external_integrations": [
+      "PostgreSQL with pgvector: 관계형 저장과 vector 컬럼을 한 데이터베이스에 둔다. pgvector는 Postgres 클라이언트와 함께 사용할 수 있고 vector distance operator와 HNSW/IVFFlat 인덱스를 제공한다. [WEB-1]",
+      "P2A CLI/GUI: 후속 공식 sync client다. git client처럼 local artifact working tree와 server canonical store의 status, diff, push, pull, conflict resolution, history를 제공하며, MVP 서버는 이를 위한 REST API와 metadata를 제공한다.",
+      "Docker Compose: 로컬 PostgreSQL + pgvector 실행을 제공한다. Compose는 services, networks, volumes를 단일 YAML configuration file로 관리하고 단일 명령으로 시작할 수 있으므로 MVP의 로컬 DB 재현성에 사용한다. [WEB-11]",
+      "Testcontainers: 통합 테스트에서 pgvector 이미지 기반 PostgreSQL을 실행한다. [WEB-3]",
+      "OpenSearch/Elasticsearch: MVP 외부 연동은 아니며, 향후 KeywordSearchPort 또는 VectorSearchPort adapter 후보로만 고려한다. keyword 검색 API는 문서 검색 계약으로 정의해 후속 BM25 ranking, 한글 analyzer, phrase search, highlight/snippet, faceted filtering, recency boost, hybrid retrieval로 고도화할 수 있게 한다.",
+      "AI API: 서버가 직접 호출하지 않는다."
+    ],
+    "success_criteria": [
+      "Docker Compose로 pgvector가 활성화된 PostgreSQL을 띄우고 서버가 연결된다.",
+      "프로젝트, iteration, document, task graph, task, run, chunk 저장 API가 idempotent하게 동작한다.",
+      "동일 contentHash의 중복 저장이 추가 blob/chunk 중복을 만들지 않는다.",
+      "요구된 필터 기준 조회가 가능하다.",
+      "API 응답과 조회 결과가 canonical server ID와 로컬/P2A source ID를 함께 노출한다.",
+      "서버 내장 웹 UI 없이도 P2A GUI/CLI가 sync 상태와 문서 history를 구현할 수 있는 hash, lineage, source reference metadata가 API에 포함된다.",
+      "keyword 검색이 RAG/회고용 deterministic lexical retrieval로 동작한다. document_chunks.content를 주 대상으로 하고 documents.content, sourcePath, artifactType을 보조 대상으로 검색하며, 정확한 용어, 파일 경로, API path, 에러 문자열, 과거 결정 문구를 찾을 수 있다.",
+      "외부에서 embedding과 embeddingModel/embeddingDimension/embeddingVersion을 주입하면 서버가 embedding set을 resolve/create하고 chunk_embeddings에 저장하며, vector 검색 API가 같은 embedding set의 chunk를 cosine exact search로 반환한다.",
+      "application core가 Spring MVC, JDBC, PostgreSQL, pgvector 구현 세부에 직접 의존하지 않는다.",
+      "Testcontainers 기반 통합 테스트가 migration, 저장, 조회, 검색, 중복 방지 경로를 검증한다."
+    ],
+    "constraints": [
+      "로컬 파일이 원본이고 서버는 보조 저장소지만, 서버는 동기화된 artifact의 canonical ID, version lineage, 관계, 검색 index를 관리한다.",
+      "서버는 headless REST service로 유지하고 화면과 동기화 UX는 P2A GUI/CLI가 담당한다.",
+      "서버는 P2A 하네스와 AI agent를 실행하지 않는다.",
+      "초기 단일 사용자 로컬 개발용이다.",
+      "인증은 단순 API key 또는 local token이다.",
+      "서버는 embedding을 생성하지 않고 외부 입력만 저장한다.",
+      "자동 개선 적용은 하지 않는다.",
+      "아키텍처는 pragmatic hexagonal로 설계하고, Spring Boot, PostgreSQL, pgvector, 인증 구현은 adapter로 격리한다.",
+      "task graph 산출물은 approved spec을 기준으로 생성하거나 갱신한다.",
+      "프로젝트 문서, REST contract, local development workflow 문서는 한글로 작성한다. API path, JSON field, class/package 이름은 구현 정확성을 위해 원문 표기를 유지한다."
+    ]
+  },
+  "implementation": {
+    "architecture": [
+      "Kotlin + Spring Boot 4.1.0 stable 기반의 Spring WebMVC REST 애플리케이션 하나로 시작하되, 레이어드 아키텍처가 아니라 pragmatic hexagonal architecture로 구성한다. Java toolchain과 runtime baseline은 Java 25 LTS로 고정하고, Gradle은 Java 25 실행과 toolchain을 지원하는 9.1.0 이상 9.x를 기준으로 둔다. 빌드는 Gradle Kotlin DSL을 사용하며 루트 빌드 파일은 build.gradle.kts, 설정 파일은 settings.gradle.kts로 둔다. Spring Boot Gradle plugin은 Spring Boot runtime과 같은 stable 버전인 org.springframework.boot 4.1.0을 사용한다. 핵심 패키지는 domain, application/usecase, application/port/in, application/port/out, adapter/in/rest, adapter/out/postgres, adapter/out/search, adapter/out/security, config로 나눈다. [WEB-6] [WEB-7] [WEB-12] [WEB-14] [WEB-15] [WEB-16]",
+      "서버는 headless REST service로 유지한다. 서버 내장 웹 UI, server-side rendered page, static frontend bundle은 만들지 않고, 화면과 sync UX는 P2A GUI/CLI가 담당한다.",
+      "application core는 P2A 산출물 저장/검색 규칙만 알고 Spring MVC, JDBC, PostgreSQL, pgvector SQL, HTTP DTO에 직접 의존하지 않는다.",
+      "domain model은 canonical server ID와 source reference를 분리한다. 서버 내부 관계와 lineage는 canonical ID를 기준으로 하고, 로컬/P2A ID와 sourcePath는 source reference로 보존한다.",
+      "inbound port는 use case 단위로 둔다: RegisterProjectUseCase, RegisterIterationUseCase, SaveDocumentSnapshotUseCase, SaveTaskGraphUseCase, SaveTasksUseCase, SaveRunRecordUseCase, SaveDocumentChunksUseCase, FindArtifactsUseCase, KeywordSearchUseCase, VectorSearchUseCase.",
+      "outbound port는 저장, source-to-canonical ID 해석, 검색 backend를 분리한다: ProjectStorePort, IterationStorePort, DocumentSnapshotStorePort, TaskGraphStorePort, TaskStorePort, RunRecordStorePort, DocumentChunkStorePort, ArtifactQueryPort, KeywordSearchPort, VectorSearchPort, ContentHashDeduplicationPort, SourceReferenceResolutionPort.",
+      "REST controller는 Spring WebMVC 기반 inbound adapter로만 동작하고 request/response DTO를 command/result 객체로 변환한다. 인증 filter/interceptor도 adapter 영역에 둔다. Spring Boot 문서는 servlet 기반 web application에서 Spring MVC 또는 Jersey auto-configuration을 사용할 수 있음을 설명하고, Spring MVC는 @RestController/@RequestMapping 기반 HTTP request 처리를 제공한다. [WEB-8]",
+      "MVP에서는 Spring WebFlux와 R2DBC를 사용하지 않는다. WebFlux는 non-blocking, Reactive Streams back pressure 기반 reactive-stack framework이고, r2dbc-postgresql도 PostgreSQL용 R2DBC 구현을 제공하지만, 이 서버의 MVP는 로컬 단일 사용자 sync/write/query 중심이며 streaming/backpressure가 핵심 요구사항이 아니다. Flyway migration, pgvector SQL, JSONB, upsert, constraint, transaction 처리의 단순성을 우선해 WebMVC + JDBC를 선택한다. [WEB-9] [WEB-13]",
+      "초기 outbound adapter는 PostgreSQL 저장 adapter와 PgVector 검색 adapter다. 향후 OpenSearch/Elasticsearch를 붙일 때는 KeywordSearchPort/VectorSearchPort 구현만 추가하거나 교체한다.",
+      "keyword 검색은 RAG/회고용 deterministic lexical retrieval 계약으로 정의한다. MVP adapter는 PostgreSQL 기반 case-insensitive normalized substring search로 시작하되, application core는 KeywordSearchPort에만 의존하고 검색 점수는 backend-specific opaque score로 취급한다. 검색 대상은 document_chunks.content를 주 대상으로 하고 documents.content, sourcePath, artifactType을 보조 대상으로 둔다. 의미 기반 유사 검색은 VectorSearchPort가 담당하고, 후속 RAG retrieval 단계에서는 keyword result와 vector result를 합치는 hybrid retrieval로 확장할 수 있다.",
+      "persistence는 PostgreSQL을 기준으로 두고, schema migration은 Flyway로 관리한다. Spring Boot는 PostgreSQL 같은 외부 DB에서 Flyway 모듈을 사용할 때 database-specific module을 요구하므로 flyway-database-postgresql을 포함한다. [WEB-4]",
+      "PostgreSQL adapter 내부는 Spring JdbcClient를 우선 사용하고, JdbcClient로 표현하기 어려운 batch/custom SQL 세부는 NamedParameterJdbcTemplate 또는 JdbcTemplate로 보완한다. vector search, JSONB, upsert, content hash constraint는 명시 SQL이 단순하고 예측 가능하다. Spring Framework는 JdbcClient를 JdbcTemplate과 NamedParameterJdbcTemplate의 unified client API로 제공한다. [WEB-5]",
+      "CREATE EXTENSION IF NOT EXISTS vector를 첫 migration에 포함한다. pgvector는 vector(n)뿐 아니라 모델별 차원이 다를 때 vector 타입을 사용할 수 있고, 차원별 partial/expression index를 나중에 만들 수 있다. [WEB-1]",
+      "MVP vector 검색은 cosine exact search를 기본으로 한다. embedding은 embeddingModel, embeddingDimension, embeddingVersion으로 embedding set을 구분하고, 검색은 기본적으로 같은 embedding set 안에서만 수행한다. 모델과 차원이 안정된 뒤 HNSW 또는 IVFFlat ANN index를 모델/차원별 partial 또는 expression index migration으로 추가한다. pgvector 문서는 기본 exact search와 approximate index의 recall/speed trade-off를 구분한다. [WEB-1]",
+      "chunk 저장 모델은 document_chunks, embedding_sets, chunk_embeddings의 3-table 구조로 확정한다. document_chunks는 chunk identity, content, source reference, chunkHash만 책임지고, embedding metadata와 vector value는 embedding_sets와 chunk_embeddings에 저장한다. embedding_sets는 embeddingModel + embeddingDimension + embeddingVersion + distanceMetric으로 unique하게 식별하고, chunk_embeddings는 chunkId + embeddingSetId로 unique하게 식별한다. 이 구조는 chunkHash idempotency와 같은 chunk의 여러 embedding set 보존 요구를 동시에 만족한다.",
+      "인증은 단일 local token/API key를 application config에서 읽고, 요청 header를 검증하는 custom servlet Filter 또는 HandlerInterceptor로 처리한다. MVP에서는 Spring Security 전체를 사용하지 않는다. spring-boot-starter-security, Spring Security filter chain, session login, OAuth, RBAC는 후속 다중 사용자/권한 모델이 필요해질 때 별도 Technology Reconnaissance와 함께 재검토한다.",
+      "Gate B Technology Reconnaissance: Spring Boot 4.1.0 stable + Kotlin + Java 25 LTS + Gradle Kotlin DSL + Spring Boot Gradle plugin 4.1.0 + Spring WebMVC + Spring JDBC JdbcClient를 MVP 표준으로 선택한다. WebFlux/R2DBC/JPA/Hibernate/Spring Security는 MVP에서 제외하고, reactive streaming, 고동시성 long-lived endpoint, 다중 사용자/권한 요구가 생길 때 후속 adapter 또는 security 후보로 재검토한다. dependency version은 Spring Boot managed versions/BOM을 우선하고 직접 버전 고정은 plugin, Docker image tag, BOM 외부 라이브러리, 보안 패치에 제한한다. 문서와 REST contract/local workflow는 한글로 작성하되 API path, JSON field, class/package 이름은 원문을 유지한다. [WEB-6] [WEB-7] [WEB-8] [WEB-9] [WEB-10] [WEB-12] [WEB-13] [WEB-14] [WEB-15] [WEB-16] [WEB-17] [USER-8] [USER-9] [USER-10]"
+    ],
+    "interfaces": [
+      "request DTO는 로컬/P2A 식별자를 source*Id로 받을 수 있고, response DTO는 canonical server ID와 source reference를 함께 반환한다.",
+      "관계 필드는 canonical server ID를 우선 사용하되, import/sync 편의를 위해 source reference를 받아 canonical ID로 resolve하는 경로를 제공한다.",
+      "response DTO는 P2A GUI/CLI가 status, diff, push, pull, conflict resolution, history 화면을 구성할 수 있도록 contentHash, snapshotVersion, lineage, timestamps, sourcePath, source*Id metadata를 포함한다.",
+      "REST API는 application inbound port의 adapter이며, controller에서 persistence adapter를 직접 호출하지 않는다.",
+      "모든 write API는 contentHash, sourcePath, artifactType, 관계 ID를 명시적으로 받는다.",
+      "POST /api/documents/snapshots는 같은 logical artifact와 contentHash에 대해 기존 snapshot을 반환하고, contentHash가 다르면 새 snapshotVersion을 만든다.",
+      "POST /api/document-chunks/bulk는 chunkHash 기준으로 chunk를 idempotent하게 저장한다. embedding이 없으면 chunk는 keyword 검색 대상만 되고, embedding이 포함되면 서버가 embedding set을 resolve/create한 뒤 chunk_embeddings를 chunkId + embeddingSetId 기준으로 idempotent하게 upsert한다.",
+      "GET /api/search/keyword는 RAG 후보 검색용 lexical query q, limit, projectId, iterationId, artifactType, sourcePath, taskId, runId 필터를 받는다. 빈 q는 400 validation error로 처리하고 filter-only 조회는 GET /api/artifacts를 사용한다. 응답은 chunkId, documentId, projectId, iterationId, artifactType, sourcePath, chunkIndex, content, backend-specific score, matchReason, metadata를 포함한다.",
+      "POST /api/search/vector는 query embedding 배열, embeddingModel, embeddingDimension, embeddingVersion, distance metric, limit, metadata filters를 받는다. distance metric 기본값은 cosine이다.",
+      "error response는 validation error, auth error, conflict, not found를 구분한다."
+    ],
+    "data_flow": [
+      "P2A CLI/GUI가 로컬 파일 산출물을 읽고 metadata와 contentHash를 계산한다.",
+      "클라이언트가 sourceProjectId, sourceIterationId, sourceTaskId, sourceRunId 같은 로컬/P2A ID를 보내면 서버가 canonical server ID로 resolve하거나 새로 부여한다.",
+      "P2A GUI/CLI는 로컬 hash와 서버 latest snapshot metadata를 비교해 status/diff/push/pull/conflict/history UX를 제공한다.",
+      "클라이언트가 REST inbound adapter로 요청을 보내면 controller가 command로 변환해 application use case를 호출한다.",
+      "use case가 content hash, snapshot version, 관계 무결성 같은 도메인 규칙을 적용한 뒤 outbound port를 호출한다.",
+      "PostgreSQL/PgVector adapter가 port를 구현해 project와 iteration upsert, 문서 스냅샷 저장, task graph/task bulk upsert를 수행한다.",
+      "run 종료 시 클라이언트가 run JSON과 artifact refs를 저장하면 SaveRunRecordUseCase가 run과 관련 artifact 참조를 같은 application transaction으로 처리한다.",
+      "chunking과 embedding 생성은 클라이언트 또는 별도 외부 프로세스가 수행한다. 서버는 chunk content를 document_chunks에 저장하고, embedding 값은 embedding set별로 chunk_embeddings에 저장한다.",
+      "검색 API는 KeywordSearchUseCase 또는 VectorSearchUseCase를 통해 filters를 적용한다. keyword 검색은 정확한 용어, 파일 경로, API path, 에러 문자열, 과거 결정 문구를 찾는 lexical retrieval이고, vector 검색은 의미 기반 유사 이력 검색이다. RAG 후보 검색에서는 두 결과를 후속 hybrid retrieval 단계에서 병합할 수 있게 양쪽 결과가 canonical/source metadata와 content snippet을 포함한다."
+    ],
+    "dependencies": [
+      "Kotlin 2.2.x, Spring Boot 4.1.0 stable, Spring WebMVC, Validation, JDBC, Actuator, Java 25 LTS, Gradle 9.1.0 이상 9.x. 빌드는 Gradle Kotlin DSL(build.gradle.kts, settings.gradle.kts)을 사용한다. Spring Boot Gradle plugin은 org.springframework.boot 4.1.0을 적용하고, 의존성 버전은 기본적으로 Spring Boot managed versions/BOM(spring-boot-dependencies)을 따른다. Spring Boot 자체는 Java 17 이상부터 Java 26까지 호환되지만, 이 프로젝트의 표준 runtime/toolchain은 사용자의 결정에 따라 Java 25 LTS로 둔다. [WEB-6] [WEB-7] [WEB-8] [WEB-12] [WEB-14] [WEB-15] [WEB-16] [WEB-17]",
+      "PostgreSQL JDBC driver org.postgresql:postgresql. pgJDBC는 PostgreSQL native network protocol을 사용하는 pure Java Type 4 JDBC driver이고, 현재 공식 사이트 기준 current release는 42.7.11이다. Spring Boot managed version을 우선하되, Spring Boot BOM에 없거나 보안 패치가 필요한 dependency만 명시적으로 최신 compatible patch를 검토한다. [WEB-10] [WEB-17]",
+      "Flyway core와 PostgreSQL database module",
+      "PostgreSQL + pgvector Docker image for Compose",
+      "Testcontainers PostgreSQL module과 Spring Boot Testcontainers service connection 지원. Spring Boot는 Testcontainers service connection 정보를 자동으로 application connection details에 반영할 수 있다. [WEB-2]",
+      "Testcontainers PostgreSQL module은 pgvector/pgvector 이미지를 compatible image로 사용할 수 있다. [WEB-3]",
+      "Spring WebFlux, R2DBC, Spring Data R2DBC, JPA/Hibernate, Spring Security 전체, Spring Security OAuth는 MVP 의존성에 포함하지 않는다. WebFlux/R2DBC는 향후 streaming ingestion, high-concurrency reactive API, long-lived reactive endpoints가 실제 요구사항이 될 때 별도 adapter 후보로 재검토한다. Spring Security는 향후 다중 사용자, RBAC, OAuth, session login 요구가 생길 때 재검토한다. [WEB-9] [WEB-13]",
+      "dependency version policy: Spring Boot managed versions/BOM을 따르는 dependency에는 직접 버전을 적지 않는다. 직접 버전 고정은 Gradle plugin 버전, Kotlin plugin 버전, Docker image tag, Spring Boot BOM에 없는 라이브러리, 또는 보안 패치가 필요한 dependency에만 제한한다. 직접 버전을 고정할 때는 공식 문서나 release source 기준 최신 compatible version을 확인한다. [WEB-16] [WEB-17]",
+      "AI SDK 또는 embedding API client는 포함하지 않는다."
+    ],
+    "edge_cases": [
+      "같은 sourcePath/artifactType에 같은 contentHash가 반복 저장되면 기존 snapshot을 반환한다.",
+      "같은 sourcePath/artifactType에 다른 contentHash가 저장되면 새 version으로 보존한다.",
+      "서로 다른 sourcePath에 같은 contentHash가 나타나면 content blob dedup은 가능하지만 document relationship은 별도로 유지한다.",
+      "embedding이 null인 chunk는 keyword 검색에만 포함한다.",
+      "keyword 검색의 빈 query 또는 whitespace-only query는 400 validation error로 처리한다. 단순 필터 조회는 GET /api/artifacts가 담당한다.",
+      "keyword 검색 필터는 projectId, iterationId, artifactType, sourcePath, taskId, runId와 AND 조건으로 결합한다.",
+      "keyword 검색 ranking은 backend-specific score로만 노출하고 API 안정 계약으로 고정하지 않는다. MVP에서는 정확한 구문/부분 문자열 매칭을 우선하고, 동률이면 최신 snapshotVersion/timestamp와 chunkIndex를 tie-breaker로 사용한다.",
+      "후속 Elasticsearch/OpenSearch adapter를 추가할 때 PostgreSQL MVP의 ILIKE 구현 세부를 API 계약으로 노출하지 않는다. BM25, analyzer, phrase search, highlight/snippet, faceted filtering은 adapter capability로 확장한다.",
+      "query embedding의 model/dimension/version과 stored embedding set이 맞지 않으면 400 validation error를 반환하거나 명시적으로 같은 embedding set으로 필터링한다.",
+      "새 embedding 모델이나 version으로 전환할 때는 기존 embedding을 덮어쓰지 않고 새 embedding_sets row와 chunk_embeddings row를 추가 저장해 점진 전환과 비교 평가가 가능해야 한다.",
+      "같은 chunkId와 embeddingSetId에 같은 embeddingHash가 반복 저장되면 기존 chunk_embeddings row를 반환한다. 같은 chunkId와 embeddingSetId에 다른 embeddingHash 또는 vector가 들어오면 명시적 overwrite/update 정책 없이 conflict로 처리한다.",
+      "MVP의 pgvector storageType은 vector이고 embeddingDimension은 pgvector vector 한계에 맞춰 2000 이하로 제한한다. 2000차원을 초과하는 모델은 후속 halfvec 또는 별도 storage migration 결정으로 미룬다.",
+      "같은 logical scope에서 동일한 source*Id가 다른 canonical entity로 해석되려 하면 conflict로 처리한다.",
+      "source*Id 없이 들어온 artifact는 서버가 canonical ID를 부여하지만, 이후 로컬 파일과 재동기화하려면 sourcePath, artifactType, contentHash, snapshotVersion 조합으로만 매칭된다.",
+      "local artifact와 server latest snapshot이 모두 변경된 경우 서버는 자동 병합하지 않고, GUI/CLI가 conflict를 표시하고 사용자가 선택할 수 있도록 양쪽 snapshot metadata를 반환한다.",
+      "task graph가 없는 task 저장 요청은 400으로 거부하거나 explicit standalone flag가 있을 때만 허용한다.",
+      "검색 backend를 추가할 때 PostgreSQL 원장 데이터와 외부 검색 인덱스 사이의 지연/불일치가 생길 수 있으므로, MVP에서는 PostgreSQL/pgvector 단일 source of search truth로 유지한다.",
+      "application port가 backend별 기능 차이를 숨기지 못하는 경우에는 공통 계약을 작게 유지하고 backend-specific tuning은 adapter config로 제한한다.",
+      "로컬 파일 삭제는 MVP에서 서버 삭제로 자동 반영하지 않고 tombstone API는 후속으로 둔다.",
+      "sourcePath는 OS별 separator 차이를 줄이기 위해 normalizedPath와 rawSourcePath를 함께 보존한다."
+    ],
+    "verification": [
+      "schema migration test: Testcontainers pgvector PostgreSQL에서 Flyway migration, vector extension, 주요 unique index를 검증한다.",
+      "application use case test: core가 mock outbound port만으로 content hash idempotency, snapshot version, relation validation, no-AI 규칙을 검증한다.",
+      "source reference resolution test: source*Id가 canonical server ID로 안정적으로 매핑되고 conflict를 감지하는지 검증한다.",
+      "adapter integration test: PostgreSQL/PgVector adapter에서 project/iteration/document/taskGraph/task/run/chunk upsert와 content hash idempotency를 검증한다.",
+      "port contract test: KeywordSearchPort와 VectorSearchPort가 metadata filter, empty keyword query, empty embedding, embedding set mismatch, dimension mismatch, backend-specific score contract를 만족하는지 검증한다.",
+      "keyword search semantics test: document_chunks.content 중심 검색, documents.content/sourcePath/artifactType 보조 검색, case-insensitive match, 필터 AND 결합, 빈 q validation, 반환 metadata, tie-breaker 순서를 검증한다.",
+      "embedding set persistence test: 같은 chunkHash 반복 저장은 chunk를 중복 생성하지 않고, 같은 chunk에 여러 embedding set을 저장해도 기존 embedding을 덮어쓰지 않으며, 같은 chunkId + embeddingSetId 중복 저장은 idempotent하게 처리되는지 검증한다.",
+      "API integration test: local token 인증, validation error, filter 조회, keyword 검색, vector 검색을 검증한다.",
+      "sync metadata test: API 응답이 P2A GUI/CLI의 status/diff/push/pull/conflict/history 구현에 필요한 canonical ID, source reference, contentHash, snapshotVersion, lineage metadata를 포함하는지 검증한다.",
+      "Docker Compose smoke test: 로컬 DB 시작과 서버 health check를 검증한다.",
+      "negative test: embedding model/dimension/version mismatch, 누락된 relation id, 잘못된 artifactType, 중복 logical key 처리.",
+      "architecture test: application core가 Spring MVC, JDBC, PostgreSQL, pgvector adapter package를 import하지 않는지 검증한다.",
+      "no-server-UI guarantee: 서버 코드에 내장 웹 UI, server-rendered page, static frontend bundle이 없음을 검증한다.",
+      "no-AI guarantee: 서버 코드와 테스트에 외부 AI API 호출 경로가 없음을 검증한다.",
+      "bootstrap verification: Spring Boot 4.1.0, Java 25 LTS toolchain/runtime, Gradle 9.1.0 이상 9.x, Gradle Kotlin DSL 파일(build.gradle.kts, settings.gradle.kts), Spring WebMVC/JDBC 의존성 조합을 확인하고 WebFlux/R2DBC/JPA/Hibernate/Spring Security가 MVP dependency graph에 들어오지 않았는지 검증한다."
+    ]
+  },
+  "clarifying_question_disposition": [
+    {
+      "id": "CQ-1",
+      "status": "answered",
+      "rationale": "MVP에서는 로컬 파일 생성 흐름을 유지해야 하지만, 장기 발전을 위해 서버가 관계, 검색, 회고, 자기고도화의 canonical ID와 lineage 기준을 가져야 한다.",
+      "affects": [
+        "interfaces",
+        "data_model_draft",
+        "architecture",
+        "core_flows"
+      ],
+      "resolved_by": "사용자가 로컬 생성 주도 + 서버 canonical ID/version lineage 주도 하이브리드 모델을 확정했다."
+    },
+    {
+      "id": "CQ-2",
+      "status": "answered",
+      "rationale": "embedding은 외부 주입이고 모델 전환 가능성이 높으므로, 특정 모델/차원/ANN index에 조기 고정하지 않고 embedding set 단위로 병행 저장하는 편이 장기 전환 비용을 낮춘다.",
+      "affects": [
+        "data_model_draft",
+        "architecture",
+        "interfaces"
+      ],
+      "resolved_by": "사용자가 cosine exact search 기본값, embeddingModel/embeddingDimension/embeddingVersion 저장, 같은 embedding set 내 검색, 모델/차원별 ANN index 후속 추가 방침을 확정했다."
+    },
+    {
+      "id": "CQ-3",
+      "status": "answered",
+      "rationale": "로컬 파일이 원본이라는 제약과 P2A GUI/CLI의 history/diff/conflict UX를 지원하려면 서버가 최신 상태를 덮어쓰기보다 snapshot 이력을 보존해야 한다.",
+      "affects": [
+        "core_flows",
+        "data_model_draft",
+        "edge_cases"
+      ],
+      "resolved_by": "사용자가 같은 sourcePath와 artifactType에 다른 contentHash가 들어오면 기존 레코드를 덮어쓰지 않고 새 snapshotVersion으로 저장하는 정책을 확정했다."
+    }
+  ],
+  "open_decisions": [],
+  "approval": "approved",
+  "evidence": [
+    {
+      "source_id": "USER-1",
+      "title": "사용자 요구사항: P2A 로컬 산출물 저장 서버",
+      "url": "conversation://user-request/2026-06-26",
+      "used_for": "MVP 범위, 제약, 기술 스택, 비목표, 인증 및 테스트 요구사항 정의"
+    },
+    {
+      "source_id": "USER-2",
+      "title": "사용자 추가 결정: 헥사고날 아키텍처 적용",
+      "url": "conversation://user-request/2026-06-26-hexagonal",
+      "used_for": "레이어드 아키텍처 대신 pragmatic hexagonal architecture와 교체 가능한 저장/검색 adapter 구조를 적용하는 근거"
+    },
+    {
+      "source_id": "USER-3",
+      "title": "사용자 결정: 로컬 생성 주도와 서버 canonical lineage 병행",
+      "url": "conversation://user-request/2026-06-26-cq1-id-lineage",
+      "used_for": "CQ-1 답변, canonical server ID, source reference, version lineage 정책 확정"
+    },
+    {
+      "source_id": "USER-4",
+      "title": "사용자 결정: 서버 headless 유지와 P2A GUI/CLI sync client 고도화",
+      "url": "conversation://user-request/2026-06-26-a2-headless-gui-sync",
+      "used_for": "A-2 확정, 서버 내장 웹 UI 제외, P2A GUI/CLI의 git-like sync UX 방향 확정"
+    },
+    {
+      "source_id": "USER-5",
+      "title": "사용자 결정: vector search embedding set 전략",
+      "url": "conversation://user-request/2026-06-26-cq2-embedding-set",
+      "used_for": "CQ-2 답변, cosine exact search 기본값, embeddingModel/embeddingDimension/embeddingVersion 저장, ANN index 후속 전략 확정"
+    },
+    {
+      "source_id": "USER-6",
+      "title": "사용자 결정: document snapshot versioning",
+      "url": "conversation://user-request/2026-06-26-cq3-snapshot-version",
+      "used_for": "CQ-3 답변, 같은 sourcePath/artifactType의 contentHash 변경 시 새 snapshotVersion 저장 정책 확정"
+    },
+    {
+      "source_id": "USER-7",
+      "title": "사용자 결정: Spring Boot 최신 stable 사용",
+      "url": "conversation://user-request/2026-06-27-spring-boot-latest-stable",
+      "used_for": "Spring Boot 4.1.0 stable 사용 결정과 Spring Boot 4.1.0의 공식 Java/Gradle 호환 범위 확인"
+    },
+    {
+      "source_id": "USER-8",
+      "title": "사용자 결정: WebMVC/JDBC 추천안 채택과 한글 문서화",
+      "url": "conversation://user-request/2026-06-27-webmvc-jdbc-korean-docs",
+      "used_for": "WebFlux/R2DBC 대신 Spring WebMVC + JDBC/JdbcClient 사용, 프로젝트 문서 한글 작성 방침 확정"
+    },
+    {
+      "source_id": "USER-9",
+      "title": "사용자 결정: Java 25 LTS baseline",
+      "url": "conversation://user-request/2026-06-27-java-25-lts",
+      "used_for": "Java 17 baseline 대신 더 높은 LTS인 Java 25 LTS를 프로젝트 runtime/toolchain 기준으로 확정"
+    },
+    {
+      "source_id": "USER-10",
+      "title": "사용자 결정: Gradle Kotlin DSL, dependency version policy, Spring Security MVP 제외",
+      "url": "conversation://user-request/2026-06-27-gradle-kotlin-dsl-security-out",
+      "used_for": "Gradle Kotlin DSL, build.gradle.kts/settings.gradle.kts, Spring Boot Gradle plugin compatible stable version, Spring Boot managed versions 우선 정책, Spring Security MVP 전체 제외 확정"
+    },
+    {
+      "source_id": "USER-11",
+      "title": "사용자 결정: chunk embedding-set 3-table 저장 모델",
+      "url": "conversation://user-request/2026-06-27-chunk-embedding-set-model",
+      "used_for": "document_chunks, embedding_sets, chunk_embeddings 분리 모델 확정, chunkHash idempotency와 여러 embedding set 보존 요구 충돌 해소"
+    },
+    {
+      "source_id": "USER-12",
+      "title": "사용자 결정: RAG/회고용 keyword search semantics",
+      "url": "conversation://user-request/2026-06-27-keyword-search-semantics",
+      "used_for": "keyword 검색을 RAG 후보 검색의 deterministic lexical retrieval 채널로 정의하고 Elasticsearch/OpenSearch 문서 검색 고도화가 가능한 port/API 계약으로 확정"
+    },
+    {
+      "source_id": "WEB-1",
+      "title": "pgvector README",
+      "url": "https://github.com/pgvector/pgvector",
+      "used_for": "pgvector extension, vector column, distance operator, exact/approximate search, HNSW/IVFFlat, variable dimension storage 전략 근거"
+    },
+    {
+      "source_id": "WEB-2",
+      "title": "Spring Boot Testcontainers Reference",
+      "url": "https://docs.spring.io/spring-boot/reference/testing/testcontainers.html",
+      "used_for": "Spring Boot Testcontainers service connection 기반 통합 테스트 전략 근거"
+    },
+    {
+      "source_id": "WEB-3",
+      "title": "Testcontainers for Java Postgres Module",
+      "url": "https://java.testcontainers.org/modules/databases/postgres/",
+      "used_for": "PostgreSQLContainer와 pgvector compatible image 사용 근거"
+    },
+    {
+      "source_id": "WEB-4",
+      "title": "Spring Boot Database Initialization",
+      "url": "https://docs.spring.io/spring-boot/how-to/data-initialization.html",
+      "used_for": "Flyway migration과 PostgreSQL database-specific module 사용 근거"
+    },
+    {
+      "source_id": "WEB-5",
+      "title": "Spring Framework JDBC Core Reference",
+      "url": "https://docs.spring.io/spring-framework/reference/data-access/jdbc/core.html",
+      "used_for": "JdbcClient 기반 명시 SQL repository 설계 근거"
+    },
+    {
+      "source_id": "WEB-6",
+      "title": "Spring Boot Project Page",
+      "url": "https://spring.io/projects/spring-boot/",
+      "used_for": "현시점 Spring Boot 최신 stable 버전 4.1.0 확인"
+    },
+    {
+      "source_id": "WEB-7",
+      "title": "Spring Boot 4.1.0 System Requirements",
+      "url": "https://docs.spring.io/spring-boot/system-requirements.html",
+      "used_for": "Spring Boot 4.1.0의 Java 17 이상, Java 26까지 호환, Gradle 8.14 이상 8.x 또는 9.x build support 기준 확인"
+    },
+    {
+      "source_id": "WEB-8",
+      "title": "Spring Boot Servlet Web Applications",
+      "url": "https://docs.spring.io/spring-boot/reference/web/servlet.html",
+      "used_for": "Spring WebMVC 기반 REST controller 선택 근거"
+    },
+    {
+      "source_id": "WEB-9",
+      "title": "Spring Framework WebFlux Reference",
+      "url": "https://docs.spring.io/spring-framework/reference/web/webflux.html",
+      "used_for": "WebFlux가 non-blocking Reactive Streams back pressure 기반 reactive stack임을 확인하고 MVP 비선택 근거로 사용"
+    },
+    {
+      "source_id": "WEB-10",
+      "title": "pgJDBC PostgreSQL JDBC Driver",
+      "url": "https://jdbc.postgresql.org/",
+      "used_for": "PostgreSQL JDBC driver 공식 근거와 current release 42.7.11 확인"
+    },
+    {
+      "source_id": "WEB-11",
+      "title": "Docker Compose Documentation",
+      "url": "https://docs.docker.com/compose/",
+      "used_for": "로컬 PostgreSQL + pgvector 개발 환경을 단일 Compose YAML과 명령으로 관리하는 근거"
+    },
+    {
+      "source_id": "WEB-12",
+      "title": "Spring Boot Kotlin Support",
+      "url": "https://docs.spring.io/spring-boot/reference/features/kotlin.html",
+      "used_for": "Kotlin 2.2.x, kotlin-stdlib, kotlin-reflect, kotlin-spring plugin, Kotlin BOM/version alignment 근거"
+    },
+    {
+      "source_id": "WEB-13",
+      "title": "r2dbc-postgresql README",
+      "url": "https://github.com/pgjdbc/r2dbc-postgresql",
+      "used_for": "PostgreSQL R2DBC driver 존재와 JSONB/codec/extension 특성을 확인하고 MVP 비선택 근거로 사용"
+    },
+    {
+      "source_id": "WEB-14",
+      "title": "Oracle Java SE Support Roadmap",
+      "url": "https://www.oracle.com/java/technologies/java-se-support-roadmap.html",
+      "used_for": "Java SE 25가 LTS release이고 2025년 9월부터 Oracle JDK 25가 제공됨을 확인해 Java 25 LTS baseline 결정 근거로 사용"
+    },
+    {
+      "source_id": "WEB-15",
+      "title": "Gradle Java Compatibility Matrix",
+      "url": "https://docs.gradle.org/current/userguide/compatibility.html",
+      "used_for": "Java 25는 Gradle 9.1.0 이상에서 toolchain과 Gradle 실행을 지원하므로 Gradle baseline을 9.1.0 이상 9.x로 올리는 근거로 사용"
+    },
+    {
+      "source_id": "WEB-16",
+      "title": "Spring Boot Gradle Plugin Reference",
+      "url": "https://docs.spring.io/spring-boot/gradle-plugin/index.html",
+      "used_for": "Spring Boot Gradle plugin 4.1.0 stable, Gradle support range, executable archive packaging, Spring Boot dependency management support 근거"
+    },
+    {
+      "source_id": "WEB-17",
+      "title": "Spring Boot Gradle Plugin Managing Dependencies",
+      "url": "https://docs.spring.io/spring-boot/gradle-plugin/managing-dependencies.html",
+      "used_for": "Spring Boot Gradle plugin과 dependency management plugin을 통한 spring-boot-dependencies BOM 사용, Spring Boot managed versions 우선 정책 근거"
+    }
+  ]
+}
