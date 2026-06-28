@@ -12,12 +12,12 @@ version = "0.1.0-SNAPSHOT"
 
 java {
     toolchain {
-        languageVersion.set(JavaLanguageVersion.of(25))
+        languageVersion.set(JavaLanguageVersion.of(21))
     }
 }
 
 kotlin {
-    jvmToolchain(25)
+    jvmToolchain(21)
 }
 
 dependencies {
@@ -45,4 +45,3 @@ tasks.named<Wrapper>("wrapper") {
     gradleVersion = "9.1.0"
     distributionType = Wrapper.DistributionType.BIN
 }
-
