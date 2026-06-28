@@ -12,7 +12,7 @@
       "dependencies": [],
       "acceptanceCriteria": [
         "Gradle Kotlin DSL project is present with build.gradle.kts, settings.gradle.kts, Spring Boot Gradle plugin 4.1.0, Spring WebMVC, Validation, JDBC, Actuator, Flyway, PostgreSQL JDBC driver, and Testcontainers dependencies.",
-        "Java toolchain and runtime baseline are configured for Java 25 LTS, and Gradle uses 9.1.0 or later 9.x.",
+        "Java toolchain and runtime baseline are configured for Java 21 LTS, and Gradle uses 9.1.0 or later 9.x.",
         "Dependency versions use Spring Boot managed versions/BOM by default, with direct version pins only for Gradle/Kotlin plugins, Docker image tags, libraries outside the Spring Boot BOM, or required security patches.",
         "Application entrypoint and package skeleton exist for domain, application ports/use cases, REST adapters, PostgreSQL/search adapters, security adapter, and config.",
         "Local config includes database connection settings and a configurable local token/API key without committing secrets.",

@@ -101,7 +101,7 @@
   },
   "implementation": {
     "architecture": [
-      "Kotlin + Spring Boot 4.1.0 stable 기반의 Spring WebMVC REST 애플리케이션 하나로 시작하되, 레이어드 아키텍처가 아니라 pragmatic hexagonal architecture로 구성한다. Java toolchain과 runtime baseline은 Java 25 LTS로 고정하고, Gradle은 Java 25 실행과 toolchain을 지원하는 9.1.0 이상 9.x를 기준으로 둔다. 빌드는 Gradle Kotlin DSL을 사용하며 루트 빌드 파일은 build.gradle.kts, 설정 파일은 settings.gradle.kts로 둔다. Spring Boot Gradle plugin은 Spring Boot runtime과 같은 stable 버전인 org.springframework.boot 4.1.0을 사용한다. 핵심 패키지는 domain, application/usecase, application/port/in, application/port/out, adapter/in/rest, adapter/out/postgres, adapter/out/search, adapter/out/security, config로 나눈다. [WEB-6] [WEB-7] [WEB-12] [WEB-14] [WEB-15] [WEB-16]",
+      "Kotlin + Spring Boot 4.1.0 stable 기반의 Spring WebMVC REST 애플리케이션 하나로 시작하되, 레이어드 아키텍처가 아니라 pragmatic hexagonal architecture로 구성한다. Java toolchain과 runtime baseline은 Java 21 LTS로 고정한다. Kotlin 2.2.x가 Java/Kotlin compile target을 일관되게 맞출 수 있는 LTS baseline을 우선하고, Gradle은 9.1.0 이상 9.x를 기준으로 둔다. 빌드는 Gradle Kotlin DSL을 사용하며 루트 빌드 파일은 build.gradle.kts, 설정 파일은 settings.gradle.kts로 둔다. Spring Boot Gradle plugin은 Spring Boot runtime과 같은 stable 버전인 org.springframework.boot 4.1.0을 사용한다. 핵심 패키지는 domain, application/usecase, application/port/in, application/port/out, adapter/in/rest, adapter/out/postgres, adapter/out/search, adapter/out/security, config로 나눈다. [WEB-6] [WEB-7] [WEB-12] [WEB-16]",
       "서버는 headless REST service로 유지한다. 서버 내장 웹 UI, server-side rendered page, static frontend bundle은 만들지 않고, 화면과 sync UX는 P2A GUI/CLI가 담당한다.",
       "application core는 P2A 산출물 저장/검색 규칙만 알고 Spring MVC, JDBC, PostgreSQL, pgvector SQL, HTTP DTO에 직접 의존하지 않는다.",
       "domain model은 canonical server ID와 source reference를 분리한다. 서버 내부 관계와 lineage는 canonical ID를 기준으로 하고, 로컬/P2A ID와 sourcePath는 source reference로 보존한다.",
@@ -117,7 +117,7 @@
       "MVP vector 검색은 cosine exact search를 기본으로 한다. embedding은 embeddingModel, embeddingDimension, embeddingVersion으로 embedding set을 구분하고, 검색은 기본적으로 같은 embedding set 안에서만 수행한다. 모델과 차원이 안정된 뒤 HNSW 또는 IVFFlat ANN index를 모델/차원별 partial 또는 expression index migration으로 추가한다. pgvector 문서는 기본 exact search와 approximate index의 recall/speed trade-off를 구분한다. [WEB-1]",
       "chunk 저장 모델은 document_chunks, embedding_sets, chunk_embeddings의 3-table 구조로 확정한다. document_chunks는 chunk identity, content, source reference, chunkHash만 책임지고, embedding metadata와 vector value는 embedding_sets와 chunk_embeddings에 저장한다. embedding_sets는 embeddingModel + embeddingDimension + embeddingVersion + distanceMetric으로 unique하게 식별하고, chunk_embeddings는 chunkId + embeddingSetId로 unique하게 식별한다. 이 구조는 chunkHash idempotency와 같은 chunk의 여러 embedding set 보존 요구를 동시에 만족한다.",
       "인증은 단일 local token/API key를 application config에서 읽고, 요청 header를 검증하는 custom servlet Filter 또는 HandlerInterceptor로 처리한다. MVP에서는 Spring Security 전체를 사용하지 않는다. spring-boot-starter-security, Spring Security filter chain, session login, OAuth, RBAC는 후속 다중 사용자/권한 모델이 필요해질 때 별도 Technology Reconnaissance와 함께 재검토한다.",
-      "Gate B Technology Reconnaissance: Spring Boot 4.1.0 stable + Kotlin + Java 25 LTS + Gradle Kotlin DSL + Spring Boot Gradle plugin 4.1.0 + Spring WebMVC + Spring JDBC JdbcClient를 MVP 표준으로 선택한다. WebFlux/R2DBC/JPA/Hibernate/Spring Security는 MVP에서 제외하고, reactive streaming, 고동시성 long-lived endpoint, 다중 사용자/권한 요구가 생길 때 후속 adapter 또는 security 후보로 재검토한다. dependency version은 Spring Boot managed versions/BOM을 우선하고 직접 버전 고정은 plugin, Docker image tag, BOM 외부 라이브러리, 보안 패치에 제한한다. 문서와 REST contract/local workflow는 한글로 작성하되 API path, JSON field, class/package 이름은 원문을 유지한다. [WEB-6] [WEB-7] [WEB-8] [WEB-9] [WEB-10] [WEB-12] [WEB-13] [WEB-14] [WEB-15] [WEB-16] [WEB-17] [USER-8] [USER-9] [USER-10]"
+      "Gate B Technology Reconnaissance: Spring Boot 4.1.0 stable + Kotlin + Java 21 LTS + Gradle Kotlin DSL + Spring Boot Gradle plugin 4.1.0 + Spring WebMVC + Spring JDBC JdbcClient를 MVP 표준으로 선택한다. WebFlux/R2DBC/JPA/Hibernate/Spring Security는 MVP에서 제외하고, reactive streaming, 고동시성 long-lived endpoint, 다중 사용자/권한 요구가 생길 때 후속 adapter 또는 security 후보로 재검토한다. dependency version은 Spring Boot managed versions/BOM을 우선하고 직접 버전 고정은 plugin, Docker image tag, BOM 외부 라이브러리, 보안 패치에 제한한다. 문서와 REST contract/local workflow는 한글로 작성하되 API path, JSON field, class/package 이름은 원문을 유지한다. [WEB-6] [WEB-7] [WEB-8] [WEB-9] [WEB-10] [WEB-12] [WEB-13] [WEB-16] [WEB-17] [USER-8] [USER-9] [USER-10]"
     ],
     "interfaces": [
       "request DTO는 로컬/P2A 식별자를 source*Id로 받을 수 있고, response DTO는 canonical server ID와 source reference를 함께 반환한다.",
@@ -143,7 +143,7 @@
       "검색 API는 KeywordSearchUseCase 또는 VectorSearchUseCase를 통해 filters를 적용한다. keyword 검색은 정확한 용어, 파일 경로, API path, 에러 문자열, 과거 결정 문구를 찾는 lexical retrieval이고, vector 검색은 의미 기반 유사 이력 검색이다. RAG 후보 검색에서는 두 결과를 후속 hybrid retrieval 단계에서 병합할 수 있게 양쪽 결과가 canonical/source metadata와 content snippet을 포함한다."
     ],
     "dependencies": [
-      "Kotlin 2.2.x, Spring Boot 4.1.0 stable, Spring WebMVC, Validation, JDBC, Actuator, Java 25 LTS, Gradle 9.1.0 이상 9.x. 빌드는 Gradle Kotlin DSL(build.gradle.kts, settings.gradle.kts)을 사용한다. Spring Boot Gradle plugin은 org.springframework.boot 4.1.0을 적용하고, 의존성 버전은 기본적으로 Spring Boot managed versions/BOM(spring-boot-dependencies)을 따른다. Spring Boot 자체는 Java 17 이상부터 Java 26까지 호환되지만, 이 프로젝트의 표준 runtime/toolchain은 사용자의 결정에 따라 Java 25 LTS로 둔다. [WEB-6] [WEB-7] [WEB-8] [WEB-12] [WEB-14] [WEB-15] [WEB-16] [WEB-17]",
+      "Kotlin 2.2.x, Spring Boot 4.1.0 stable, Spring WebMVC, Validation, JDBC, Actuator, Java 21 LTS, Gradle 9.1.0 이상 9.x. 빌드는 Gradle Kotlin DSL(build.gradle.kts, settings.gradle.kts)을 사용한다. Spring Boot Gradle plugin은 org.springframework.boot 4.1.0을 적용하고, 의존성 버전은 기본적으로 Spring Boot managed versions/BOM(spring-boot-dependencies)을 따른다. Spring Boot 자체는 Java 17 이상부터 Java 26까지 호환되지만, 이 프로젝트의 표준 runtime/toolchain은 Kotlin JVM target 호환성을 우선해 Java 21 LTS로 둔다. [WEB-6] [WEB-7] [WEB-8] [WEB-12] [WEB-16] [WEB-17]",
       "PostgreSQL JDBC driver org.postgresql:postgresql. pgJDBC는 PostgreSQL native network protocol을 사용하는 pure Java Type 4 JDBC driver이고, 현재 공식 사이트 기준 current release는 42.7.11이다. Spring Boot managed version을 우선하되, Spring Boot BOM에 없거나 보안 패치가 필요한 dependency만 명시적으로 최신 compatible patch를 검토한다. [WEB-10] [WEB-17]",
       "Flyway core와 PostgreSQL database module",
       "PostgreSQL + pgvector Docker image for Compose",
@@ -190,7 +190,7 @@
       "architecture test: application core가 Spring MVC, JDBC, PostgreSQL, pgvector adapter package를 import하지 않는지 검증한다.",
       "no-server-UI guarantee: 서버 코드에 내장 웹 UI, server-rendered page, static frontend bundle이 없음을 검증한다.",
       "no-AI guarantee: 서버 코드와 테스트에 외부 AI API 호출 경로가 없음을 검증한다.",
-      "bootstrap verification: Spring Boot 4.1.0, Java 25 LTS toolchain/runtime, Gradle 9.1.0 이상 9.x, Gradle Kotlin DSL 파일(build.gradle.kts, settings.gradle.kts), Spring WebMVC/JDBC 의존성 조합을 확인하고 WebFlux/R2DBC/JPA/Hibernate/Spring Security가 MVP dependency graph에 들어오지 않았는지 검증한다."
+      "bootstrap verification: Spring Boot 4.1.0, Java 21 LTS toolchain/runtime, Gradle 9.1.0 이상 9.x, Gradle Kotlin DSL 파일(build.gradle.kts, settings.gradle.kts), Spring WebMVC/JDBC 의존성 조합을 확인하고 WebFlux/R2DBC/JPA/Hibernate/Spring Security가 MVP dependency graph에 들어오지 않았는지 검증한다."
     ]
   },
   "clarifying_question_disposition": [
@@ -282,9 +282,9 @@
     },
     {
       "source_id": "USER-9",
-      "title": "사용자 결정: Java 25 LTS baseline",
-      "url": "conversation://user-request/2026-06-27-java-25-lts",
-      "used_for": "Java 17 baseline 대신 더 높은 LTS인 Java 25 LTS를 프로젝트 runtime/toolchain 기준으로 확정"
+      "title": "사용자 결정: Java 21 LTS baseline",
+      "url": "conversation://user-request/2026-06-28-java-21-toolchain",
+      "used_for": "Kotlin 2.2.x JVM target 호환성과 Java/Kotlin compile target 일관성을 위해 Java 21 LTS를 프로젝트 runtime/toolchain 기준으로 확정"
     },
     {
       "source_id": "USER-10",
@@ -386,13 +386,13 @@
       "source_id": "WEB-14",
       "title": "Oracle Java SE Support Roadmap",
       "url": "https://www.oracle.com/java/technologies/java-se-support-roadmap.html",
-      "used_for": "Java SE 25가 LTS release이고 2025년 9월부터 Oracle JDK 25가 제공됨을 확인해 Java 25 LTS baseline 결정 근거로 사용"
+      "used_for": "Java LTS release lifecycle을 확인하고 프로젝트 runtime/toolchain을 Java 21 LTS로 고정하는 근거로 사용"
     },
     {
       "source_id": "WEB-15",
       "title": "Gradle Java Compatibility Matrix",
       "url": "https://docs.gradle.org/current/userguide/compatibility.html",
-      "used_for": "Java 25는 Gradle 9.1.0 이상에서 toolchain과 Gradle 실행을 지원하므로 Gradle baseline을 9.1.0 이상 9.x로 올리는 근거로 사용"
+      "used_for": "Gradle Java compatibility와 9.x baseline을 확인하고 Java 21 toolchain/runtime 운용 근거로 사용"
     },
     {
       "source_id": "WEB-16",

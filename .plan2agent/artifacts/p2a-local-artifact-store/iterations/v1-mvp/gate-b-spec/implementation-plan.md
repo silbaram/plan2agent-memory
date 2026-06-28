@@ -4,7 +4,7 @@
 
 field: `architecture`
 
-- Kotlin + Spring Boot 4.1.0 stable 기반의 Spring WebMVC REST 애플리케이션 하나로 시작하되, 레이어드 아키텍처가 아니라 pragmatic hexagonal architecture로 구성한다. Java toolchain과 runtime baseline은 Java 25 LTS로 고정하고, Gradle은 Java 25 실행과 toolchain을 지원하는 9.1.0 이상 9.x를 기준으로 둔다. 빌드는 Gradle Kotlin DSL을 사용하며 루트 빌드 파일은 `build.gradle.kts`, 설정 파일은 `settings.gradle.kts`로 둔다. Spring Boot Gradle plugin은 Spring Boot runtime과 같은 stable 버전인 `org.springframework.boot` 4.1.0을 사용한다. 핵심 패키지는 `domain`, `application/usecase`, `application/port/in`, `application/port/out`, `adapter/in/rest`, `adapter/out/postgres`, `adapter/out/search`, `adapter/out/security`, `config`로 나눈다. [WEB-6] [WEB-7] [WEB-12] [WEB-14] [WEB-15] [WEB-16]
+- Kotlin + Spring Boot 4.1.0 stable 기반의 Spring WebMVC REST 애플리케이션 하나로 시작하되, 레이어드 아키텍처가 아니라 pragmatic hexagonal architecture로 구성한다. Java toolchain과 runtime baseline은 Java 21 LTS로 고정한다. Kotlin 2.2.x가 Java/Kotlin compile target을 일관되게 맞출 수 있는 LTS baseline을 우선하고, Gradle은 9.1.0 이상 9.x를 기준으로 둔다. 빌드는 Gradle Kotlin DSL을 사용하며 루트 빌드 파일은 `build.gradle.kts`, 설정 파일은 `settings.gradle.kts`로 둔다. Spring Boot Gradle plugin은 Spring Boot runtime과 같은 stable 버전인 `org.springframework.boot` 4.1.0을 사용한다. 핵심 패키지는 `domain`, `application/usecase`, `application/port/in`, `application/port/out`, `adapter/in/rest`, `adapter/out/postgres`, `adapter/out/search`, `adapter/out/security`, `config`로 나눈다. [WEB-6] [WEB-7] [WEB-12] [WEB-16]
 - 서버는 headless REST service로 유지한다. 서버 내장 웹 UI, server-side rendered page, static frontend bundle은 만들지 않고, 화면과 sync UX는 P2A GUI/CLI가 담당한다.
 - application core는 P2A 산출물 저장/검색 규칙만 알고 Spring MVC, JDBC, PostgreSQL, pgvector SQL, HTTP DTO에 직접 의존하지 않는다.
 - domain model은 canonical server ID와 source reference를 분리한다. 서버 내부 관계와 lineage는 canonical ID를 기준으로 하고, 로컬/P2A ID와 sourcePath는 source reference로 보존한다.
@@ -54,7 +54,7 @@ field: `data_flow`
 
 field: `dependencies`
 
-- Kotlin 2.2.x, Spring Boot 4.1.0 stable, Spring WebMVC, Validation, JDBC, Actuator, Java 25 LTS, Gradle 9.1.0 이상 9.x. 빌드는 Gradle Kotlin DSL(`build.gradle.kts`, `settings.gradle.kts`)을 사용한다. Spring Boot Gradle plugin은 `org.springframework.boot` 4.1.0을 적용하고, 의존성 버전은 기본적으로 Spring Boot managed versions/BOM(`spring-boot-dependencies`)을 따른다. Spring Boot 자체는 Java 17 이상부터 Java 26까지 호환되지만, 이 프로젝트의 표준 runtime/toolchain은 사용자의 결정에 따라 Java 25 LTS로 둔다. [WEB-6] [WEB-7] [WEB-8] [WEB-12] [WEB-14] [WEB-15] [WEB-16] [WEB-17]
+- Kotlin 2.2.x, Spring Boot 4.1.0 stable, Spring WebMVC, Validation, JDBC, Actuator, Java 21 LTS, Gradle 9.1.0 이상 9.x. 빌드는 Gradle Kotlin DSL(`build.gradle.kts`, `settings.gradle.kts`)을 사용한다. Spring Boot Gradle plugin은 `org.springframework.boot` 4.1.0을 적용하고, 의존성 버전은 기본적으로 Spring Boot managed versions/BOM(`spring-boot-dependencies`)을 따른다. Spring Boot 자체는 Java 17 이상부터 Java 26까지 호환되지만, 이 프로젝트의 표준 runtime/toolchain은 Kotlin JVM target 호환성을 우선해 Java 21 LTS로 둔다. [WEB-6] [WEB-7] [WEB-8] [WEB-12] [WEB-16] [WEB-17]
 - PostgreSQL JDBC driver `org.postgresql:postgresql`. pgJDBC는 PostgreSQL native network protocol을 사용하는 pure Java Type 4 JDBC driver이고, 현재 공식 사이트 기준 current release는 42.7.11이다. Spring Boot managed version을 우선하되, Spring Boot BOM에 없거나 보안 패치가 필요한 dependency만 명시적으로 최신 compatible patch를 검토한다. [WEB-10] [WEB-17]
 - Flyway core와 PostgreSQL database module
 - PostgreSQL + pgvector Docker image for Compose
@@ -72,7 +72,7 @@ field: `implementation.architecture`, `implementation.dependencies`, `evidence`
 
 | 결정 | 선택 | 대안/비선택 | 근거와 판단 |
 | --- | --- | --- | --- |
-| 런타임/프레임워크 | Spring Boot 4.1.0 stable + Kotlin + Java 25 LTS | snapshot release와 Java 17 baseline은 제외 | Spring Boot 공식 프로젝트 페이지와 system requirements에서 4.1.0 stable, Java 17 이상부터 Java 26까지의 호환성, Gradle 8.14+/9.x 조건을 확인했다. Oracle roadmap에서 Java SE 25가 LTS release임을 확인했고, Gradle compatibility matrix에서 Java 25는 Gradle 9.1.0 이상에서 toolchain과 Gradle 실행을 지원함을 확인했다. Kotlin은 Spring Boot가 Kotlin BOM과 plugin alignment를 관리한다. [WEB-6] [WEB-7] [WEB-12] [WEB-14] [WEB-15] |
+| 런타임/프레임워크 | Spring Boot 4.1.0 stable + Kotlin + Java 21 LTS | snapshot release와 Kotlin 미지원 bytecode target은 제외 | Spring Boot 공식 프로젝트 페이지와 system requirements에서 4.1.0 stable, Java 17 이상부터 Java 26까지의 호환성, Gradle 8.14+/9.x 조건을 확인했다. Kotlin 2.2.x의 JVM target 호환성과 Java/Kotlin compile target 일관성을 우선해 toolchain/runtime baseline은 Java 21 LTS로 둔다. Kotlin은 Spring Boot가 Kotlin BOM과 plugin alignment를 관리한다. [WEB-6] [WEB-7] [WEB-12] |
 | Build system | Gradle Kotlin DSL + Spring Boot Gradle plugin 4.1.0 + Spring Boot managed versions | Groovy DSL, ad hoc dependency version pinning은 비선택 | 빌드 파일은 `build.gradle.kts`와 `settings.gradle.kts`로 고정한다. Spring Boot Gradle plugin은 Spring Boot stable runtime과 같은 `4.1.0`을 사용하고, dependency version은 Spring Boot managed versions/BOM을 우선한다. 직접 버전 고정은 plugin, Docker image tag, BOM 외부 라이브러리, 보안 패치에만 제한한다. [WEB-16] [WEB-17] |
 | Web stack | Spring WebMVC | Spring WebFlux는 MVP 비선택 | WebMVC는 servlet 기반 REST controller에 직접 맞고, 현재 요구사항은 reactive streaming/backpressure보다 REST sync/write/query가 중심이다. WebFlux는 후속 reactive API 요구가 생기면 재검토한다. [WEB-8] [WEB-9] |
 | DB access | Spring JDBC `JdbcClient` 우선 | R2DBC, JPA/Hibernate는 MVP 비선택 | `JdbcClient`는 Spring Framework의 unified JDBC query/update API다. pgvector operator, JSONB, upsert, Flyway migration, constraint 중심 구현은 명시 SQL이 단순하다. R2DBC PostgreSQL은 존재하지만 reactive end-to-end 요구가 없고 pgvector binding 전략을 별도로 정해야 한다. [WEB-5] [WEB-13] |
@@ -127,4 +127,4 @@ field: `verification`
 - architecture test: application core가 Spring MVC, JDBC, PostgreSQL, pgvector adapter package를 import하지 않는지 검증한다.
 - no-server-UI guarantee: 서버 코드에 내장 웹 UI, server-rendered page, static frontend bundle이 없음을 검증한다.
 - no-AI guarantee: 서버 코드와 테스트에 외부 AI API 호출 경로가 없음을 검증한다.
-- bootstrap verification: Spring Boot 4.1.0, Java 25 LTS toolchain/runtime, Gradle 9.1.0 이상 9.x, Gradle Kotlin DSL 파일(`build.gradle.kts`, `settings.gradle.kts`), Spring WebMVC/JDBC 의존성 조합을 확인하고 WebFlux/R2DBC/JPA/Hibernate/Spring Security가 MVP dependency graph에 들어오지 않았는지 검증한다.
+- bootstrap verification: Spring Boot 4.1.0, Java 21 LTS toolchain/runtime, Gradle 9.1.0 이상 9.x, Gradle Kotlin DSL 파일(`build.gradle.kts`, `settings.gradle.kts`), Spring WebMVC/JDBC 의존성 조합을 확인하고 WebFlux/R2DBC/JPA/Hibernate/Spring Security가 MVP dependency graph에 들어오지 않았는지 검증한다.
