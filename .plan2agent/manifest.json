@@ -2,11 +2,11 @@
   "schema_version": "p2a.handoff.v1",
   "provenance": {
     "mode": "scaffold",
-    "createdAt": "2026-06-27T15:48:11.416Z",
+    "createdAt": "2026-06-28T11:03:35.059Z",
     "toolkitRoot": "/Users/qoo10/projects/plan2agent"
   },
   "targetProject": "/Users/qoo10/projects/plan2agent-memory",
-  "createdAt": "2026-06-27T15:48:11.416Z",
+  "createdAt": "2026-06-28T11:03:35.059Z",
   "includedTools": [
     "p2a_paths",
     "p2a_iteration",

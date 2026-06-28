@@ -1,7 +1,7 @@
 {
   "schema_version": "p2a.spec.v1",
   "project_id": "p2a-local-artifact-store",
-  "source_intake": ".plan2agent/artifacts/p2a-local-artifact-store/gate-a-intake/intake.json",
+  "source_intake": "../gate-a-intake/intake.json",
   "product": {
     "problem": "P2A는 계획 문서, task graph, run 기록, proposal, review를 로컬 md/json 파일로 남기지만, 파일만으로는 project, iteration, task, run, document 사이의 관계형 조회와 검색, 향후 RAG/회고 기반 자기고도화 준비가 어렵다. 이 서버는 로컬 파일을 원본으로 유지하면서 산출물을 동기화하고 검색하기 위한 보조 저장소를 제공한다.",
     "target_users": [

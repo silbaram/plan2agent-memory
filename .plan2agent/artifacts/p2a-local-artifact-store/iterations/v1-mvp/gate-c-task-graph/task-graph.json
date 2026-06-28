@@ -2,7 +2,7 @@
   "schema_version": "p2a.task_graph.v1",
   "projectId": "p2a-local-artifact-store",
   "version": "2026-06-27-gate-c-split-oversized-tasks",
-  "sourceSpec": ".plan2agent/artifacts/p2a-local-artifact-store/gate-b-spec/spec.json",
+  "sourceSpec": "../gate-b-spec/spec.json",
   "tasks": [
     {
       "id": "task-1",

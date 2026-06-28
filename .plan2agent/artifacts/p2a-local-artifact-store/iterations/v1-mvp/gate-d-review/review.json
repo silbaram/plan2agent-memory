@@ -1,8 +1,8 @@
 {
   "schema_version": "p2a.review.v1",
   "projectId": "p2a-local-artifact-store",
-  "sourceSpec": ".plan2agent/artifacts/p2a-local-artifact-store/gate-b-spec/spec.json",
-  "sourceTaskGraph": ".plan2agent/artifacts/p2a-local-artifact-store/gate-c-task-graph/task-graph.json",
+  "sourceSpec": "../gate-b-spec/spec.json",
+  "sourceTaskGraph": "../gate-c-task-graph/task-graph.json",
   "blocking_issues": [],
   "non_blocking_risks": [],
   "missing_tests_or_acceptance_criteria": [],

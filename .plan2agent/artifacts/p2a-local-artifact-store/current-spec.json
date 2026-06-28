@@ -1,0 +1,22 @@
+{
+  "schema_version": "p2a.current_spec.v1",
+  "project_id": "p2a-local-artifact-store",
+  "composed_from": [
+    "v1-mvp"
+  ],
+  "active_iteration": "v1-mvp",
+  "effective_spec_ref": "iterations/v1-mvp/gate-b-spec/spec.json",
+  "note": "반복 1개라 이 반복 spec이 곧 현재 유효 spec. 다중 반복 조합 규칙은 docs/iteration-spec.md에서 정식화.",
+  "gate_b_approval_audits": {
+    "v1-mvp": {
+      "approved_by": "user",
+      "approved_at": "2026-06-28",
+      "approved_artifacts": [
+        "iterations/v1-mvp/gate-b-spec/product-spec.md",
+        "iterations/v1-mvp/gate-b-spec/implementation-plan.md",
+        "iterations/v1-mvp/gate-b-spec/spec.json"
+      ],
+      "approval_note": "Gate B approval preserved from greenfield status during iteration init."
+    }
+  }
+}

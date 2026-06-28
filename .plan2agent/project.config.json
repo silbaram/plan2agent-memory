@@ -5,7 +5,7 @@
   "testCommand": null,
   "lintCommand": null,
   "typecheckCommand": null,
-  "taskGraph": ".plan2agent/artifacts/p2a-local-artifact-store/gate-c-task-graph/task-graph.json",
+  "taskGraph": null,
   "runTracking": {
     "runsDir": ".plan2agent/runs",
     "defaultIsolation": "none",
