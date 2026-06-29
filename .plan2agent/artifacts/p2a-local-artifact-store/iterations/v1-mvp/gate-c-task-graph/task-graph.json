@@ -207,7 +207,7 @@
       "id": "task-9",
       "title": "Implement write REST API adapters",
       "description": "Implement REST controllers, request/response DTOs, validation, and error mapping for write endpoints.",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "task-6"
       ],
