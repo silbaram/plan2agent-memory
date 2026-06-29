@@ -151,6 +151,12 @@ class WriteUseCaseService(
     @Transactional
     override fun saveTasks(command: SaveTasksCommand): List<Task> {
         val taskGraph = requireTaskGraphExists(command.graphId)
+        require(command.tasks.map { it.id }.toSet().size == command.tasks.size) {
+            "Task batch contains duplicate task ids"
+        }
+        require(command.tasks.map { it.sourceTaskId }.toSet().size == command.tasks.size) {
+            "Task batch contains duplicate sourceTaskIds"
+        }
         require(command.tasks.all { it.taskGraphId == command.graphId }) {
             "All tasks must belong to task graph ${command.graphId.value}"
         }
@@ -213,6 +219,15 @@ class WriteUseCaseService(
         val chunks = command.chunks.map { write ->
             validateChunkRelations(write.chunk, document)
             write.chunk
+        }
+        require(chunks.map { it.id }.toSet().size == chunks.size) {
+            "Document chunk batch contains duplicate chunk ids"
+        }
+        require(chunks.map { it.chunkHash }.toSet().size == chunks.size) {
+            "Document chunk batch contains duplicate chunk hashes"
+        }
+        require(chunks.map { it.chunkIndex }.toSet().size == chunks.size) {
+            "Document chunk batch contains duplicate chunk indexes"
         }
         chunks.forEach { chunk ->
             chunk.sourceReference.requireCanonicalServerId(chunk.id.value, "document chunk")
