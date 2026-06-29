@@ -156,10 +156,17 @@ data class KeywordSearchQuery(
     val sourcePath: String? = null,
     val taskId: TaskId? = null,
     val runId: RunId? = null,
+    val metadataFilters: Map<String, String> = emptyMap(),
     val limit: Int = 20,
 ) {
     init {
         require(query.isNotBlank()) { "KeywordSearchQuery query must not be blank" }
+        require(metadataFilters.keys.all { it.isNotBlank() }) {
+            "KeywordSearchQuery metadata filter keys must not be blank"
+        }
+        require(metadataFilters.values.all { it.isNotBlank() }) {
+            "KeywordSearchQuery metadata filter values must not be blank"
+        }
         require(limit > 0) { "KeywordSearchQuery limit must be positive" }
     }
 }
@@ -176,12 +183,20 @@ data class VectorSearchQuery(
     val sourcePath: String? = null,
     val taskId: TaskId? = null,
     val runId: RunId? = null,
+    val metadataFilters: Map<String, String> = emptyMap(),
     val limit: Int = 20,
 ) {
     init {
+        require(embedding.values.all { it.isFinite() }) { "VectorSearchQuery embedding values must be finite" }
         require(embeddingModel.isNotBlank()) { "VectorSearchQuery embeddingModel must not be blank" }
         require(embeddingDimension > 0) { "VectorSearchQuery embeddingDimension must be positive" }
         require(embeddingVersion.isNotBlank()) { "VectorSearchQuery embeddingVersion must not be blank" }
+        require(metadataFilters.keys.all { it.isNotBlank() }) {
+            "VectorSearchQuery metadata filter keys must not be blank"
+        }
+        require(metadataFilters.values.all { it.isNotBlank() }) {
+            "VectorSearchQuery metadata filter values must not be blank"
+        }
         require(limit > 0) { "VectorSearchQuery limit must be positive" }
     }
 }

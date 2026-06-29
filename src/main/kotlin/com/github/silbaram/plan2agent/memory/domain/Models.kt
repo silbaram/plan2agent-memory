@@ -241,6 +241,8 @@ data class ArtifactSummary(
     val title: String,
     val contentHash: ContentHash? = null,
     val sourceReference: SourceReference? = null,
+    val createdAt: Instant? = null,
+    val updatedAt: Instant? = null,
     val metadata: Map<String, String> = emptyMap(),
 ) {
     init {

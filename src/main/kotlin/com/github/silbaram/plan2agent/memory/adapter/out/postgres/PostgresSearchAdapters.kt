@@ -26,6 +26,7 @@ import org.springframework.jdbc.core.namedparam.MapSqlParameterSource
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
 import org.springframework.stereotype.Repository
 import java.sql.ResultSet
+import java.time.Instant
 import java.util.UUID
 
 @Repository
@@ -124,6 +125,8 @@ class PostgresArtifactQueryAdapter(
                     NULL::integer AS snapshot_version,
                     p.metadata ->> 'p2a.sourceReference.canonicalServerId' AS source_ref_canonical_server_id,
                     p.metadata ->> 'p2a.sourceReference.uri' AS source_ref_uri,
+                    p.created_at,
+                    p.updated_at,
                     p.created_at AS sort_timestamp
                 FROM projects p
                 UNION ALL
@@ -148,6 +151,8 @@ class PostgresArtifactQueryAdapter(
                     NULL::integer AS snapshot_version,
                     i.metadata ->> 'p2a.sourceReference.canonicalServerId' AS source_ref_canonical_server_id,
                     i.metadata ->> 'p2a.sourceReference.uri' AS source_ref_uri,
+                    i.created_at,
+                    i.updated_at,
                     i.created_at AS sort_timestamp
                 FROM iterations i
                 JOIN projects p ON p.project_id = i.project_id
@@ -173,6 +178,8 @@ class PostgresArtifactQueryAdapter(
                     d.snapshot_version,
                     d.metadata ->> 'p2a.sourceReference.canonicalServerId' AS source_ref_canonical_server_id,
                     d.metadata ->> 'p2a.sourceReference.uri' AS source_ref_uri,
+                    d.created_at,
+                    d.updated_at,
                     d.created_at AS sort_timestamp
                 FROM documents d
                 JOIN projects p ON p.project_id = d.project_id
@@ -199,6 +206,8 @@ class PostgresArtifactQueryAdapter(
                     NULL::integer AS snapshot_version,
                     tg.metadata ->> 'p2a.sourceReference.canonicalServerId' AS source_ref_canonical_server_id,
                     tg.metadata ->> 'p2a.sourceReference.uri' AS source_ref_uri,
+                    tg.created_at,
+                    tg.updated_at,
                     tg.created_at AS sort_timestamp
                 FROM task_graphs tg
                 JOIN projects p ON p.project_id = tg.project_id
@@ -226,6 +235,8 @@ class PostgresArtifactQueryAdapter(
                     NULL::integer AS snapshot_version,
                     t.metadata ->> 'p2a.sourceReference.canonicalServerId' AS source_ref_canonical_server_id,
                     t.metadata ->> 'p2a.sourceReference.uri' AS source_ref_uri,
+                    t.created_at,
+                    t.updated_at,
                     t.created_at AS sort_timestamp
                 FROM tasks t
                 JOIN projects p ON p.project_id = t.project_id
@@ -254,6 +265,8 @@ class PostgresArtifactQueryAdapter(
                     NULL::integer AS snapshot_version,
                     r.metadata ->> 'p2a.sourceReference.canonicalServerId' AS source_ref_canonical_server_id,
                     r.metadata ->> 'p2a.sourceReference.uri' AS source_ref_uri,
+                    r.created_at,
+                    r.updated_at,
                     r.created_at AS sort_timestamp
                 FROM runs r
                 JOIN projects p ON p.project_id = r.project_id
@@ -282,6 +295,8 @@ class PostgresArtifactQueryAdapter(
                     d.snapshot_version,
                     dc.metadata ->> 'p2a.sourceReference.canonicalServerId' AS source_ref_canonical_server_id,
                     dc.metadata ->> 'p2a.sourceReference.uri' AS source_ref_uri,
+                    dc.created_at,
+                    dc.updated_at,
                     dc.created_at AS sort_timestamp
                 FROM document_chunks dc
                 JOIN projects p ON p.project_id = dc.project_id
@@ -316,8 +331,15 @@ class PostgresKeywordSearchAdapter(
         val params = searchParams(query)
             .addValue("pattern", likePattern(query.query))
             .addValue("limit", query.limit)
-        val chunkWhere = chunkFilterClauses(query, params, alias = "dc").toWhereClause(prefix = "WHERE")
-        val documentWhere = documentFilterClauses(query, params, alias = "d").toWhereClause(prefix = "WHERE")
+        if (query.metadataFilters.isNotEmpty()) {
+            params.addValue("metadataFiltersJson", json.metadataToJson(query.metadataFilters))
+        }
+        val chunkWhere = chunkFilterClauses(query, params, alias = "dc")
+            .withMetadataFilters(query.metadataFilters, alias = "dc")
+            .toWhereClause(prefix = "WHERE")
+        val documentWhere = documentFilterClauses(query, params, alias = "d")
+            .withMetadataFilters(query.metadataFilters, alias = "d")
+            .toWhereClause(prefix = "WHERE")
 
         return jdbc.query(
             """
@@ -445,7 +467,12 @@ class PostgresVectorSearchAdapter(
             .addValue("distanceMetric", query.distanceMetric.toDbValue())
             .addValue("queryEmbedding", query.embedding.toPgVectorLiteral())
             .addValue("limit", query.limit)
-        val chunkWhere = chunkFilterClauses(query, params, alias = "dc").toWhereClause(prefix = "WHERE")
+        if (query.metadataFilters.isNotEmpty()) {
+            params.addValue("metadataFiltersJson", json.metadataToJson(query.metadataFilters))
+        }
+        val chunkWhere = chunkFilterClauses(query, params, alias = "dc")
+            .withMetadataFilters(query.metadataFilters, alias = "dc")
+            .toWhereClause(prefix = "WHERE")
         val distanceExpression = query.distanceMetric.distanceExpression()
         val orderExpression = query.distanceMetric.orderExpression()
 
@@ -582,6 +609,13 @@ private fun searchFilterClauses(
         runId?.let { add("$alias.run_id = :runId") }
     }
 
+private fun List<String>.withMetadataFilters(metadataFilters: Map<String, String>, alias: String): List<String> =
+    if (metadataFilters.isEmpty()) {
+        this
+    } else {
+        this + "$alias.metadata @> CAST(:metadataFiltersJson AS jsonb)"
+    }
+
 private fun List<String>.toWhereClause(prefix: String = "WHERE"): String =
     if (isEmpty()) {
         "$prefix TRUE"
@@ -603,6 +637,8 @@ private fun artifactSummaryMapper(json: PostgresJsonSupport): RowMapper<Artifact
             title = rs.getString("title"),
             contentHash = rs.getString("content_hash")?.let(::ContentHash),
             sourceReference = json.sourceReferenceFrom(metadata),
+            createdAt = rs.instant("created_at"),
+            updatedAt = rs.nullableInstant("updated_at"),
             metadata = sourceMetadata(json, metadata, rs),
         )
     }
@@ -723,5 +759,11 @@ private fun ResultSet.nullableInt(column: String): Int? {
     val value = getInt(column)
     return if (wasNull()) null else value
 }
+
+private fun ResultSet.instant(column: String): Instant =
+    getTimestamp(column).toInstant()
+
+private fun ResultSet.nullableInstant(column: String): Instant? =
+    getTimestamp(column)?.toInstant()
 
 private const val MAX_VECTOR_DIMENSION = 2000
