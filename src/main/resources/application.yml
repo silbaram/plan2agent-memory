@@ -22,7 +22,11 @@ p2a:
   security:
     header-name: ${P2A_LOCAL_TOKEN_HEADER:X-P2A-Local-Token}
     token: ${P2A_LOCAL_TOKEN:}
+    protected-paths:
+      - /api/**
+    excluded-paths:
+      - /api/health
+      - /actuator/health
 
 server:
   port: ${PORT:8080}
-
