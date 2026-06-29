@@ -54,7 +54,7 @@
       "id": "task-3",
       "title": "Add PostgreSQL and pgvector migrations",
       "description": "Create Flyway migrations for pgvector extension, relational tables, JSONB columns, idempotency constraints, and baseline indexes.",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "task-1",
         "task-2"
