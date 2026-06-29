@@ -103,7 +103,7 @@
       "id": "task-5",
       "title": "Implement run and document chunk adapters",
       "description": "Implement PostgreSQL outbound adapters for run records, bulk document chunk storage, embedding set resolution, and chunk embedding storage.",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "task-2",
         "task-3"
