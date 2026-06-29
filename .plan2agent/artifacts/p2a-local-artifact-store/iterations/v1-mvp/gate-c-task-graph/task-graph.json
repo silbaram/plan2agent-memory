@@ -130,7 +130,7 @@
       "id": "task-6",
       "title": "Implement write application use cases and transactions",
       "description": "Implement write-side application services for project, iteration, document snapshot, task graph, task, run, and chunk persistence with transaction boundaries.",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "task-4",
         "task-5"
