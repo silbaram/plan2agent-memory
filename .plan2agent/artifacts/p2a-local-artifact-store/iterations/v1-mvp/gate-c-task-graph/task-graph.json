@@ -32,7 +32,7 @@
       "id": "task-2",
       "title": "Define domain model and application ports",
       "description": "Define domain value objects, command/result types, inbound use case interfaces, and outbound port contracts for artifact storage, search, and deduplication.",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "task-1"
       ],
