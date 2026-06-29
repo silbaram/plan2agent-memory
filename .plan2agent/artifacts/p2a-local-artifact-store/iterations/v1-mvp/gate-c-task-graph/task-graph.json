@@ -231,7 +231,7 @@
       "id": "task-10",
       "title": "Implement query and search REST API adapters",
       "description": "Implement REST controllers, request/response DTOs, validation, and error mapping for artifact lookup, keyword search, vector search, and health exposure.",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "task-7",
         "task-8"

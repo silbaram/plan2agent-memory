@@ -33,12 +33,14 @@ class ReadUseCaseService(
         require(query.query.isNotBlank()) { "KeywordSearchQuery query must not be blank" }
         validateLimit(query.limit, "KeywordSearchQuery")
         validateOptionalSourcePath(query.sourcePath, "KeywordSearchQuery")
+        validateMetadataFilters(query.metadataFilters, "KeywordSearchQuery")
         return keywordSearchPort.search(query)
     }
 
     @Transactional(readOnly = true)
     override fun vectorSearch(query: VectorSearchQuery): List<VectorSearchMatch> {
         require(query.embedding.values.isNotEmpty()) { "VectorSearchQuery embedding must not be empty" }
+        require(query.embedding.values.all { it.isFinite() }) { "VectorSearchQuery embedding values must be finite" }
         require(query.embeddingModel.isNotBlank()) { "VectorSearchQuery embeddingModel must not be blank" }
         require(query.embeddingDimension > 0) { "VectorSearchQuery embeddingDimension must be positive" }
         require(query.embedding.values.size == query.embeddingDimension) {
@@ -47,6 +49,7 @@ class ReadUseCaseService(
         require(query.embeddingVersion.isNotBlank()) { "VectorSearchQuery embeddingVersion must not be blank" }
         validateLimit(query.limit, "VectorSearchQuery")
         validateOptionalSourcePath(query.sourcePath, "VectorSearchQuery")
+        validateMetadataFilters(query.metadataFilters, "VectorSearchQuery")
         return vectorSearchPort.search(query)
     }
 
@@ -58,5 +61,10 @@ class ReadUseCaseService(
         sourcePath?.let {
             require(it.isNotBlank()) { "$label sourcePath must not be blank when supplied" }
         }
+    }
+
+    private fun validateMetadataFilters(metadataFilters: Map<String, String>, label: String) {
+        require(metadataFilters.keys.all { it.isNotBlank() }) { "$label metadata filter keys must not be blank" }
+        require(metadataFilters.values.all { it.isNotBlank() }) { "$label metadata filter values must not be blank" }
     }
 }

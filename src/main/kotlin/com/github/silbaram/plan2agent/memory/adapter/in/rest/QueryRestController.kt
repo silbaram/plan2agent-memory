@@ -1,0 +1,94 @@
+package com.github.silbaram.plan2agent.memory.adapter.`in`.rest
+
+import com.github.silbaram.plan2agent.memory.application.port.`in`.FindArtifactsUseCase
+import com.github.silbaram.plan2agent.memory.application.port.`in`.KeywordSearchUseCase
+import com.github.silbaram.plan2agent.memory.application.port.`in`.VectorSearchUseCase
+import org.springframework.web.bind.annotation.GetMapping
+import org.springframework.web.bind.annotation.PostMapping
+import org.springframework.web.bind.annotation.RequestBody
+import org.springframework.web.bind.annotation.RequestMapping
+import org.springframework.web.bind.annotation.RequestParam
+import org.springframework.web.bind.annotation.RestController
+
+@RestController
+@RequestMapping("/api")
+class QueryRestController(
+    private val findArtifactsUseCase: FindArtifactsUseCase,
+    private val keywordSearchUseCase: KeywordSearchUseCase,
+    private val vectorSearchUseCase: VectorSearchUseCase,
+) {
+    @GetMapping("/artifacts")
+    fun findArtifacts(
+        @RequestParam(required = false) projectId: String?,
+        @RequestParam(required = false) iterationId: String?,
+        @RequestParam(required = false) sourceProjectId: String?,
+        @RequestParam(required = false) sourceIterationId: String?,
+        @RequestParam(required = false) sourceDocumentId: String?,
+        @RequestParam(required = false) sourceTaskGraphId: String?,
+        @RequestParam(required = false) sourceTaskId: String?,
+        @RequestParam(required = false) sourceRunId: String?,
+        @RequestParam(required = false) artifactType: String?,
+        @RequestParam(required = false) sourcePath: String?,
+        @RequestParam(required = false) taskId: String?,
+        @RequestParam(required = false) runId: String?,
+        @RequestParam(required = false) contentHash: String?,
+        @RequestParam(required = false) sourceReferenceCanonicalServerId: String?,
+        @RequestParam(required = false) sourceReferenceUri: String?,
+        @RequestParam(required = false) limit: Int?,
+    ): List<ArtifactLookupResponse> =
+        findArtifactsUseCase.findArtifacts(
+            ArtifactLookupRequest(
+                projectId = projectId,
+                iterationId = iterationId,
+                sourceProjectId = sourceProjectId,
+                sourceIterationId = sourceIterationId,
+                sourceDocumentId = sourceDocumentId,
+                sourceTaskGraphId = sourceTaskGraphId,
+                sourceTaskId = sourceTaskId,
+                sourceRunId = sourceRunId,
+                artifactType = artifactType,
+                sourcePath = sourcePath,
+                taskId = taskId,
+                runId = runId,
+                contentHash = contentHash,
+                sourceReferenceCanonicalServerId = sourceReferenceCanonicalServerId,
+                sourceReferenceUri = sourceReferenceUri,
+                limit = limit,
+            ).toQuery(),
+        ).map { it.toLookupResponse() }
+
+    @GetMapping("/search/keyword")
+    fun keywordSearch(
+        @RequestParam(name = "q", required = false) q: String?,
+        @RequestParam(required = false) projectId: String?,
+        @RequestParam(required = false) iterationId: String?,
+        @RequestParam(required = false) artifactType: String?,
+        @RequestParam(required = false) sourcePath: String?,
+        @RequestParam(required = false) taskId: String?,
+        @RequestParam(required = false) runId: String?,
+        @RequestParam(required = false) limit: Int?,
+    ): List<KeywordSearchResponse> =
+        keywordSearchUseCase.keywordSearch(
+            KeywordSearchRequest(
+                q = q,
+                projectId = projectId,
+                iterationId = iterationId,
+                artifactType = artifactType,
+                sourcePath = sourcePath,
+                taskId = taskId,
+                runId = runId,
+                limit = limit,
+            ).toQuery(),
+        ).map { it.toResponse() }
+
+    @PostMapping("/search/vector")
+    fun vectorSearch(@RequestBody request: VectorSearchRequest): List<VectorSearchResponse> =
+        vectorSearchUseCase.vectorSearch(request.toQuery()).map { it.toResponse() }
+}
+
+@RestController
+@RequestMapping("/api")
+class HealthRestController {
+    @GetMapping("/health")
+    fun health(): HealthResponse = HealthResponse(status = "UP")
+}
