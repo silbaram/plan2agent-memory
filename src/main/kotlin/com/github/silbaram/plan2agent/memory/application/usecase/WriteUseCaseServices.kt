@@ -101,7 +101,7 @@ class WriteUseCaseService(
             projectId = command.projectId,
             iterationId = command.iterationId,
             sourceDocumentId = command.sourceDocumentId,
-            sourcePath = command.sourcePath,
+            sourcePath = command.sourcePath.normalizedSourcePath(),
             snapshotVersion = command.snapshotVersion,
             artifactType = command.artifactType,
             title = command.title,
@@ -213,10 +213,13 @@ class WriteUseCaseService(
             "All chunks must belong to document ${command.documentId.value}"
         }
 
+        val writes = command.chunks.map { write ->
+            write.copy(chunk = write.chunk.copy(sourcePath = write.chunk.sourcePath.normalizedSourcePath()))
+        }
         val existingChunks = documentChunkStore.findByDocumentId(command.documentId)
         val existingByHash = existingChunks.associateBy { it.chunkHash }
         val existingById = existingChunks.associateBy { it.id }
-        val chunks = command.chunks.map { write ->
+        val chunks = writes.map { write ->
             validateChunkRelations(write.chunk, document)
             write.chunk
         }
@@ -245,7 +248,7 @@ class WriteUseCaseService(
         val savedByInputId = savedChunks.associateBy { it.id }
         val savedByHash = savedChunks.associateBy { it.documentId to it.chunkHash }
 
-        command.chunks.forEach { write ->
+        writes.forEach { write ->
             val embeddingSet = write.embeddingSet
             val embedding = write.embedding
             if (embeddingSet != null && embedding != null) {
@@ -387,3 +390,9 @@ private fun com.github.silbaram.plan2agent.memory.domain.SourceReference?.requir
         "$label sourceReference canonicalServerId must match canonical id $canonicalId"
     }
 }
+
+private fun String.normalizedSourcePath(): String =
+    trim()
+        .replace('\\', '/')
+        .replace(Regex("/{2,}"), "/")
+        .removePrefix("./")
