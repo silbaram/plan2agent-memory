@@ -178,7 +178,7 @@
       "id": "task-8",
       "title": "Implement artifact query, keyword search, and vector search adapters",
       "description": "Implement filter-based artifact lookup, RAG-oriented PostgreSQL lexical keyword search, and exact pgvector search behind replaceable search ports.",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "task-5",
         "task-7"
