@@ -1,9 +1,5 @@
-# Plan2Agent: plan artifacts, scripts, schemas, and source code are tracked.
-# Run logs (machine-specific paths/timestamps) and build outputs are not.
-
-# Plan2Agent run logs
-.plan2agent/runs/
-.plan2agent/artifacts/**/runs/
+# Plan2Agent local harness state and artifacts
+.plan2agent/
 
 # Dependencies / build outputs
 node_modules/
