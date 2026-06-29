@@ -79,7 +79,7 @@
       "id": "task-4",
       "title": "Implement project, iteration, document, and task graph adapters",
       "description": "Implement PostgreSQL outbound adapters for project and iteration upsert, document snapshot storage, task graph storage, and task bulk upsert.",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "task-2",
         "task-3"
