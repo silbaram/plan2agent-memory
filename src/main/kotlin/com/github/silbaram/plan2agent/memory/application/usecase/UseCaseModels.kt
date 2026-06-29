@@ -1,6 +1,7 @@
 package com.github.silbaram.plan2agent.memory.application.usecase
 
 import com.github.silbaram.plan2agent.memory.domain.ArtifactType
+import com.github.silbaram.plan2agent.memory.domain.ArtifactRef
 import com.github.silbaram.plan2agent.memory.domain.CanonicalServerId
 import com.github.silbaram.plan2agent.memory.domain.ContentHash
 import com.github.silbaram.plan2agent.memory.domain.DistanceMetric
@@ -97,6 +98,7 @@ data class SaveRunRecordCommand(
     val status: RunStatus,
     val agentTool: String,
     val runJson: String,
+    val artifactRefs: List<ArtifactRef> = emptyList(),
     val startedAt: Instant,
     val finishedAt: Instant? = null,
     val sourceReference: SourceReference? = null,
