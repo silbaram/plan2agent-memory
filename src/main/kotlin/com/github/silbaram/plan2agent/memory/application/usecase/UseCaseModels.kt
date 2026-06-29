@@ -20,6 +20,7 @@ import com.github.silbaram.plan2agent.memory.domain.SourceIterationId
 import com.github.silbaram.plan2agent.memory.domain.SourceProjectId
 import com.github.silbaram.plan2agent.memory.domain.SourceRunId
 import com.github.silbaram.plan2agent.memory.domain.SourceTaskGraphId
+import com.github.silbaram.plan2agent.memory.domain.SourceTaskId
 import com.github.silbaram.plan2agent.memory.domain.Task
 import com.github.silbaram.plan2agent.memory.domain.TaskDependency
 import com.github.silbaram.plan2agent.memory.domain.TaskGraphId
@@ -128,6 +129,12 @@ data class DocumentChunkWrite(
 data class FindArtifactsQuery(
     val projectId: ProjectId? = null,
     val iterationId: IterationId? = null,
+    val sourceProjectId: SourceProjectId? = null,
+    val sourceIterationId: SourceIterationId? = null,
+    val sourceDocumentId: SourceDocumentId? = null,
+    val sourceTaskGraphId: SourceTaskGraphId? = null,
+    val sourceTaskId: SourceTaskId? = null,
+    val sourceRunId: SourceRunId? = null,
     val artifactType: ArtifactType? = null,
     val sourcePath: String? = null,
     val taskId: TaskId? = null,

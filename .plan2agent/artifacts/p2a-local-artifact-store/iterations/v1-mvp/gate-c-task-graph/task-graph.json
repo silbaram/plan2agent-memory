@@ -154,7 +154,7 @@
       "id": "task-7",
       "title": "Implement artifact query and search use cases",
       "description": "Implement read-side application services for artifact lookup, keyword search, and vector search around the approved port contracts.",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "task-4",
         "task-5"
