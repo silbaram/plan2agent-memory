@@ -256,7 +256,7 @@
       "id": "task-11",
       "title": "Implement local token security adapter",
       "description": "Add simple local token or API key authentication as an adapter, with configuration and test-friendly behavior.",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "task-9",
         "task-10"
