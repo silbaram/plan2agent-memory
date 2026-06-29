@@ -99,6 +99,11 @@ class ReadUseCaseServiceTest {
         }
             .isInstanceOf(IllegalArgumentException::class.java)
             .hasMessageContaining("sourcePath must not be blank")
+        assertThatThrownBy {
+            service.keywordSearch(KeywordSearchQuery(query = "rag", metadataFilters = mapOf(" " to "gate-b")))
+        }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessageContaining("metadata filter keys must not be blank")
         assertThat(keywordSearch.received).isNull()
 
         val expected = KeywordSearchQuery(
@@ -109,6 +114,7 @@ class ReadUseCaseServiceTest {
             sourcePath = "runs/task.md",
             taskId = ReadTestIds.taskId,
             runId = ReadTestIds.runId,
+            metadataFilters = mapOf("phase" to "gate-d"),
             limit = 10,
         )
 
@@ -133,6 +139,45 @@ class ReadUseCaseServiceTest {
         }
             .isInstanceOf(IllegalArgumentException::class.java)
             .hasMessageContaining("embeddingDimension must match embedding size")
+        assertThatThrownBy {
+            service.vectorSearch(
+                VectorSearchQuery(
+                    embedding = Embedding(listOf(0.1f, 0.2f)),
+                    embeddingModel = " ",
+                    embeddingDimension = 2,
+                    embeddingVersion = "v1",
+                    distanceMetric = DistanceMetric.COSINE,
+                ),
+            )
+        }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessageContaining("embeddingModel must not be blank")
+        assertThatThrownBy {
+            service.vectorSearch(
+                VectorSearchQuery(
+                    embedding = Embedding(listOf(0.1f, 0.2f)),
+                    embeddingModel = "text-embedding-test",
+                    embeddingDimension = 2,
+                    embeddingVersion = " ",
+                    distanceMetric = DistanceMetric.COSINE,
+                ),
+            )
+        }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessageContaining("embeddingVersion must not be blank")
+        assertThatThrownBy {
+            service.vectorSearch(
+                VectorSearchQuery(
+                    embedding = Embedding(listOf(Float.NaN)),
+                    embeddingModel = "text-embedding-test",
+                    embeddingDimension = 1,
+                    embeddingVersion = "v1",
+                    distanceMetric = DistanceMetric.COSINE,
+                ),
+            )
+        }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessageContaining("embedding values must be finite")
         assertThat(vectorSearch.received).isNull()
 
         val expected = VectorSearchQuery(
@@ -147,6 +192,7 @@ class ReadUseCaseServiceTest {
             sourcePath = "runs/task.md",
             taskId = ReadTestIds.taskId,
             runId = ReadTestIds.runId,
+            metadataFilters = mapOf("phase" to "gate-d"),
             limit = 5,
         )
 

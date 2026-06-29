@@ -281,7 +281,7 @@
       "id": "task-12",
       "title": "Add core use case and architecture tests",
       "description": "Add tests for application core behavior, idempotency rules, relation validation, query/search validation, and adapter boundary constraints.",
-      "status": "todo",
+      "status": "done",
       "dependencies": [
         "task-6",
         "task-7"

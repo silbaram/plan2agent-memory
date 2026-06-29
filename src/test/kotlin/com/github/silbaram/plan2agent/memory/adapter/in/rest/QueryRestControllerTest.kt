@@ -180,6 +180,21 @@ class QueryRestControllerTest {
         }
             .isInstanceOf(IllegalArgumentException::class.java)
             .hasMessageContaining("q is required")
+
+        assertThatThrownBy {
+            controller.keywordSearch(
+                q = "decision",
+                projectId = null,
+                iterationId = null,
+                artifactType = "not_an_artifact",
+                sourcePath = null,
+                taskId = null,
+                runId = null,
+                limit = null,
+            )
+        }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessageContaining("artifactType has invalid value")
     }
 
     @Test
