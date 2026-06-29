@@ -11,6 +11,7 @@ internal class PostgresJsonSupport(
     private val stringMapType = object : TypeReference<Map<String, String>>() {}
     private val stringListType = object : TypeReference<List<String>>() {}
     private val dependencyEdgeListType = object : TypeReference<List<DependencyEdgeJson>>() {}
+    private val artifactRefListType = object : TypeReference<List<ArtifactRefJson>>() {}
 
     fun metadataToJson(metadata: Map<String, String>): String =
         objectMapper.writeValueAsString(metadata)
@@ -40,6 +41,16 @@ internal class PostgresJsonSupport(
             emptyList()
         } else {
             objectMapper.readValue(json, dependencyEdgeListType)
+        }
+
+    fun artifactRefsToJson(values: Collection<ArtifactRefJson>): String =
+        objectMapper.writeValueAsString(values)
+
+    fun artifactRefsFromJson(json: String?): List<ArtifactRefJson> =
+        if (json.isNullOrBlank()) {
+            emptyList()
+        } else {
+            objectMapper.readValue(json, artifactRefListType)
         }
 
     fun withSourceReference(metadata: Map<String, String>, sourceReference: SourceReference?): Map<String, String> {
@@ -106,4 +117,10 @@ internal class PostgresJsonSupport(
 internal data class DependencyEdgeJson(
     val fromTaskId: String,
     val toTaskId: String,
+)
+
+internal data class ArtifactRefJson(
+    val artifactType: String,
+    val artifactId: String,
+    val sourcePath: String? = null,
 )

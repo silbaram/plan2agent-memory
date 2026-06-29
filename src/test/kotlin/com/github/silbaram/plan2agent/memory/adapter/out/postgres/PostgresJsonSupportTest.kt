@@ -37,4 +37,23 @@ class PostgresJsonSupportTest {
 
         assertThat(json.dependencyEdgesFromJson(encoded)).containsExactlyElementsOf(edges)
     }
+
+    @Test
+    fun `round-trips run artifact refs`() {
+        val artifactRefs = listOf(
+            ArtifactRefJson(
+                artifactType = "DOCUMENT_SNAPSHOT",
+                artifactId = "document-1",
+                sourcePath = "iterations/v1/gate-b-spec/spec.json",
+            ),
+            ArtifactRefJson(
+                artifactType = "TASK_GRAPH",
+                artifactId = "task-graph-1",
+            ),
+        )
+
+        val encoded = json.artifactRefsToJson(artifactRefs)
+
+        assertThat(json.artifactRefsFromJson(encoded)).containsExactlyElementsOf(artifactRefs)
+    }
 }
