@@ -48,7 +48,7 @@ Progress: [A:complete] -> [B:approved] -> [C:valid] -> [D:passed]
 
 | 반복 | 상태 | task | 게이트 | 위치 |
 | --- | --- | --- | --- | --- |
-| v1-mvp | active | 17(todo 16·in_progress 0·done 1·blocked 0) | A✅ B✅(approved) C✅ D✅(blocker 0) | iterations/v1-mvp/ |
+| v1-mvp | active | 17(todo 15·in_progress 0·done 2·blocked 0) | A✅ B✅(approved) C✅ D✅(blocker 0) | iterations/v1-mvp/ |
 | maintenance | 상시 active | 0 (graph 미생성) | task graph only | iterations/maintenance/ |
 
 ### Close Audit
