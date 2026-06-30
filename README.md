@@ -103,34 +103,51 @@ curl -H 'X-P2A-Local-Token: local-dev-token' \
 }
 ```
 
-## 공통 응답 의미
+## REST API 명세
 
-대부분의 write response는 다음 metadata를 포함합니다.
+Base URL은 기본 실행 기준 `http://localhost:8080`입니다. 인증이 켜져 있다면 `/api/health`를 제외한 `/api/**` 요청에 `X-P2A-Local-Token` header를 포함해야 합니다.
 
-- canonical server ID: `projectId`, `iterationId`, `documentId`, `taskGraphId`, `taskId`, `runId`, `chunkId`
-- source ID: `sourceProjectId`, `sourceIterationId`, `sourceDocumentId`, `sourceTaskGraphId`, `sourceTaskId`, `sourceRunId`
-- lineage: `lineage.projectId`, `lineage.iterationId`, `lineage.sourcePath`, `lineage.contentHash`, `lineage.snapshotVersion`, `lineage.taskId`, `lineage.runId`
-- source reference: `sourceReference.canonicalServerId`, `sourceReference.uri`, `sourceReference.path`
+### Endpoint 요약
 
-P2A GUI/CLI는 이 metadata를 사용해 git client처럼 status, diff, push, pull, conflict resolution, history UI/workflow를 구현하는 동기화 클라이언트입니다. 서버는 이 metadata를 저장하고 조회할 뿐, 로컬 파일을 자동 수정하거나 병합하지 않습니다.
+| Method | Endpoint | 설명 | 인증 |
+| --- | --- | --- | --- |
+| `POST` | `/api/projects` | 프로젝트를 등록하거나 upsert합니다. | 필요 |
+| `POST` | `/api/projects/{projectId}/iterations` | 프로젝트에 iteration을 연결해 등록하거나 upsert합니다. | 필요 |
+| `POST` | `/api/documents/snapshots` | 문서 또는 산출물 snapshot을 저장합니다. | 필요 |
+| `POST` | `/api/task-graphs` | task graph JSON과 graph metadata를 저장합니다. | 필요 |
+| `POST` | `/api/tasks/bulk` | task graph에 속한 task 목록을 bulk 저장합니다. | 필요 |
+| `POST` | `/api/runs` | task 실행 기록을 저장합니다. | 필요 |
+| `POST` | `/api/document-chunks/bulk` | 문서 chunk와 선택적 embedding을 bulk 저장합니다. | 필요 |
+| `GET` | `/api/artifacts` | 저장된 artifact를 filter 조건으로 조회합니다. | 필요 |
+| `GET` | `/api/search/keyword` | RAG/history lookup을 위한 keyword 검색을 수행합니다. | 필요 |
+| `POST` | `/api/search/vector` | 외부 query embedding으로 vector 검색을 수행합니다. | 필요 |
+| `GET` | `/api/health` | 간단한 API health check입니다. | 불필요 |
+| `GET` | `/actuator/health` | Spring Actuator health check입니다. | 불필요 |
 
-## REST endpoints
+### 공통 데이터 규칙
+
+| 항목 | 의미 |
+| --- | --- |
+| Canonical server ID | 서버가 canonical하게 다루는 ID입니다. 예: `projectId`, `iterationId`, `documentId`, `taskGraphId`, `taskId`, `runId`, `chunkId`. |
+| Source ID | 로컬/P2A 원본 시스템의 ID입니다. 예: `sourceProjectId`, `sourceIterationId`, `sourceDocumentId`, `sourceTaskGraphId`, `sourceTaskId`, `sourceRunId`. |
+| Lineage | artifact의 출처와 버전을 추적하는 metadata입니다. 예: `lineage.projectId`, `lineage.iterationId`, `lineage.sourcePath`, `lineage.contentHash`, `lineage.snapshotVersion`, `lineage.taskId`, `lineage.runId`. |
+| Source reference | canonical ID와 원본 위치를 연결합니다. 예: `sourceReference.canonicalServerId`, `sourceReference.uri`, `sourceReference.path`. |
+
+P2A GUI/CLI는 위 metadata를 사용해 git client처럼 status, diff, push, pull, conflict resolution, history UI/workflow를 구현하는 동기화 클라이언트입니다. 서버는 metadata를 저장하고 조회할 뿐, 로컬 파일을 자동 수정하거나 병합하지 않습니다.
 
 ### `POST /api/projects`
 
 프로젝트를 등록 또는 upsert합니다.
 
-주요 request fields:
-
-- `projectId`: canonical server UUID
-- `sourceProjectId`: 로컬/P2A project ID
-- `name`
-- `canonicalServerId`: 생략하면 `projectId`
-- `rootPath`
-- `sourceReference`
-- `metadata`
-
-예:
+| Request field | 필수 | 설명 |
+| --- | --- | --- |
+| `projectId` | 선택 | Canonical server UUID입니다. |
+| `sourceProjectId` | 권장 | 로컬/P2A project ID입니다. |
+| `name` | 필수 | 프로젝트 이름입니다. |
+| `canonicalServerId` | 선택 | 생략하면 `projectId`를 사용합니다. |
+| `rootPath` | 선택 | 로컬 repository/project root path입니다. |
+| `sourceReference` | 선택 | 원본 위치 참조 정보입니다. |
+| `metadata` | 선택 | 확장 metadata입니다. |
 
 ```json
 {
@@ -148,239 +165,251 @@ P2A GUI/CLI는 이 metadata를 사용해 git client처럼 status, diff, push, pu
 }
 ```
 
-응답은 `ProjectResponse`이며 `projectId`, `canonicalServerId`, `sourceProjectId`, `rootPath`, `sourceReference`, `metadata`를 포함합니다.
+| Response | 포함 정보 |
+| --- | --- |
+| `ProjectResponse` | `projectId`, `canonicalServerId`, `sourceProjectId`, `rootPath`, `sourceReference`, `metadata` |
 
 ### `POST /api/projects/{projectId}/iterations`
 
-iteration을 프로젝트에 연결해 등록 또는 upsert합니다.
+Iteration을 프로젝트에 연결해 등록 또는 upsert합니다.
 
-주요 request fields:
+| Request field | 필수 | 설명 |
+| --- | --- | --- |
+| `projectId` | 필수 | Path variable입니다. |
+| `iterationId` | 선택 | Canonical iteration ID입니다. |
+| `sourceIterationId` | 권장 | 로컬/P2A iteration ID입니다. |
+| `label` | 필수 | Iteration 표시 이름입니다. |
+| `status` | 필수 | `PLANNED`, `ACTIVE`, `APPROVED`, `COMPLETED`, `ARCHIVED` 중 하나입니다. |
+| `sourceReference` | 선택 | 원본 위치 참조 정보입니다. |
+| `metadata` | 선택 | 확장 metadata입니다. |
 
-- path `projectId`
-- `iterationId`
-- `sourceIterationId`
-- `label`
-- `status`: `PLANNED`, `ACTIVE`, `APPROVED`, `COMPLETED`, `ARCHIVED`
-- `sourceReference`
-- `metadata`
-
-응답은 `IterationResponse`입니다.
+| Response | 포함 정보 |
+| --- | --- |
+| `IterationResponse` | Iteration canonical/source ID, `label`, `status`, `sourceReference`, `metadata` |
 
 ### `POST /api/documents/snapshots`
 
 문서 또는 산출물 snapshot을 저장합니다.
 
-주요 request fields:
+| Request field | 필수 | 설명 |
+| --- | --- | --- |
+| `documentId` | 선택 | Canonical document snapshot ID입니다. |
+| `projectId` | 필수 | 소속 project ID입니다. |
+| `iterationId` | 선택 | 소속 iteration ID입니다. |
+| `sourceDocumentId` | 권장 | 로컬/P2A document ID입니다. |
+| `sourcePath` | 필수 | 정규화 대상 source path입니다. |
+| `snapshotVersion` | 선택 | Snapshot version입니다. |
+| `artifactType` | 필수 | 예: `DOCUMENT_SNAPSHOT`. |
+| `title` | 선택 | 문서 제목입니다. |
+| `content` | 필수 | 문서 본문입니다. |
+| `contentHash` | 필수 | 내용 hash입니다. |
+| `sourceReference` | 선택 | 원본 위치 참조 정보입니다. |
+| `capturedAt` | 선택 | Snapshot 수집 시각입니다. |
+| `metadata` | 선택 | 확장 metadata입니다. |
 
-- `documentId`
-- `projectId`
-- `iterationId`
-- `sourceDocumentId`
-- `sourcePath`
-- `snapshotVersion`
-- `artifactType`: 예: `DOCUMENT_SNAPSHOT`
-- `title`
-- `content`
-- `contentHash`
-- `sourceReference`
-- `capturedAt`
-- `metadata`
-
-응답은 `DocumentSnapshotResponse`이며 `lineage.contentHash`, `lineage.snapshotVersion`, `metadata.sourceDocumentId`를 포함합니다.
+| Response | 포함 정보 |
+| --- | --- |
+| `DocumentSnapshotResponse` | Snapshot 정보와 `lineage.contentHash`, `lineage.snapshotVersion`, `metadata.sourceDocumentId` |
 
 ### `POST /api/task-graphs`
 
-task graph JSON과 graph metadata를 저장합니다.
+Task graph JSON과 graph metadata를 저장합니다.
 
-주요 request fields:
+| Request field | 필수 | 설명 |
+| --- | --- | --- |
+| `taskGraphId` | 선택 | Canonical task graph ID입니다. |
+| `projectId` | 필수 | 소속 project ID입니다. |
+| `iterationId` | 선택 | 소속 iteration ID입니다. |
+| `sourceTaskGraphId` | 권장 | 로컬/P2A task graph ID입니다. |
+| `sourceDocumentId` | 선택 | Graph를 생성한 source document ID입니다. |
+| `graphHash` | 필수 | Graph JSON hash입니다. |
+| `graphJson` | 필수 | Task graph 원본 JSON입니다. |
+| `taskIds` | 선택 | Graph에 포함된 task ID 목록입니다. |
+| `dependencyEdges` | 선택 | Task dependency edge 목록입니다. |
+| `sourceReference` | 선택 | 원본 위치 참조 정보입니다. |
+| `metadata` | 선택 | 확장 metadata입니다. |
 
-- `taskGraphId`
-- `projectId`
-- `iterationId`
-- `sourceTaskGraphId`
-- `sourceDocumentId`
-- `graphHash`
-- `graphJson`
-- `taskIds`
-- `dependencyEdges`
-- `sourceReference`
-- `metadata`
-
-응답은 `TaskGraphResponse`입니다.
+| Response | 포함 정보 |
+| --- | --- |
+| `TaskGraphResponse` | Task graph canonical/source ID, graph hash, task/dependency metadata |
 
 ### `POST /api/tasks/bulk`
 
-task graph에 속한 task 목록을 저장합니다.
+Task graph에 속한 task 목록을 저장합니다.
 
-주요 request fields:
+| Request field | 필수 | 설명 |
+| --- | --- | --- |
+| `graphId` | 필수 | Task들이 속한 graph ID입니다. |
+| `tasks[].taskId` | 선택 | Canonical task ID입니다. |
+| `tasks[].projectId` | 필수 | 소속 project ID입니다. |
+| `tasks[].iterationId` | 선택 | 소속 iteration ID입니다. |
+| `tasks[].taskGraphId` | 필수 | 소속 task graph ID입니다. |
+| `tasks[].sourceTaskId` | 권장 | 로컬/P2A task ID입니다. |
+| `tasks[].title` | 필수 | Task 제목입니다. |
+| `tasks[].description` | 선택 | Task 설명입니다. |
+| `tasks[].status` | 필수 | `READY`, `BLOCKED`, `IN_PROGRESS`, `DONE` 중 하나입니다. |
+| `tasks[].targetArea` | 선택 | 구현/검토 대상 영역입니다. |
+| `tasks[].dependencies` | 선택 | 선행 task ID 목록입니다. |
+| `tasks[].acceptanceCriteria` | 선택 | 완료 기준 목록입니다. |
+| `tasks[].sourceReference` | 선택 | 원본 위치 참조 정보입니다. |
+| `tasks[].metadata` | 선택 | 확장 metadata입니다. |
 
-- `graphId`
-- `tasks[].taskId`
-- `tasks[].projectId`
-- `tasks[].iterationId`
-- `tasks[].taskGraphId`
-- `tasks[].sourceTaskId`
-- `tasks[].title`
-- `tasks[].description`
-- `tasks[].status`: `READY`, `BLOCKED`, `IN_PROGRESS`, `DONE`
-- `tasks[].targetArea`
-- `tasks[].dependencies`
-- `tasks[].acceptanceCriteria`
-- `tasks[].sourceReference`
-- `tasks[].metadata`
-
-응답은 `TaskResponse[]`입니다.
+| Response | 포함 정보 |
+| --- | --- |
+| `TaskResponse[]` | 저장된 task 목록과 lineage/source metadata |
 
 ### `POST /api/runs`
 
-task 실행 기록을 저장합니다.
+Task 실행 기록을 저장합니다.
 
-주요 request fields:
+| Request field | 필수 | 설명 |
+| --- | --- | --- |
+| `runId` | 선택 | Canonical run ID입니다. |
+| `projectId` | 필수 | 소속 project ID입니다. |
+| `iterationId` | 선택 | 소속 iteration ID입니다. |
+| `taskId` | 필수 | 실행 대상 task ID입니다. |
+| `sourceRunId` | 권장 | 로컬/P2A run ID입니다. |
+| `status` | 필수 | `STARTED`, `FINISHED`, `FAILED`, `BLOCKED` 중 하나입니다. |
+| `agentTool` | 선택 | 실행한 agent/tool 이름입니다. |
+| `runJson` | 선택 | 실행 상세 JSON입니다. |
+| `artifactRefs` | 선택 | 실행 중 생성/참조한 artifact 목록입니다. |
+| `startedAt` | 선택 | 시작 시각입니다. |
+| `finishedAt` | 선택 | 종료 시각입니다. |
+| `sourceReference` | 선택 | 원본 위치 참조 정보입니다. |
+| `metadata` | 선택 | 확장 metadata입니다. |
 
-- `runId`
-- `projectId`
-- `iterationId`
-- `taskId`
-- `sourceRunId`
-- `status`: `STARTED`, `FINISHED`, `FAILED`, `BLOCKED`
-- `agentTool`
-- `runJson`
-- `artifactRefs`
-- `startedAt`
-- `finishedAt`
-- `sourceReference`
-- `metadata`
-
-응답은 `RunRecordResponse`이며 `lineage.taskId`, `lineage.runId`, `metadata.sourceRunId`를 포함합니다.
+| Response | 포함 정보 |
+| --- | --- |
+| `RunRecordResponse` | Run 정보와 `lineage.taskId`, `lineage.runId`, `metadata.sourceRunId` |
 
 ### `POST /api/document-chunks/bulk`
 
-문서 chunk와 선택적 embedding을 저장합니다.
+문서 chunk와 선택적 embedding을 저장합니다. `embeddingSet`과 `embedding`은 함께 제공해야 하며, 둘 중 하나만 있으면 validation error입니다.
 
-주요 request fields:
+| Request field | 필수 | 설명 |
+| --- | --- | --- |
+| `documentId` | 필수 | Chunk가 속한 document ID입니다. |
+| `chunks[].chunk.chunkId` | 선택 | Canonical chunk ID입니다. |
+| `chunks[].chunk.projectId` | 필수 | 소속 project ID입니다. |
+| `chunks[].chunk.iterationId` | 선택 | 소속 iteration ID입니다. |
+| `chunks[].chunk.taskId` | 선택 | 연결된 task ID입니다. |
+| `chunks[].chunk.runId` | 선택 | 연결된 run ID입니다. |
+| `chunks[].chunk.artifactType` | 필수 | Chunk의 artifact type입니다. |
+| `chunks[].chunk.sourcePath` | 필수 | 정규화 대상 source path입니다. |
+| `chunks[].chunk.chunkIndex` | 필수 | 문서 내 chunk 순서입니다. |
+| `chunks[].chunk.content` | 필수 | Chunk 본문입니다. |
+| `chunks[].chunk.chunkHash` | 필수 | Chunk 내용 hash입니다. |
+| `chunks[].chunk.tokenEstimate` | 선택 | Token 추정치입니다. |
+| `chunks[].chunk.sourceReference` | 선택 | 원본 위치 참조 정보입니다. |
+| `chunks[].chunk.metadata` | 선택 | Chunk 확장 metadata입니다. |
+| `chunks[].embeddingSet` | 선택 | Embedding set 정보입니다. |
+| `chunks[].embedding` | 선택 | 외부 클라이언트가 생성한 vector입니다. |
+| `chunks[].embeddingHash` | 선택 | Embedding vector hash입니다. |
 
-- `documentId`
-- `chunks[].chunk.chunkId`
-- `chunks[].chunk.projectId`
-- `chunks[].chunk.iterationId`
-- `chunks[].chunk.taskId`
-- `chunks[].chunk.runId`
-- `chunks[].chunk.artifactType`
-- `chunks[].chunk.sourcePath`
-- `chunks[].chunk.chunkIndex`
-- `chunks[].chunk.content`
-- `chunks[].chunk.chunkHash`
-- `chunks[].chunk.tokenEstimate`
-- `chunks[].chunk.sourceReference`
-- `chunks[].chunk.metadata`
-- `chunks[].embeddingSet`
-- `chunks[].embedding`
-- `chunks[].embeddingHash`
+| `embeddingSet` field | 필수 | 설명 |
+| --- | --- | --- |
+| `embeddingSetId` | 선택 | Canonical embedding set ID입니다. |
+| `projectId` | 필수 | 소속 project ID입니다. |
+| `embeddingModel` | 필수 | Embedding model 이름입니다. |
+| `embeddingDimension` | 필수 | Vector 차원입니다. |
+| `embeddingVersion` | 필수 | Embedding model/version 문자열입니다. |
+| `distanceMetric` | 필수 | `COSINE`, `L2`, `INNER_PRODUCT` 중 하나입니다. |
+| `storageType` | 필수 | `VECTOR_INDEX`, `INLINE`, `EXTERNAL` 중 하나입니다. |
 
-`embeddingSet`과 `embedding`은 함께 제공해야 합니다. 둘 중 하나만 있으면 validation error입니다.
-
-`embeddingSet` 주요 fields:
-
-- `embeddingSetId`
-- `projectId`
-- `embeddingModel`
-- `embeddingDimension`
-- `embeddingVersion`
-- `distanceMetric`: `COSINE`, `L2`, `INNER_PRODUCT`
-- `storageType`: `VECTOR_INDEX`, `INLINE`, `EXTERNAL`
-
-응답은 `DocumentChunkResponse[]`이며 `chunkHash`, `lineage.taskId`, `lineage.runId`, `sourceReference`를 포함합니다.
+| Response | 포함 정보 |
+| --- | --- |
+| `DocumentChunkResponse[]` | 저장된 chunk 목록과 `chunkHash`, `lineage.taskId`, `lineage.runId`, `sourceReference` |
 
 ### `GET /api/artifacts`
 
-저장된 artifact를 필터로 조회합니다.
+저장된 artifact를 filter 조건으로 조회합니다.
 
-지원 query params:
+| Query param | 필수 | 설명 |
+| --- | --- | --- |
+| `projectId` | 선택 | Project ID filter입니다. |
+| `iterationId` | 선택 | Iteration ID filter입니다. |
+| `sourceProjectId` | 선택 | Source project ID filter입니다. |
+| `sourceIterationId` | 선택 | Source iteration ID filter입니다. |
+| `sourceDocumentId` | 선택 | Source document ID filter입니다. |
+| `sourceTaskGraphId` | 선택 | Source task graph ID filter입니다. |
+| `sourceTaskId` | 선택 | Source task ID filter입니다. |
+| `sourceRunId` | 선택 | Source run ID filter입니다. |
+| `artifactType` | 선택 | Artifact type filter입니다. |
+| `sourcePath` | 선택 | 정규화된 source path filter입니다. |
+| `taskId` | 선택 | Canonical task ID filter입니다. |
+| `runId` | 선택 | Canonical run ID filter입니다. |
+| `contentHash` | 선택 | Content hash filter입니다. |
+| `sourceReferenceCanonicalServerId` | 선택 | Source reference canonical server ID filter입니다. |
+| `sourceReferenceUri` | 선택 | Source reference URI filter입니다. |
+| `limit` | 선택 | 최대 응답 개수입니다. |
 
-- `projectId`
-- `iterationId`
-- `sourceProjectId`
-- `sourceIterationId`
-- `sourceDocumentId`
-- `sourceTaskGraphId`
-- `sourceTaskId`
-- `sourceRunId`
-- `artifactType`
-- `sourcePath`
-- `taskId`
-- `runId`
-- `contentHash`
-- `sourceReferenceCanonicalServerId`
-- `sourceReferenceUri`
-- `limit`
-
-응답은 `ArtifactLookupResponse[]`입니다. 각 항목은 `lineage`, `sourceIds`, `sourceReference`, `contentHash`, `snapshotVersion`을 포함합니다.
+| Response | 포함 정보 |
+| --- | --- |
+| `ArtifactLookupResponse[]` | 각 항목의 `lineage`, `sourceIds`, `sourceReference`, `contentHash`, `snapshotVersion` |
 
 ### `GET /api/search/keyword`
 
 RAG/history lookup을 위한 deterministic lexical retrieval입니다.
 
-지원 query params:
+| Query param | 필수 | 설명 |
+| --- | --- | --- |
+| `q` | 필수 | Keyword query입니다. |
+| `projectId` | 선택 | Project ID filter입니다. |
+| `iterationId` | 선택 | Iteration ID filter입니다. |
+| `artifactType` | 선택 | Artifact type filter입니다. |
+| `sourcePath` | 선택 | 정규화된 source path filter입니다. |
+| `taskId` | 선택 | Canonical task ID filter입니다. |
+| `runId` | 선택 | Canonical run ID filter입니다. |
+| `limit` | 선택 | 최대 응답 개수입니다. |
 
-- `q`: 필수 keyword query
-- `projectId`
-- `iterationId`
-- `artifactType`
-- `sourcePath`
-- `taskId`
-- `runId`
-- `limit`
+| 검색 동작 | 설명 |
+| --- | --- |
+| 검색 대상 | 주 대상은 `document_chunks.content`, 보조 대상은 `documents.content`, `sourcePath`, `artifactType`입니다. |
+| Matching | Case-insensitive matching입니다. |
+| Filter semantics | 여러 filter는 AND semantics로 적용됩니다. |
+| Score | `score`는 backend-opaque 값이며 API 안정 계약으로 고정하지 않습니다. |
+| Tie-break | 동률은 snapshot/version/timestamp/chunkIndex 기준으로 정렬합니다. |
 
-검색 대상:
-
-- 주 대상: `document_chunks.content`
-- 보조 대상: `documents.content`, `sourcePath`, `artifactType`
-
-동작:
-
-- case-insensitive matching
-- filter는 AND semantics
-- `score`는 backend-opaque 값이며 API 안정 계약으로 고정하지 않음
-- 동률은 snapshot/version/timestamp/chunkIndex 기준으로 정렬
-
-응답은 `KeywordSearchResponse[]`이며 `content`, `score`, `matchReason`, `lineage`, `sourceIds`, `metadata`를 포함합니다.
+| Response | 포함 정보 |
+| --- | --- |
+| `KeywordSearchResponse[]` | `content`, `score`, `matchReason`, `lineage`, `sourceIds`, `metadata` |
 
 ### `POST /api/search/vector`
 
 외부에서 받은 query embedding으로 pgvector exact search를 수행합니다.
 
-주요 request fields:
+| Request field | 필수 | 설명 |
+| --- | --- | --- |
+| `embedding` | 필수 | Query vector입니다. 비어 있으면 validation error입니다. |
+| `embeddingModel` | 필수 | 검색할 embedding model 이름입니다. |
+| `embeddingDimension` | 필수 | Vector 차원입니다. `embedding.size`와 같아야 합니다. |
+| `embeddingVersion` | 필수 | 검색할 embedding version입니다. |
+| `distanceMetric` | 선택 | 생략 시 `COSINE`입니다. |
+| `projectId` | 선택 | Project ID filter입니다. |
+| `iterationId` | 선택 | Iteration ID filter입니다. |
+| `artifactType` | 선택 | Artifact type filter입니다. |
+| `sourcePath` | 선택 | 정규화된 source path filter입니다. |
+| `taskId` | 선택 | Canonical task ID filter입니다. |
+| `runId` | 선택 | Canonical run ID filter입니다. |
+| `metadataFilters` | 선택 | Metadata key/value filter입니다. |
+| `limit` | 선택 | 최대 응답 개수입니다. |
 
-- `embedding`
-- `embeddingModel`
-- `embeddingDimension`
-- `embeddingVersion`
-- `distanceMetric`: 생략 시 `COSINE`
-- `projectId`
-- `iterationId`
-- `artifactType`
-- `sourcePath`
-- `taskId`
-- `runId`
-- `metadataFilters`
-- `limit`
+| 검색 동작 | 설명 |
+| --- | --- |
+| Matching scope | 같은 `embeddingModel`, `embeddingDimension`, `embeddingVersion`, `distanceMetric` embedding set 안에서만 검색합니다. |
+| Dimension validation | 저장된 embedding set 차원과 요청 차원이 다르면 validation error입니다. |
+| Search mode | pgvector exact search를 사용합니다. |
 
-동작:
+| Response | 포함 정보 |
+| --- | --- |
+| `VectorSearchResponse[]` | `score`, `distanceMetric`, `embeddingModel`, `embeddingVersion`, `lineage`, `sourceIds` |
 
-- query `embedding`은 비어 있으면 안 됩니다.
-- `embeddingDimension`은 `embedding.size`와 같아야 합니다.
-- 검색은 같은 `embeddingModel`, `embeddingDimension`, `embeddingVersion`, `distanceMetric` embedding set 안에서만 수행합니다.
-- 저장된 embedding set 차원과 요청 차원이 다르면 validation error입니다.
+### Health endpoints
 
-응답은 `VectorSearchResponse[]`이며 `score`, `distanceMetric`, `embeddingModel`, `embeddingVersion`, `lineage`, `sourceIds`를 포함합니다.
-
-### `GET /api/health`
-
-간단한 API health endpoint입니다. 인증 대상에서 제외됩니다.
-
-### `GET /actuator/health`
-
-Spring Actuator health endpoint입니다. 인증 대상에서 제외됩니다.
+| Method | Endpoint | 설명 | 인증 |
+| --- | --- | --- | --- |
+| `GET` | `/api/health` | 간단한 API health endpoint입니다. | 불필요 |
+| `GET` | `/actuator/health` | Spring Actuator health endpoint입니다. | 불필요 |
 
 ## Idempotency와 versioning
 
