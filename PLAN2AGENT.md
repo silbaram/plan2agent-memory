@@ -25,3 +25,9 @@ This repository owns its Plan2Agent planning and development loop in-place.
 4. Open the next iteration in this same project:
 
    `node .plan2agent/scripts/p2a_iteration.mjs open|draft|context|promote-tasks`
+
+## Storage policy
+
+The generated `.plan2agent/` directory is local harness state and is ignored by git.
+Keep application/source commits focused on product code, and persist P2A planning and run
+history through Plan2Agent Memory or an explicit export when needed.
