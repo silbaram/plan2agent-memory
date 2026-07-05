@@ -199,7 +199,7 @@ Iteration을 프로젝트에 연결해 등록 또는 upsert합니다.
 | `sourceDocumentId` | 권장 | 로컬/P2A document ID입니다. |
 | `sourcePath` | 필수 | 정규화 대상 source path입니다. |
 | `snapshotVersion` | 선택 | Snapshot version입니다. |
-| `artifactType` | 필수 | 예: `DOCUMENT_SNAPSHOT`. |
+| `artifactType` | 필수 | 예: `DOCUMENT_SNAPSHOT`, `PROPOSAL`. |
 | `title` | 선택 | 문서 제목입니다. |
 | `content` | 필수 | 문서 본문입니다. |
 | `contentHash` | 필수 | 내용 hash입니다. |
@@ -334,7 +334,7 @@ Task 실행 기록을 저장합니다.
 | `sourceTaskGraphId` | 선택 | Source task graph ID filter입니다. |
 | `sourceTaskId` | 선택 | Source task ID filter입니다. |
 | `sourceRunId` | 선택 | Source run ID filter입니다. |
-| `artifactType` | 선택 | Artifact type filter입니다. |
+| `artifactType` | 선택 | Artifact type filter입니다. Proposal snapshot은 `PROPOSAL`로 조회할 수 있습니다. |
 | `sourcePath` | 선택 | 정규화된 source path filter입니다. |
 | `taskId` | 선택 | Canonical task ID filter입니다. |
 | `runId` | 선택 | Canonical run ID filter입니다. |
@@ -356,7 +356,7 @@ RAG/history lookup을 위한 deterministic lexical retrieval입니다.
 | `q` | 필수 | Keyword query입니다. |
 | `projectId` | 선택 | Project ID filter입니다. |
 | `iterationId` | 선택 | Iteration ID filter입니다. |
-| `artifactType` | 선택 | Artifact type filter입니다. |
+| `artifactType` | 선택 | Artifact type filter입니다. Proposal snapshot은 `PROPOSAL`로 검색할 수 있습니다. |
 | `sourcePath` | 선택 | 정규화된 source path filter입니다. |
 | `taskId` | 선택 | Canonical task ID filter입니다. |
 | `runId` | 선택 | Canonical run ID filter입니다. |

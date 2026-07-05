@@ -198,6 +198,31 @@ class QueryRestControllerTest {
     }
 
     @Test
+    fun `artifact lookup accepts proposal artifact type`() {
+        controller.findArtifacts(
+            projectId = null,
+            iterationId = null,
+            sourceProjectId = null,
+            sourceIterationId = null,
+            sourceDocumentId = null,
+            sourceTaskGraphId = null,
+            sourceTaskId = null,
+            sourceRunId = null,
+            artifactType = "proposal",
+            sourcePath = ".plan2agent/proposals/proposal-run-123-harness-gap.json",
+            taskId = null,
+            runId = null,
+            contentHash = null,
+            sourceReferenceCanonicalServerId = null,
+            sourceReferenceUri = null,
+            limit = 10,
+        )
+
+        assertThat(findArtifacts.received?.artifactType).isEqualTo(ArtifactType.PROPOSAL)
+        assertThat(findArtifacts.received?.sourcePath).isEqualTo(".plan2agent/proposals/proposal-run-123-harness-gap.json")
+    }
+
+    @Test
     fun `vector search validates embedding request and maps metadata filters`() {
         vectorSearch.result = listOf(
             VectorSearchMatch(

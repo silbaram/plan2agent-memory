@@ -180,6 +180,73 @@ class ApiIntegrationTest {
     }
 
     @Test
+    fun `proposal snapshots can be stored and searched as first class artifacts`() {
+        val fixture = ApiFixture("proposal-sync")
+        postJson("/api/projects", fixture.projectBody()).andExpect(status().isCreated())
+        postJson("/api/projects/${fixture.projectId}/iterations", fixture.iterationBody()).andExpect(status().isCreated())
+
+        val proposalId = uuid("proposal-sync-proposal")
+        val proposalPath = ".plan2agent/proposals/proposal-run-123-harness-gap.json"
+        val proposalContent = """
+            {
+              "schema_version": "p2a.skill_proposal.v1",
+              "proposalId": "proposal-run-123-harness-gap",
+              "target": "p2a_toolkit",
+              "targetRepo": "https://github.com/silbaram/plan2agent",
+              "problem": "P2A toolkit proposal routing should preserve upstream evidence.",
+              "recommendedChange": "Import upstream proposals into the Plan2Agent toolkit queue."
+            }
+        """.trimIndent()
+        val proposalBody = mapOf(
+            "documentId" to proposalId,
+            "projectId" to fixture.projectId,
+            "iterationId" to fixture.iterationId,
+            "sourceDocumentId" to "proposal-run-123-harness-gap",
+            "sourcePath" to proposalPath,
+            "snapshotVersion" to 1,
+            "artifactType" to "PROPOSAL",
+            "title" to "Proposal: harness gap",
+            "content" to proposalContent,
+            "contentHash" to "proposal-sync-hash",
+            "sourceReference" to sourceReference(proposalId, proposalPath),
+            "capturedAt" to NOW,
+            "createdAt" to NOW,
+            "metadata" to mapOf(
+                "proposalTarget" to "p2a_toolkit",
+                "targetRepo" to "https://github.com/silbaram/plan2agent",
+                "proposalId" to "proposal-run-123-harness-gap",
+            ),
+        )
+
+        val proposal = postJson("/api/documents/snapshots", proposalBody).expectCreatedJson()
+        assertThat(proposal["artifactType"].asText()).isEqualTo("PROPOSAL")
+        assertThat(proposal["metadata"]["proposalTarget"].asText()).isEqualTo("p2a_toolkit")
+
+        val artifacts = getJson(
+            "/api/artifacts" +
+                "?projectId=${fixture.projectId}" +
+                "&iterationId=${fixture.iterationId}" +
+                "&artifactType=PROPOSAL" +
+                "&sourcePath=$proposalPath",
+        ).andExpect(status().isOk()).andReturnJson()
+        assertThat(artifacts.single()["artifactType"].asText()).isEqualTo("PROPOSAL")
+        assertThat(artifacts.single()["sourceIds"]["sourceDocumentId"].asText()).isEqualTo("proposal-run-123-harness-gap")
+        assertThat(artifacts.single()["metadata"]["proposalTarget"].asText()).isEqualTo("p2a_toolkit")
+
+        val search = getJson(
+            "/api/search/keyword" +
+                "?q=p2a_toolkit" +
+                "&projectId=${fixture.projectId}" +
+                "&iterationId=${fixture.iterationId}" +
+                "&artifactType=PROPOSAL" +
+                "&limit=5",
+        ).andExpect(status().isOk()).andReturnJson()
+        assertThat(search.single()["documentId"].asText()).isEqualTo(proposalId)
+        assertThat(search.single()["artifactType"].asText()).isEqualTo("PROPOSAL")
+        assertThat(search.single()["metadata"]["proposalTarget"].asText()).isEqualTo("p2a_toolkit")
+    }
+
+    @Test
     fun `API returns auth validation not found and conflict errors`() {
         getWithoutToken("/api/artifacts").andExpect(status().isUnauthorized())
             .andExpect(jsonPath("$.error").value("auth_error"))

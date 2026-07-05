@@ -7,5 +7,6 @@ enum class ArtifactType {
     TASK_GRAPH,
     TASK,
     RUN_RECORD,
+    PROPOSAL,
     DOCUMENT_CHUNK,
 }
