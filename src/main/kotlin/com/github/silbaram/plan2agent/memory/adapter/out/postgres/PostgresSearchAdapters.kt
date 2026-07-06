@@ -32,11 +32,12 @@ import java.util.UUID
 @Repository
 class PostgresArtifactQueryAdapter(
     private val jdbc: NamedParameterJdbcTemplate,
+    private val metrics: PostgresAdapterMetrics,
     objectMapper: ObjectMapper,
 ) : ArtifactQueryPort {
     private val json = PostgresJsonSupport(objectMapper)
 
-    override fun findArtifacts(query: FindArtifactsQuery): List<ArtifactSummary> {
+    override fun findArtifacts(query: FindArtifactsQuery): List<ArtifactSummary> = metrics.recordSearch("artifact.find") {
         val params = MapSqlParameterSource()
             .addValue("limit", query.limit)
         val filters = mutableListOf<String>()
@@ -101,7 +102,7 @@ class PostgresArtifactQueryAdapter(
         }
 
         val whereClause = filters.toWhereClause()
-        return jdbc.query(
+        jdbc.query(
             """
             WITH artifacts AS (
                 SELECT
@@ -321,14 +322,16 @@ class PostgresArtifactQueryAdapter(
 @Repository
 class PostgresKeywordSearchAdapter(
     private val jdbc: NamedParameterJdbcTemplate,
+    private val metrics: PostgresAdapterMetrics,
     objectMapper: ObjectMapper,
 ) : KeywordSearchPort {
     private val json = PostgresJsonSupport(objectMapper)
 
-    override fun search(query: KeywordSearchQuery): List<KeywordSearchMatch> {
+    override fun search(query: KeywordSearchQuery): List<KeywordSearchMatch> = metrics.recordSearch("keyword.search") {
         require(query.query.isNotBlank()) { "KeywordSearchQuery query must not be blank" }
 
         val params = searchParams(query)
+            .addValue("keywordQuery", query.query.trim())
             .addValue("pattern", likePattern(query.query))
             .addValue("limit", query.limit)
         if (query.metadataFilters.isNotEmpty()) {
@@ -341,9 +344,73 @@ class PostgresKeywordSearchAdapter(
             .withMetadataFilters(query.metadataFilters, alias = "d")
             .toWhereClause(prefix = "WHERE")
 
-        return jdbc.query(
+        jdbc.query(
             """
-            WITH matches AS (
+            WITH keyword_query AS (
+                SELECT plainto_tsquery('simple', :keywordQuery) AS ts_query
+            ),
+            content_matches AS (
+                SELECT
+                    dc.chunk_id,
+                    dc.document_id,
+                    dc.project_id,
+                    dc.iteration_id,
+                    dc.artifact_type,
+                    dc.source_path,
+                    dc.chunk_index,
+                    dc.content,
+                    3.0 + ts_rank(to_tsvector('simple', dc.content), kq.ts_query) AS score,
+                    'chunk.content' AS match_reason,
+                    dc.metadata,
+                    p.source_project_id,
+                    i.source_iteration_id,
+                    d.source_document_id,
+                    tg.source_task_graph_id,
+                    t.source_task_id,
+                    r.source_run_id,
+                    dc.source_chunk_id,
+                    d.snapshot_version,
+                    COALESCE(dc.updated_at, dc.created_at) AS sort_timestamp
+                FROM document_chunks dc
+                JOIN projects p ON p.project_id = dc.project_id
+                LEFT JOIN iterations i ON i.iteration_id = dc.iteration_id
+                JOIN documents d ON d.document_id = dc.document_id
+                LEFT JOIN tasks t ON t.task_id = dc.task_id
+                LEFT JOIN task_graphs tg ON tg.task_graph_id = t.task_graph_id
+                LEFT JOIN runs r ON r.run_id = dc.run_id
+                CROSS JOIN keyword_query kq
+                $chunkWhere
+                  AND to_tsvector('simple', dc.content) @@ kq.ts_query
+                UNION ALL
+                SELECT
+                    NULL::uuid AS chunk_id,
+                    d.document_id,
+                    d.project_id,
+                    d.iteration_id,
+                    d.artifact_type,
+                    d.source_path,
+                    NULL::integer AS chunk_index,
+                    d.content,
+                    2.0 + ts_rank(to_tsvector('simple', d.content), kq.ts_query) AS score,
+                    'document.content' AS match_reason,
+                    d.metadata,
+                    p.source_project_id,
+                    i.source_iteration_id,
+                    d.source_document_id,
+                    NULL::text AS source_task_graph_id,
+                    NULL::text AS source_task_id,
+                    NULL::text AS source_run_id,
+                    NULL::text AS source_chunk_id,
+                    d.snapshot_version,
+                    COALESCE(d.updated_at, d.created_at) AS sort_timestamp
+                FROM documents d
+                JOIN projects p ON p.project_id = d.project_id
+                LEFT JOIN iterations i ON i.iteration_id = d.iteration_id
+                CROSS JOIN keyword_query kq
+                $documentWhere
+                  AND to_tsvector('simple', d.content) @@ kq.ts_query
+            ),
+            secondary_matches AS (
                 SELECT
                     dc.chunk_id,
                     dc.document_id,
@@ -354,13 +421,11 @@ class PostgresKeywordSearchAdapter(
                     dc.chunk_index,
                     dc.content,
                     CASE
-                        WHEN lower(dc.content) LIKE :pattern ESCAPE '\' THEN 3.0
                         WHEN lower(dc.source_path) LIKE :pattern ESCAPE '\' THEN 1.5
                         WHEN lower(dc.artifact_type) LIKE :pattern ESCAPE '\' THEN 1.0
                         ELSE 0.5
                     END AS score,
                     CASE
-                        WHEN lower(dc.content) LIKE :pattern ESCAPE '\' THEN 'chunk.content'
                         WHEN lower(dc.source_path) LIKE :pattern ESCAPE '\' THEN 'sourcePath'
                         WHEN lower(dc.artifact_type) LIKE :pattern ESCAPE '\' THEN 'artifactType'
                         ELSE 'metadata'
@@ -382,10 +447,11 @@ class PostgresKeywordSearchAdapter(
                 LEFT JOIN tasks t ON t.task_id = dc.task_id
                 LEFT JOIN task_graphs tg ON tg.task_graph_id = t.task_graph_id
                 LEFT JOIN runs r ON r.run_id = dc.run_id
+                CROSS JOIN keyword_query kq
                 $chunkWhere
+                  AND NOT (to_tsvector('simple', dc.content) @@ kq.ts_query)
                   AND (
-                    lower(dc.content) LIKE :pattern ESCAPE '\'
-                    OR lower(dc.source_path) LIKE :pattern ESCAPE '\'
+                    lower(dc.source_path) LIKE :pattern ESCAPE '\'
                     OR lower(dc.artifact_type) LIKE :pattern ESCAPE '\'
                   )
                 UNION ALL
@@ -399,13 +465,11 @@ class PostgresKeywordSearchAdapter(
                     NULL::integer AS chunk_index,
                     d.content,
                     CASE
-                        WHEN lower(d.content) LIKE :pattern ESCAPE '\' THEN 2.0
                         WHEN lower(d.source_path) LIKE :pattern ESCAPE '\' THEN 1.5
                         WHEN lower(d.artifact_type) LIKE :pattern ESCAPE '\' THEN 1.0
                         ELSE 0.5
                     END AS score,
                     CASE
-                        WHEN lower(d.content) LIKE :pattern ESCAPE '\' THEN 'document.content'
                         WHEN lower(d.source_path) LIKE :pattern ESCAPE '\' THEN 'sourcePath'
                         WHEN lower(d.artifact_type) LIKE :pattern ESCAPE '\' THEN 'artifactType'
                         ELSE 'metadata'
@@ -423,12 +487,18 @@ class PostgresKeywordSearchAdapter(
                 FROM documents d
                 JOIN projects p ON p.project_id = d.project_id
                 LEFT JOIN iterations i ON i.iteration_id = d.iteration_id
+                CROSS JOIN keyword_query kq
                 $documentWhere
+                  AND NOT (to_tsvector('simple', d.content) @@ kq.ts_query)
                   AND (
-                    lower(d.content) LIKE :pattern ESCAPE '\'
-                    OR lower(d.source_path) LIKE :pattern ESCAPE '\'
+                    lower(d.source_path) LIKE :pattern ESCAPE '\'
                     OR lower(d.artifact_type) LIKE :pattern ESCAPE '\'
                   )
+            ),
+            matches AS (
+                SELECT * FROM content_matches
+                UNION ALL
+                SELECT * FROM secondary_matches
             )
             SELECT *
             FROM matches
@@ -444,11 +514,12 @@ class PostgresKeywordSearchAdapter(
 @Repository
 class PostgresVectorSearchAdapter(
     private val jdbc: NamedParameterJdbcTemplate,
+    private val metrics: PostgresAdapterMetrics,
     objectMapper: ObjectMapper,
 ) : VectorSearchPort {
     private val json = PostgresJsonSupport(objectMapper)
 
-    override fun search(query: VectorSearchQuery): List<VectorSearchMatch> {
+    override fun search(query: VectorSearchQuery): List<VectorSearchMatch> = metrics.recordSearch("vector.search") {
         require(query.embedding.values.isNotEmpty()) { "VectorSearchQuery embedding must not be empty" }
         require(query.embedding.values.size == query.embeddingDimension) {
             "VectorSearchQuery embeddingDimension must match embedding size"
@@ -476,7 +547,7 @@ class PostgresVectorSearchAdapter(
         val distanceExpression = query.distanceMetric.distanceExpression()
         val orderExpression = query.distanceMetric.orderExpression()
 
-        return jdbc.query(
+        jdbc.query(
             """
             SELECT
                 dc.chunk_id,

@@ -12,7 +12,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health
+        include: health,metrics
   endpoint:
     health:
       probes:
@@ -27,6 +27,8 @@ p2a:
     excluded-paths:
       - /api/health
       - /actuator/health
+      - /actuator/metrics
+      - /actuator/metrics/**
 
 server:
   port: ${PORT:8080}

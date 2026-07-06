@@ -47,13 +47,14 @@ P2A_LOCAL_TOKEN=local-dev-token \
 ./gradlew bootRun
 ```
 
-`P2A_LOCAL_TOKEN`이 비어 있으면 `/api/**`도 인증 없이 열립니다. 값이 있으면 `/api/health`와 `/actuator/health`를 제외한 `/api/**` 요청에 `X-P2A-Local-Token` header가 필요합니다. Header 이름은 `P2A_LOCAL_TOKEN_HEADER`로 바꿀 수 있습니다.
+`P2A_LOCAL_TOKEN`이 비어 있으면 `/api/**`도 인증 없이 열립니다. 값이 있으면 `/api/health`, `/actuator/health`, `/actuator/metrics`를 제외한 `/api/**` 요청에 `X-P2A-Local-Token` header가 필요합니다. Header 이름은 `P2A_LOCAL_TOKEN_HEADER`로 바꿀 수 있습니다.
 
 ### Health check
 
 ```bash
 curl http://localhost:8080/actuator/health
 curl http://localhost:8080/api/health
+curl http://localhost:8080/actuator/metrics
 ```
 
 정상 응답은 `status: "UP"`입니다.
@@ -85,6 +86,8 @@ TESTCONTAINERS_RYUK_DISABLED=true \
 
 - `/api/health`
 - `/actuator/health`
+- `/actuator/metrics`
+- `/actuator/metrics/**`
 
 인증이 켜진 경우 요청 예:
 
@@ -404,12 +407,19 @@ RAG/history lookup을 위한 deterministic lexical retrieval입니다.
 | --- | --- |
 | `VectorSearchResponse[]` | `score`, `distanceMetric`, `embeddingModel`, `embeddingVersion`, `lineage`, `sourceIds` |
 
-### Health endpoints
+### Observability endpoints
 
 | Method | Endpoint | 설명 | 인증 |
 | --- | --- | --- | --- |
 | `GET` | `/api/health` | 간단한 API health endpoint입니다. | 불필요 |
 | `GET` | `/actuator/health` | Spring Actuator health endpoint입니다. | 불필요 |
+| `GET` | `/actuator/metrics` | 노출된 Micrometer metric 목록입니다. | 불필요 |
+| `GET` | `/actuator/metrics/{metricName}` | 개별 metric 상세입니다. | 불필요 |
+
+주요 custom metric:
+
+- `p2a.memory.search.calls`, `p2a.memory.search.duration`
+- `p2a.memory.write.calls`, `p2a.memory.write.duration`
 
 ## Idempotency와 versioning
 

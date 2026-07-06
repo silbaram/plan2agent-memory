@@ -40,11 +40,12 @@ import java.util.UUID
 @Repository
 class PostgresProjectStoreAdapter(
     private val jdbc: NamedParameterJdbcTemplate,
+    private val metrics: PostgresAdapterMetrics,
     objectMapper: ObjectMapper,
 ) : ProjectStorePort {
     private val json = PostgresJsonSupport(objectMapper)
 
-    override fun save(project: Project): Project {
+    override fun save(project: Project): Project = metrics.recordWrite("project.save") {
         val existingProject = findById(project.id) ?: findBySourceProjectId(project.sourceProjectId)
         val projectToSave = existingProject?.let {
             project.copy(id = it.id, canonicalServerId = it.canonicalServerId)
@@ -53,7 +54,7 @@ class PostgresProjectStoreAdapter(
             projectToSave.metadata + (PostgresJsonSupport.PROJECT_CANONICAL_SERVER_ID to projectToSave.canonicalServerId.value),
             projectToSave.sourceReference,
         )
-        return jdbc.queryForObject(
+        jdbc.queryForObject(
             """
             INSERT INTO projects (
                 project_id, source_project_id, name, root_path, metadata, created_at, updated_at
@@ -98,16 +99,17 @@ class PostgresProjectStoreAdapter(
 @Repository
 class PostgresIterationStoreAdapter(
     private val jdbc: NamedParameterJdbcTemplate,
+    private val metrics: PostgresAdapterMetrics,
     objectMapper: ObjectMapper,
 ) : IterationStorePort {
     private val json = PostgresJsonSupport(objectMapper)
 
-    override fun save(iteration: Iteration): Iteration {
+    override fun save(iteration: Iteration): Iteration = metrics.recordWrite("iteration.save") {
         val existingIteration = findById(iteration.id)
             ?: findByProjectAndSourceIterationId(iteration.projectId, iteration.sourceIterationId)
         val iterationToSave = existingIteration?.let { iteration.copy(id = it.id) } ?: iteration
         val metadata = json.withSourceReference(iterationToSave.metadata, iterationToSave.sourceReference)
-        return jdbc.queryForObject(
+        jdbc.queryForObject(
             """
             INSERT INTO iterations (
                 iteration_id, source_iteration_id, project_id, label, status, metadata, created_at, updated_at
@@ -171,12 +173,13 @@ class PostgresIterationStoreAdapter(
 @Repository
 class PostgresDocumentSnapshotStoreAdapter(
     private val jdbc: NamedParameterJdbcTemplate,
+    private val metrics: PostgresAdapterMetrics,
     objectMapper: ObjectMapper,
 ) : DocumentSnapshotStorePort {
     private val json = PostgresJsonSupport(objectMapper)
 
-    override fun save(documentSnapshot: DocumentSnapshot): DocumentSnapshot {
-        findExistingLogicalSnapshot(documentSnapshot)?.let { return it }
+    override fun save(documentSnapshot: DocumentSnapshot): DocumentSnapshot = metrics.recordWrite("document_snapshot.save") {
+        findExistingLogicalSnapshot(documentSnapshot)?.let { return@recordWrite it }
 
         val metadata = json.withSourceReference(
             documentSnapshot.metadata + mapOf(
@@ -186,7 +189,7 @@ class PostgresDocumentSnapshotStoreAdapter(
             documentSnapshot.sourceReference,
         )
 
-        return jdbc.queryForObject(
+        jdbc.queryForObject(
             """
             WITH next_snapshot AS (
                 SELECT COALESCE(MAX(snapshot_version), 0) + 1 AS snapshot_version
@@ -270,11 +273,12 @@ class PostgresDocumentSnapshotStoreAdapter(
 @Repository
 class PostgresTaskGraphStoreAdapter(
     private val jdbc: NamedParameterJdbcTemplate,
+    private val metrics: PostgresAdapterMetrics,
     objectMapper: ObjectMapper,
 ) : TaskGraphStorePort {
     private val json = PostgresJsonSupport(objectMapper)
 
-    override fun save(taskGraph: TaskGraph): TaskGraph {
+    override fun save(taskGraph: TaskGraph): TaskGraph = metrics.recordWrite("task_graph.save") {
         val existingTaskGraph = findById(taskGraph.id)
             ?: findByProjectIterationAndSourceTaskGraphId(
                 taskGraph.projectId,
@@ -297,8 +301,9 @@ class PostgresTaskGraphStoreAdapter(
             ),
             taskGraphToSave.sourceReference,
         )
+        val documentId = resolveDocumentId(taskGraphToSave)
 
-        return jdbc.queryForObject(
+        jdbc.queryForObject(
             """
             INSERT INTO task_graphs (
                 task_graph_id, source_task_graph_id, project_id, iteration_id, document_id,
@@ -325,7 +330,7 @@ class PostgresTaskGraphStoreAdapter(
                 .addValue("sourceTaskGraphId", taskGraphToSave.sourceTaskGraphId.value)
                 .addValue("projectId", uuid(taskGraphToSave.projectId.value))
                 .addValue("iterationId", uuid(taskGraphToSave.iterationId.value))
-                .addValue("documentId", null)
+                .addValue("documentId", documentId?.let(::uuid))
                 .addValue("sourceDocumentId", taskGraphToSave.sourceDocumentId?.value)
                 .addValue("graphHash", taskGraphToSave.graphHash.value)
                 .addValue("graphJson", taskGraphToSave.graphJson)
@@ -389,39 +394,49 @@ class PostgresTaskGraphStoreAdapter(
                 .addValue("graphHash", graphHash.value),
             taskGraphMapper(json),
         )
+
+    private fun resolveDocumentId(taskGraph: TaskGraph): String? =
+        taskGraph.sourceDocumentId?.let { sourceDocumentId ->
+            jdbc.queryOne(
+                """
+                SELECT document_id::text
+                FROM documents
+                WHERE project_id = :projectId
+                  AND iteration_id = :iterationId
+                  AND source_document_id = :sourceDocumentId
+                ORDER BY snapshot_version DESC, created_at DESC, document_id
+                LIMIT 1
+                """.trimIndent(),
+                MapSqlParameterSource()
+                    .addValue("projectId", uuid(taskGraph.projectId.value))
+                    .addValue("iterationId", uuid(taskGraph.iterationId.value))
+                    .addValue("sourceDocumentId", sourceDocumentId.value),
+            ) { rs, _ -> rs.getString("document_id") }
+                ?: error(
+                    "Document source id ${sourceDocumentId.value} was not found in iteration ${taskGraph.iterationId.value}",
+                )
+        }
 }
 
 @Repository
 class PostgresTaskStoreAdapter(
     private val jdbc: NamedParameterJdbcTemplate,
+    private val metrics: PostgresAdapterMetrics,
     objectMapper: ObjectMapper,
 ) : TaskStorePort {
     private val json = PostgresJsonSupport(objectMapper)
 
-    override fun saveAll(tasks: List<Task>): List<Task> =
-        tasks.map { save(it) }
-
-    override fun findById(id: TaskId): Task? =
-        jdbc.queryOne(
-            "SELECT * FROM tasks WHERE task_id = :taskId",
-            MapSqlParameterSource("taskId", uuid(id.value)),
-            taskMapper(json),
-        )
-
-    override fun findByGraphId(graphId: TaskGraphId): List<Task> =
-        jdbc.query(
-            "SELECT * FROM tasks WHERE task_graph_id = :taskGraphId ORDER BY created_at, task_id",
-            MapSqlParameterSource("taskGraphId", uuid(graphId.value)),
-            taskMapper(json),
-        )
-
-    private fun save(task: Task): Task {
-        val existingTask = findById(task.id)
-            ?: findByGraphAndSourceTaskId(task.taskGraphId, task.sourceTaskId)
-            ?: findByProjectIterationAndSourceTaskId(task.projectId, task.iterationId, task.sourceTaskId)
-        val taskToSave = existingTask?.let { task.copy(id = it.id) } ?: task
-        val metadata = json.withSourceReference(taskToSave.metadata, taskToSave.sourceReference)
-        return jdbc.queryForObject(
+    override fun saveAll(tasks: List<Task>): List<Task> = metrics.recordWrite("task.save_all") {
+        if (tasks.isEmpty()) {
+            return@recordWrite emptyList()
+        }
+        val tasksToSave = tasks.map { task ->
+            val existingTask = findById(task.id)
+                ?: findByGraphAndSourceTaskId(task.taskGraphId, task.sourceTaskId)
+                ?: findByProjectIterationAndSourceTaskId(task.projectId, task.iterationId, task.sourceTaskId)
+            existingTask?.let { task.copy(id = it.id) } ?: task
+        }
+        jdbc.batchUpdate(
             """
             INSERT INTO tasks (
                 task_id, source_task_id, project_id, iteration_id, task_graph_id, title,
@@ -446,25 +461,55 @@ class PostgresTaskStoreAdapter(
                 acceptance_criteria_json = EXCLUDED.acceptance_criteria_json,
                 metadata = EXCLUDED.metadata,
                 updated_at = EXCLUDED.updated_at
-            RETURNING *
             """.trimIndent(),
-            MapSqlParameterSource()
-                .addValue("taskId", uuid(taskToSave.id.value))
-                .addValue("sourceTaskId", taskToSave.sourceTaskId.value)
-                .addValue("projectId", uuid(taskToSave.projectId.value))
-                .addValue("iterationId", uuid(taskToSave.iterationId.value))
-                .addValue("taskGraphId", uuid(taskToSave.taskGraphId.value))
-                .addValue("title", taskToSave.title)
-                .addValue("description", taskToSave.description)
-                .addValue("status", taskToSave.status.name)
-                .addValue("targetArea", taskToSave.targetArea)
-                .addValue("dependenciesJson", json.stringsToJson(taskToSave.dependencies.map { it.value }))
-                .addValue("acceptanceCriteriaJson", json.stringsToJson(taskToSave.acceptanceCriteria))
-                .addValue("metadata", json.metadataToJson(metadata))
-                .addValue("createdAt", Timestamp.from(taskToSave.createdAt))
-                .addValue("updatedAt", taskToSave.updatedAt?.let(Timestamp::from)),
+            tasksToSave.map(::taskParams).toTypedArray(),
+        )
+        val savedById = findByIds(tasksToSave.map { it.id }).associateBy { it.id }
+        tasksToSave.map { task -> savedById.getValue(task.id) }
+    }
+
+    override fun findById(id: TaskId): Task? =
+        jdbc.queryOne(
+            "SELECT * FROM tasks WHERE task_id = :taskId",
+            MapSqlParameterSource("taskId", uuid(id.value)),
             taskMapper(json),
-        )!!
+        )
+
+    override fun findByGraphId(graphId: TaskGraphId): List<Task> =
+        jdbc.query(
+            "SELECT * FROM tasks WHERE task_graph_id = :taskGraphId ORDER BY created_at, task_id",
+            MapSqlParameterSource("taskGraphId", uuid(graphId.value)),
+            taskMapper(json),
+        )
+
+    private fun findByIds(ids: List<TaskId>): List<Task> =
+        jdbc.query(
+            """
+            SELECT *
+            FROM tasks
+            WHERE task_id IN (:taskIds)
+            """.trimIndent(),
+            MapSqlParameterSource("taskIds", ids.map { uuid(it.value) }),
+            taskMapper(json),
+        )
+
+    private fun taskParams(task: Task): MapSqlParameterSource {
+        val metadata = json.withSourceReference(task.metadata, task.sourceReference)
+        return MapSqlParameterSource()
+            .addValue("taskId", uuid(task.id.value))
+            .addValue("sourceTaskId", task.sourceTaskId.value)
+            .addValue("projectId", uuid(task.projectId.value))
+            .addValue("iterationId", uuid(task.iterationId.value))
+            .addValue("taskGraphId", uuid(task.taskGraphId.value))
+            .addValue("title", task.title)
+            .addValue("description", task.description)
+            .addValue("status", task.status.name)
+            .addValue("targetArea", task.targetArea)
+            .addValue("dependenciesJson", json.stringsToJson(task.dependencies.map { it.value }))
+            .addValue("acceptanceCriteriaJson", json.stringsToJson(task.acceptanceCriteria))
+            .addValue("metadata", json.metadataToJson(metadata))
+            .addValue("createdAt", Timestamp.from(task.createdAt))
+            .addValue("updatedAt", task.updatedAt?.let(Timestamp::from))
     }
 
     private fun findByGraphAndSourceTaskId(graphId: TaskGraphId, sourceTaskId: SourceTaskId): Task? =

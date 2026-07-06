@@ -109,7 +109,7 @@ class PostgresSearchIntegrationTest {
         val chunk = saveChunk(
             scope = "keyword-primary",
             document = document,
-            content = "Chunk CONTENT contains RAG needle and API path /api/search.",
+            content = "Chunk CONTENT contains RAG context and API path /api/search before a later needle.",
             taskRun = taskRun,
             metadata = mapOf("phase" to "gate-b", "kind" to "decision"),
         )

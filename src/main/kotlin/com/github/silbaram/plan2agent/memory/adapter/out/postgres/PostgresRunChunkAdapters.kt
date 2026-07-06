@@ -38,14 +38,15 @@ import java.util.UUID
 @Repository
 class PostgresRunRecordStoreAdapter(
     private val jdbc: NamedParameterJdbcTemplate,
+    private val metrics: PostgresAdapterMetrics,
     objectMapper: ObjectMapper,
 ) : RunRecordStorePort {
     private val json = PostgresJsonSupport(objectMapper)
 
-    override fun save(runRecord: RunRecord): RunRecord {
+    override fun save(runRecord: RunRecord): RunRecord = metrics.recordWrite("run.save") {
         findById(runRecord.id)?.let { existingRun ->
             existingRun.requireSameSourceScope(runRecord)
-            return upsert(runRecord.copy(id = existingRun.id))
+            return@recordWrite upsert(runRecord.copy(id = existingRun.id))
         }
         findByProjectIterationAndSourceRunId(
             runRecord.projectId,
@@ -56,7 +57,7 @@ class PostgresRunRecordStoreAdapter(
                 "run source id ${runRecord.sourceRunId.value} already maps to canonical run ${existingRun.id.value}",
             )
         }
-        return upsert(runRecord)
+        upsert(runRecord)
     }
 
     private fun upsert(runToSave: RunRecord): RunRecord {
@@ -153,12 +154,55 @@ class PostgresRunRecordStoreAdapter(
 @Repository
 class PostgresDocumentChunkStoreAdapter(
     private val jdbc: NamedParameterJdbcTemplate,
+    private val metrics: PostgresAdapterMetrics,
     objectMapper: ObjectMapper,
 ) : DocumentChunkStorePort {
     private val json = PostgresJsonSupport(objectMapper)
 
-    override fun saveAll(chunks: List<DocumentChunk>): List<DocumentChunk> =
-        chunks.map { save(it) }
+    override fun saveAll(chunks: List<DocumentChunk>): List<DocumentChunk> = metrics.recordWrite("document_chunk.save_all") {
+        if (chunks.isEmpty()) {
+            return@recordWrite emptyList()
+        }
+        val existingByInputId = mutableMapOf<DocumentChunkId, DocumentChunk>()
+        val chunksToInsert = mutableListOf<DocumentChunk>()
+        chunks.forEach { chunk ->
+            val existingByHash = findByDocumentIdAndChunkHash(chunk.documentId, chunk.chunkHash)
+            if (existingByHash != null) {
+                existingByInputId[chunk.id] = existingByHash
+            } else {
+                val existingById = findById(chunk.id)
+                if (existingById != null) {
+                    if (existingById.documentId != chunk.documentId || existingById.chunkHash != chunk.chunkHash) {
+                        throw relationConflict(
+                            "document chunk ${chunk.id.value} already maps to document ${existingById.documentId.value} " +
+                                "and hash ${existingById.chunkHash.value}",
+                        )
+                    }
+                    existingByInputId[chunk.id] = existingById
+                } else {
+                    chunksToInsert += chunk
+                }
+            }
+        }
+        if (chunksToInsert.isNotEmpty()) {
+            jdbc.batchUpdate(
+                """
+                INSERT INTO document_chunks (
+                    chunk_id, source_chunk_id, document_id, project_id, iteration_id, task_id, run_id,
+                    artifact_type, source_path, raw_source_path, chunk_index, chunk_hash, content,
+                    token_estimate, metadata, created_at, updated_at
+                ) VALUES (
+                    :chunkId, NULL, :documentId, :projectId, :iterationId, :taskId, :runId,
+                    :artifactType, :sourcePath, :rawSourcePath, :chunkIndex, :chunkHash, :content,
+                    :tokenEstimate, CAST(:metadata AS jsonb), :createdAt, NULL
+                )
+                """.trimIndent(),
+                chunksToInsert.map(::documentChunkParams).toTypedArray(),
+            )
+        }
+        val insertedById = findByIds(chunksToInsert.map { it.id }).associateBy { it.id }
+        chunks.map { chunk -> existingByInputId[chunk.id] ?: insertedById.getValue(chunk.id) }
+    }
 
     override fun findByDocumentId(documentId: DocumentId): List<DocumentChunk> =
         jdbc.query(
@@ -167,50 +211,24 @@ class PostgresDocumentChunkStoreAdapter(
             documentChunkMapper(json),
         )
 
-    private fun save(chunk: DocumentChunk): DocumentChunk {
-        findByDocumentIdAndChunkHash(chunk.documentId, chunk.chunkHash)?.let { return it }
-        findById(chunk.id)?.let { existing ->
-            if (existing.documentId != chunk.documentId || existing.chunkHash != chunk.chunkHash) {
-                throw relationConflict(
-                    "document chunk ${chunk.id.value} already maps to document ${existing.documentId.value} " +
-                        "and hash ${existing.chunkHash.value}",
-                )
-            }
-            return existing
-        }
-
+    private fun documentChunkParams(chunk: DocumentChunk): MapSqlParameterSource {
         val metadata = json.withSourceReference(chunk.metadata, chunk.sourceReference)
-        return jdbc.queryForObject(
-            """
-            INSERT INTO document_chunks (
-                chunk_id, source_chunk_id, document_id, project_id, iteration_id, task_id, run_id,
-                artifact_type, source_path, raw_source_path, chunk_index, chunk_hash, content,
-                token_estimate, metadata, created_at, updated_at
-            ) VALUES (
-                :chunkId, NULL, :documentId, :projectId, :iterationId, :taskId, :runId,
-                :artifactType, :sourcePath, :rawSourcePath, :chunkIndex, :chunkHash, :content,
-                :tokenEstimate, CAST(:metadata AS jsonb), :createdAt, NULL
-            )
-            RETURNING *
-            """.trimIndent(),
-            MapSqlParameterSource()
-                .addValue("chunkId", uuid(chunk.id.value))
-                .addValue("documentId", uuid(chunk.documentId.value))
-                .addValue("projectId", uuid(chunk.projectId.value))
-                .addValue("iterationId", chunk.iterationId?.value?.let(::uuid))
-                .addValue("taskId", chunk.taskId?.value?.let(::uuid))
-                .addValue("runId", chunk.runId?.value?.let(::uuid))
-                .addValue("artifactType", chunk.artifactType.name)
-                .addValue("sourcePath", chunk.sourcePath)
-                .addValue("rawSourcePath", chunk.sourceReference?.path)
-                .addValue("chunkIndex", chunk.chunkIndex)
-                .addValue("chunkHash", chunk.chunkHash.value)
-                .addValue("content", chunk.content)
-                .addValue("tokenEstimate", chunk.tokenEstimate)
-                .addValue("metadata", json.metadataToJson(metadata))
-                .addValue("createdAt", Timestamp.from(chunk.createdAt)),
-            documentChunkMapper(json),
-        )!!
+        return MapSqlParameterSource()
+            .addValue("chunkId", uuid(chunk.id.value))
+            .addValue("documentId", uuid(chunk.documentId.value))
+            .addValue("projectId", uuid(chunk.projectId.value))
+            .addValue("iterationId", chunk.iterationId?.value?.let(::uuid))
+            .addValue("taskId", chunk.taskId?.value?.let(::uuid))
+            .addValue("runId", chunk.runId?.value?.let(::uuid))
+            .addValue("artifactType", chunk.artifactType.name)
+            .addValue("sourcePath", chunk.sourcePath)
+            .addValue("rawSourcePath", chunk.sourceReference?.path)
+            .addValue("chunkIndex", chunk.chunkIndex)
+            .addValue("chunkHash", chunk.chunkHash.value)
+            .addValue("content", chunk.content)
+            .addValue("tokenEstimate", chunk.tokenEstimate)
+            .addValue("metadata", json.metadataToJson(metadata))
+            .addValue("createdAt", Timestamp.from(chunk.createdAt))
     }
 
     private fun findById(id: DocumentChunkId): DocumentChunk? =
@@ -233,16 +251,32 @@ class PostgresDocumentChunkStoreAdapter(
                 .addValue("chunkHash", chunkHash.value),
             documentChunkMapper(json),
         )
+
+    private fun findByIds(ids: List<DocumentChunkId>): List<DocumentChunk> =
+        if (ids.isEmpty()) {
+            emptyList()
+        } else {
+            jdbc.query(
+                """
+                SELECT *
+                FROM document_chunks
+                WHERE chunk_id IN (:chunkIds)
+                """.trimIndent(),
+                MapSqlParameterSource("chunkIds", ids.map { uuid(it.value) }),
+                documentChunkMapper(json),
+            )
+        }
 }
 
 @Repository
 class PostgresEmbeddingSetStoreAdapter(
     private val jdbc: NamedParameterJdbcTemplate,
+    private val metrics: PostgresAdapterMetrics,
     objectMapper: ObjectMapper,
 ) : EmbeddingSetStorePort {
     private val json = PostgresJsonSupport(objectMapper)
 
-    override fun resolveOrCreate(embeddingSet: EmbeddingSet): EmbeddingSet {
+    override fun resolveOrCreate(embeddingSet: EmbeddingSet): EmbeddingSet = metrics.recordWrite("embedding_set.resolve_or_create") {
         require(embeddingSet.embeddingDimension <= MAX_VECTOR_DIMENSION) {
             "EmbeddingSet embeddingDimension must be <= $MAX_VECTOR_DIMENSION for pgvector storage"
         }
@@ -252,7 +286,7 @@ class PostgresEmbeddingSetStoreAdapter(
             embeddingSet.embeddingDimension,
             embeddingSet.embeddingVersion,
             embeddingSet.distanceMetric,
-        )?.let { return it }
+        )?.let { return@recordWrite it }
 
         findById(embeddingSet.id)?.let { existing ->
             if (existing.uniqueKey() != embeddingSet.uniqueKey()) {
@@ -260,10 +294,10 @@ class PostgresEmbeddingSetStoreAdapter(
                     "embedding set ${embeddingSet.id.value} already maps to ${existing.uniqueKey()}",
                 )
             }
-            return existing
+            return@recordWrite existing
         }
 
-        return jdbc.queryForObject(
+        jdbc.queryForObject(
             """
             INSERT INTO embedding_sets (
                 embedding_set_id, project_id, embedding_model, embedding_dimension,
@@ -325,12 +359,62 @@ class PostgresEmbeddingSetStoreAdapter(
 @Repository
 class PostgresChunkEmbeddingStoreAdapter(
     private val jdbc: NamedParameterJdbcTemplate,
+    private val metrics: PostgresAdapterMetrics,
     objectMapper: ObjectMapper,
 ) : ChunkEmbeddingStorePort {
     private val json = PostgresJsonSupport(objectMapper)
 
     override fun saveAll(chunkEmbeddings: List<ChunkEmbedding>): List<ChunkEmbedding> =
-        chunkEmbeddings.map { save(it) }
+        metrics.recordWrite("chunk_embedding.save_all") {
+            if (chunkEmbeddings.isEmpty()) {
+                return@recordWrite emptyList()
+            }
+            val existingByInputId = mutableMapOf<ChunkEmbeddingId, ChunkEmbedding>()
+            val embeddingsToInsert = mutableListOf<ChunkEmbedding>()
+            chunkEmbeddings.forEach { chunkEmbedding ->
+                val existingByChunkAndSet = findByChunkAndEmbeddingSet(
+                    chunkEmbedding.chunkId,
+                    chunkEmbedding.embeddingSetId,
+                )
+                if (existingByChunkAndSet != null) {
+                    existingByInputId[chunkEmbedding.id] = requireIdempotentEmbedding(existingByChunkAndSet, chunkEmbedding)
+                } else {
+                    val existingById = findById(chunkEmbedding.id)
+                    if (existingById != null) {
+                        if (
+                            existingById.chunkId != chunkEmbedding.chunkId ||
+                            existingById.embeddingSetId != chunkEmbedding.embeddingSetId
+                        ) {
+                            throw relationConflict(
+                                "chunk embedding ${chunkEmbedding.id.value} already maps to chunk " +
+                                    "${existingById.chunkId.value} and embedding set ${existingById.embeddingSetId.value}",
+                            )
+                        }
+                        existingByInputId[chunkEmbedding.id] = requireIdempotentEmbedding(existingById, chunkEmbedding)
+                    } else {
+                        embeddingsToInsert += chunkEmbedding
+                    }
+                }
+            }
+            if (embeddingsToInsert.isNotEmpty()) {
+                jdbc.batchUpdate(
+                    """
+                    INSERT INTO chunk_embeddings (
+                        chunk_embedding_id, chunk_id, embedding_set_id, embedding, embedding_hash,
+                        metadata, created_at, updated_at
+                    ) VALUES (
+                        :chunkEmbeddingId, :chunkId, :embeddingSetId, CAST(:embedding AS vector), :embeddingHash,
+                        CAST(:metadata AS jsonb), :createdAt, NULL
+                    )
+                    """.trimIndent(),
+                    embeddingsToInsert.map(::chunkEmbeddingParams).toTypedArray(),
+                )
+            }
+            val insertedById = findByIds(embeddingsToInsert.map { it.id }).associateBy { it.id }
+            chunkEmbeddings.map { chunkEmbedding ->
+                existingByInputId[chunkEmbedding.id] ?: insertedById.getValue(chunkEmbedding.id)
+            }
+        }
 
     override fun findByChunkId(chunkId: DocumentChunkId): List<ChunkEmbedding> =
         jdbc.query(
@@ -344,42 +428,16 @@ class PostgresChunkEmbeddingStoreAdapter(
             chunkEmbeddingMapper(json),
         )
 
-    private fun save(chunkEmbedding: ChunkEmbedding): ChunkEmbedding {
-        findByChunkAndEmbeddingSet(chunkEmbedding.chunkId, chunkEmbedding.embeddingSetId)?.let {
-            return requireIdempotentEmbedding(it, chunkEmbedding)
-        }
-        findById(chunkEmbedding.id)?.let { existing ->
-            if (existing.chunkId != chunkEmbedding.chunkId || existing.embeddingSetId != chunkEmbedding.embeddingSetId) {
-                throw relationConflict(
-                    "chunk embedding ${chunkEmbedding.id.value} already maps to chunk ${existing.chunkId.value} " +
-                        "and embedding set ${existing.embeddingSetId.value}",
-                )
-            }
-            return requireIdempotentEmbedding(existing, chunkEmbedding)
-        }
-
+    private fun chunkEmbeddingParams(chunkEmbedding: ChunkEmbedding): MapSqlParameterSource {
         val metadata = json.metadataToJson(chunkEmbedding.metadata)
-        return jdbc.queryForObject(
-            """
-            INSERT INTO chunk_embeddings (
-                chunk_embedding_id, chunk_id, embedding_set_id, embedding, embedding_hash,
-                metadata, created_at, updated_at
-            ) VALUES (
-                :chunkEmbeddingId, :chunkId, :embeddingSetId, CAST(:embedding AS vector), :embeddingHash,
-                CAST(:metadata AS jsonb), :createdAt, NULL
-            )
-            RETURNING *
-            """.trimIndent(),
-            MapSqlParameterSource()
-                .addValue("chunkEmbeddingId", uuid(chunkEmbedding.id.value))
-                .addValue("chunkId", uuid(chunkEmbedding.chunkId.value))
-                .addValue("embeddingSetId", uuid(chunkEmbedding.embeddingSetId.value))
-                .addValue("embedding", chunkEmbedding.embedding.toPgVectorLiteral())
-                .addValue("embeddingHash", chunkEmbedding.embeddingHash?.value)
-                .addValue("metadata", metadata)
-                .addValue("createdAt", Timestamp.from(chunkEmbedding.createdAt)),
-            chunkEmbeddingMapper(json),
-        )!!
+        return MapSqlParameterSource()
+            .addValue("chunkEmbeddingId", uuid(chunkEmbedding.id.value))
+            .addValue("chunkId", uuid(chunkEmbedding.chunkId.value))
+            .addValue("embeddingSetId", uuid(chunkEmbedding.embeddingSetId.value))
+            .addValue("embedding", chunkEmbedding.embedding.toPgVectorLiteral())
+            .addValue("embeddingHash", chunkEmbedding.embeddingHash?.value)
+            .addValue("metadata", metadata)
+            .addValue("createdAt", Timestamp.from(chunkEmbedding.createdAt))
     }
 
     private fun findById(id: ChunkEmbeddingId): ChunkEmbedding? =
@@ -405,6 +463,21 @@ class PostgresChunkEmbeddingStoreAdapter(
                 .addValue("embeddingSetId", uuid(embeddingSetId.value)),
             chunkEmbeddingMapper(json),
         )
+
+    private fun findByIds(ids: List<ChunkEmbeddingId>): List<ChunkEmbedding> =
+        if (ids.isEmpty()) {
+            emptyList()
+        } else {
+            jdbc.query(
+                """
+                SELECT *
+                FROM chunk_embeddings
+                WHERE chunk_embedding_id IN (:chunkEmbeddingIds)
+                """.trimIndent(),
+                MapSqlParameterSource("chunkEmbeddingIds", ids.map { uuid(it.value) }),
+                chunkEmbeddingMapper(json),
+            )
+        }
 }
 
 private fun runRecordMapper(json: PostgresJsonSupport): RowMapper<RunRecord> =

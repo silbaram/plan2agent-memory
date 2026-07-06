@@ -185,6 +185,16 @@ class PostgresStorageIntegrationTest {
         assertThat(documentChunkStore.findByDocumentId(fixture.document.id)).containsExactly(fixture.chunk)
         assertThat(runRecordStore.findByTaskId(fixture.task.id)).containsExactly(fixture.run)
         assertThat(taskStore.findByGraphId(fixture.taskGraph.id)).containsExactly(fixture.task)
+        assertThat(taskGraphDocumentId(fixture.taskGraph.id)).isEqualTo(fixture.document.id.value)
+        assertThat(
+            artifactQuery.findArtifacts(
+                FindArtifactsQuery(
+                    projectId = fixture.project.id,
+                    iterationId = fixture.iteration.id,
+                    artifactType = ArtifactType.TASK_GRAPH,
+                ),
+            ).single().sourcePath,
+        ).isEqualTo(fixture.document.sourcePath)
     }
 
     @Test
@@ -414,6 +424,13 @@ class PostgresStorageIntegrationTest {
         jdbc.queryForMap(
             "SELECT source_path, raw_source_path FROM documents WHERE document_id = ?",
             UUID.fromString(documentId.value),
+        )
+
+    private fun taskGraphDocumentId(taskGraphId: TaskGraphId): String? =
+        jdbc.queryForObject(
+            "SELECT document_id::text FROM task_graphs WHERE task_graph_id = ?",
+            String::class.java,
+            UUID.fromString(taskGraphId.value),
         )
 
     companion object {

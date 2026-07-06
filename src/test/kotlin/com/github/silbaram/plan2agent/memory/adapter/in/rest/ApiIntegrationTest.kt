@@ -177,6 +177,13 @@ class ApiIntegrationTest {
         assertThat(vectorResults.single()["distanceMetric"].asText()).isEqualTo("COSINE")
         assertThat(vectorResults.single()["embeddingModel"].asText()).isEqualTo(fixture.embeddingModel)
         assertThat(vectorResults.single()["sourceIds"]["sourceRunId"].asText()).isEqualTo(fixture.sourceRunId)
+
+        getWithoutToken("/actuator/metrics/p2a.memory.write.calls")
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.name").value("p2a.memory.write.calls"))
+        getWithoutToken("/actuator/metrics/p2a.memory.search.calls")
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.name").value("p2a.memory.search.calls"))
     }
 
     @Test
@@ -296,6 +303,7 @@ class ApiIntegrationTest {
             "username: ${'$'}{P2A_DB_USERNAME:p2a}",
             "password: ${'$'}{P2A_DB_PASSWORD:p2a_local_password}",
             "/actuator/health",
+            "/actuator/metrics",
         )
 
         getWithoutToken("/api/health")
@@ -305,6 +313,9 @@ class ApiIntegrationTest {
         getWithoutToken("/actuator/health")
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.status").value("UP"))
+
+        getWithoutToken("/actuator/metrics")
+            .andExpect(status().isOk())
     }
 
     private fun saveSyncFixture(fixture: ApiFixture) {
