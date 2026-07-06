@@ -6,6 +6,7 @@ import com.github.silbaram.plan2agent.memory.application.port.out.KeywordSearchP
 import com.github.silbaram.plan2agent.memory.application.port.out.VectorSearchPort
 import com.github.silbaram.plan2agent.memory.application.usecase.FindArtifactsQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.KeywordSearchQuery
+import com.github.silbaram.plan2agent.memory.application.usecase.PagedResult
 import com.github.silbaram.plan2agent.memory.application.usecase.VectorSearchQuery
 import com.github.silbaram.plan2agent.memory.domain.ArtifactSummary
 import com.github.silbaram.plan2agent.memory.domain.ArtifactType
@@ -26,7 +27,9 @@ import org.springframework.jdbc.core.namedparam.MapSqlParameterSource
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
 import org.springframework.stereotype.Repository
 import java.sql.ResultSet
+import java.sql.Timestamp
 import java.time.Instant
+import java.util.Base64
 import java.util.UUID
 
 @Repository
@@ -36,10 +39,11 @@ class PostgresArtifactQueryAdapter(
     objectMapper: ObjectMapper,
 ) : ArtifactQueryPort {
     private val json = PostgresJsonSupport(objectMapper)
+    private val cursorCodec = SearchCursorCodec(objectMapper)
 
-    override fun findArtifacts(query: FindArtifactsQuery): List<ArtifactSummary> = metrics.recordSearch("artifact.find") {
+    override fun findArtifacts(query: FindArtifactsQuery): PagedResult<ArtifactSummary> = metrics.recordSearch("artifact.find") {
         val params = MapSqlParameterSource()
-            .addValue("limit", query.limit)
+            .addValue("limit", query.limit + 1)
         val filters = mutableListOf<String>()
 
         query.projectId?.let {
@@ -100,9 +104,30 @@ class PostgresArtifactQueryAdapter(
             params.addValue("sourceRefCanonicalServerId", it.canonicalServerId.value)
             params.addValue("sourceRefUri", it.uri)
         }
+        query.cursor?.let {
+            val cursor = cursorCodec.decodeArtifact(it)
+            filters += """
+                (
+                    sort_timestamp < :cursorSortTimestamp
+                    OR (
+                        sort_timestamp = :cursorSortTimestamp
+                        AND artifact_type > :cursorArtifactType
+                    )
+                    OR (
+                        sort_timestamp = :cursorSortTimestamp
+                        AND artifact_type = :cursorArtifactType
+                        AND artifact_id > :cursorArtifactId
+                    )
+                )
+            """.trimIndent()
+            params
+                .addValue("cursorSortTimestamp", parseCursorTimestamp(cursor.sortTimestamp))
+                .addValue("cursorArtifactType", cursor.artifactType)
+                .addValue("cursorArtifactId", cursor.artifactId)
+        }
 
         val whereClause = filters.toWhereClause()
-        jdbc.query(
+        val rows = jdbc.query(
             """
             WITH artifacts AS (
                 SELECT
@@ -314,8 +339,9 @@ class PostgresArtifactQueryAdapter(
             LIMIT :limit
             """.trimIndent(),
             params,
-            artifactSummaryMapper(json),
+            artifactSummaryRowMapper(json),
         )
+        rows.toPagedResult(query.limit, { it.summary }) { cursorCodec.encode(it.cursor) }
     }
 }
 
@@ -326,14 +352,15 @@ class PostgresKeywordSearchAdapter(
     objectMapper: ObjectMapper,
 ) : KeywordSearchPort {
     private val json = PostgresJsonSupport(objectMapper)
+    private val cursorCodec = SearchCursorCodec(objectMapper)
 
-    override fun search(query: KeywordSearchQuery): List<KeywordSearchMatch> = metrics.recordSearch("keyword.search") {
+    override fun search(query: KeywordSearchQuery): PagedResult<KeywordSearchMatch> = metrics.recordSearch("keyword.search") {
         require(query.query.isNotBlank()) { "KeywordSearchQuery query must not be blank" }
 
         val params = searchParams(query)
             .addValue("keywordQuery", query.query.trim())
             .addValue("pattern", likePattern(query.query))
-            .addValue("limit", query.limit)
+            .addValue("limit", query.limit + 1)
         if (query.metadataFilters.isNotEmpty()) {
             params.addValue("metadataFiltersJson", json.metadataToJson(query.metadataFilters))
         }
@@ -343,8 +370,9 @@ class PostgresKeywordSearchAdapter(
         val documentWhere = documentFilterClauses(query, params, alias = "d")
             .withMetadataFilters(query.metadataFilters, alias = "d")
             .toWhereClause(prefix = "WHERE")
+        val cursorWhere = keywordCursorWhere(query.cursor, params)
 
-        jdbc.query(
+        val rows = jdbc.query(
             """
             WITH keyword_query AS (
                 SELECT plainto_tsquery('simple', :keywordQuery) AS ts_query
@@ -502,12 +530,66 @@ class PostgresKeywordSearchAdapter(
             )
             SELECT *
             FROM matches
-            ORDER BY score DESC, snapshot_version DESC NULLS LAST, sort_timestamp DESC, chunk_index ASC NULLS LAST
+            $cursorWhere
+            ORDER BY
+                score DESC,
+                COALESCE(snapshot_version, -1) DESC,
+                sort_timestamp DESC,
+                COALESCE(chunk_index, 2147483647) ASC,
+                document_id::text ASC,
+                COALESCE(chunk_id::text, '') ASC
             LIMIT :limit
             """.trimIndent(),
             params,
-            keywordSearchMatchMapper(json),
+            keywordSearchRowMapper(json),
         )
+        rows.toPagedResult(query.limit, { it.match }) { cursorCodec.encode(it.cursor) }
+    }
+
+    private fun keywordCursorWhere(cursorValue: String?, params: MapSqlParameterSource): String {
+        val cursor = cursorValue?.let(cursorCodec::decodeKeyword) ?: return ""
+        params
+            .addValue("cursorScore", cursor.score)
+            .addValue("cursorSnapshotSort", cursor.snapshotSort)
+            .addValue("cursorSortTimestamp", parseCursorTimestamp(cursor.sortTimestamp))
+            .addValue("cursorChunkIndexSort", cursor.chunkIndexSort)
+            .addValue("cursorDocumentId", cursor.documentId)
+            .addValue("cursorChunkId", cursor.chunkId)
+        return """
+            WHERE (
+                score < :cursorScore
+                OR (
+                    score = :cursorScore
+                    AND COALESCE(snapshot_version, -1) < :cursorSnapshotSort
+                )
+                OR (
+                    score = :cursorScore
+                    AND COALESCE(snapshot_version, -1) = :cursorSnapshotSort
+                    AND sort_timestamp < :cursorSortTimestamp
+                )
+                OR (
+                    score = :cursorScore
+                    AND COALESCE(snapshot_version, -1) = :cursorSnapshotSort
+                    AND sort_timestamp = :cursorSortTimestamp
+                    AND COALESCE(chunk_index, 2147483647) > :cursorChunkIndexSort
+                )
+                OR (
+                    score = :cursorScore
+                    AND COALESCE(snapshot_version, -1) = :cursorSnapshotSort
+                    AND sort_timestamp = :cursorSortTimestamp
+                    AND COALESCE(chunk_index, 2147483647) = :cursorChunkIndexSort
+                    AND document_id::text > :cursorDocumentId
+                )
+                OR (
+                    score = :cursorScore
+                    AND COALESCE(snapshot_version, -1) = :cursorSnapshotSort
+                    AND sort_timestamp = :cursorSortTimestamp
+                    AND COALESCE(chunk_index, 2147483647) = :cursorChunkIndexSort
+                    AND document_id::text = :cursorDocumentId
+                    AND COALESCE(chunk_id::text, '') > :cursorChunkId
+                )
+            )
+        """.trimIndent()
     }
 }
 
@@ -518,8 +600,9 @@ class PostgresVectorSearchAdapter(
     objectMapper: ObjectMapper,
 ) : VectorSearchPort {
     private val json = PostgresJsonSupport(objectMapper)
+    private val cursorCodec = SearchCursorCodec(objectMapper)
 
-    override fun search(query: VectorSearchQuery): List<VectorSearchMatch> = metrics.recordSearch("vector.search") {
+    override fun search(query: VectorSearchQuery): PagedResult<VectorSearchMatch> = metrics.recordSearch("vector.search") {
         require(query.embedding.values.isNotEmpty()) { "VectorSearchQuery embedding must not be empty" }
         require(query.embedding.values.size == query.embeddingDimension) {
             "VectorSearchQuery embeddingDimension must match embedding size"
@@ -537,7 +620,7 @@ class PostgresVectorSearchAdapter(
             .addValue("embeddingVersion", query.embeddingVersion)
             .addValue("distanceMetric", query.distanceMetric.toDbValue())
             .addValue("queryEmbedding", query.embedding.toPgVectorLiteral())
-            .addValue("limit", query.limit)
+            .addValue("limit", query.limit + 1)
         if (query.metadataFilters.isNotEmpty()) {
             params.addValue("metadataFiltersJson", json.metadataToJson(query.metadataFilters))
         }
@@ -546,8 +629,9 @@ class PostgresVectorSearchAdapter(
             .toWhereClause(prefix = "WHERE")
         val distanceExpression = query.distanceMetric.distanceExpression()
         val orderExpression = query.distanceMetric.orderExpression()
+        val cursorWhere = vectorCursorWhere(query.cursor, params, orderExpression)
 
-        jdbc.query(
+        val rows = jdbc.query(
             """
             SELECT
                 dc.chunk_id,
@@ -559,6 +643,7 @@ class PostgresVectorSearchAdapter(
                 dc.chunk_index,
                 dc.content,
                 $distanceExpression AS score,
+                $orderExpression AS sort_value,
                 es.distance_metric,
                 es.embedding_model,
                 es.embedding_version,
@@ -586,12 +671,60 @@ class PostgresVectorSearchAdapter(
               AND es.embedding_dimension = :embeddingDimension
               AND es.embedding_version = :embeddingVersion
               AND es.distance_metric = :distanceMetric
-            ORDER BY $orderExpression ASC, d.snapshot_version DESC NULLS LAST, sort_timestamp DESC, dc.chunk_index ASC
+              $cursorWhere
+            ORDER BY
+                sort_value ASC,
+                COALESCE(d.snapshot_version, -1) DESC,
+                sort_timestamp DESC,
+                COALESCE(dc.chunk_index, 2147483647) ASC,
+                dc.chunk_id::text ASC
             LIMIT :limit
             """.trimIndent(),
             params,
-            vectorSearchMatchMapper(json),
+            vectorSearchRowMapper(json),
         )
+        rows.toPagedResult(query.limit, { it.match }) { cursorCodec.encode(it.cursor) }
+    }
+
+    private fun vectorCursorWhere(
+        cursorValue: String?,
+        params: MapSqlParameterSource,
+        orderExpression: String,
+    ): String {
+        val cursor = cursorValue?.let(cursorCodec::decodeVector) ?: return ""
+        params
+            .addValue("cursorSortValue", cursor.sortValue)
+            .addValue("cursorSnapshotSort", cursor.snapshotSort)
+            .addValue("cursorSortTimestamp", parseCursorTimestamp(cursor.sortTimestamp))
+            .addValue("cursorChunkIndexSort", cursor.chunkIndexSort)
+            .addValue("cursorChunkId", cursor.chunkId)
+        return """
+            AND (
+                $orderExpression > :cursorSortValue
+                OR (
+                    $orderExpression = :cursorSortValue
+                    AND COALESCE(d.snapshot_version, -1) < :cursorSnapshotSort
+                )
+                OR (
+                    $orderExpression = :cursorSortValue
+                    AND COALESCE(d.snapshot_version, -1) = :cursorSnapshotSort
+                    AND COALESCE(dc.updated_at, dc.created_at) < :cursorSortTimestamp
+                )
+                OR (
+                    $orderExpression = :cursorSortValue
+                    AND COALESCE(d.snapshot_version, -1) = :cursorSnapshotSort
+                    AND COALESCE(dc.updated_at, dc.created_at) = :cursorSortTimestamp
+                    AND COALESCE(dc.chunk_index, 2147483647) > :cursorChunkIndexSort
+                )
+                OR (
+                    $orderExpression = :cursorSortValue
+                    AND COALESCE(d.snapshot_version, -1) = :cursorSnapshotSort
+                    AND COALESCE(dc.updated_at, dc.created_at) = :cursorSortTimestamp
+                    AND COALESCE(dc.chunk_index, 2147483647) = :cursorChunkIndexSort
+                    AND dc.chunk_id::text > :cursorChunkId
+                )
+            )
+        """.trimIndent()
     }
 
     private fun validateStoredEmbeddingDimensions(query: VectorSearchQuery) {
@@ -694,62 +827,207 @@ private fun List<String>.toWhereClause(prefix: String = "WHERE"): String =
         joinToString(separator = "\n  AND ", prefix = "$prefix ")
     }
 
-private fun artifactSummaryMapper(json: PostgresJsonSupport): RowMapper<ArtifactSummary> =
+private data class ArtifactSummaryRow(
+    val summary: ArtifactSummary,
+    val cursor: ArtifactCursor,
+)
+
+private data class KeywordSearchRow(
+    val match: KeywordSearchMatch,
+    val cursor: KeywordCursor,
+)
+
+private data class VectorSearchRow(
+    val match: VectorSearchMatch,
+    val cursor: VectorCursor,
+)
+
+private fun artifactSummaryRowMapper(json: PostgresJsonSupport): RowMapper<ArtifactSummaryRow> =
     RowMapper { rs, _ ->
-        val metadata = json.metadataFromJson(rs.getString("metadata"))
-        ArtifactSummary(
-            artifactType = ArtifactType.valueOf(rs.getString("artifact_type")),
-            artifactId = rs.getString("artifact_id"),
-            projectId = ProjectId(rs.getString("project_id")),
-            iterationId = rs.getString("iteration_id")?.let(::IterationId),
-            taskId = rs.getString("task_id")?.let(::TaskId),
-            runId = rs.getString("run_id")?.let(::RunId),
-            sourcePath = rs.getString("source_path"),
-            title = rs.getString("title"),
-            contentHash = rs.getString("content_hash")?.let(::ContentHash),
-            sourceReference = json.sourceReferenceFrom(metadata),
-            createdAt = rs.instant("created_at"),
-            updatedAt = rs.nullableInstant("updated_at"),
-            metadata = sourceMetadata(json, metadata, rs),
+        val summary = artifactSummary(json, rs)
+        ArtifactSummaryRow(
+            summary = summary,
+            cursor = ArtifactCursor(
+                sortTimestamp = rs.instant("sort_timestamp").toString(),
+                artifactType = rs.getString("artifact_type"),
+                artifactId = rs.getString("artifact_id"),
+            ),
         )
     }
 
-private fun keywordSearchMatchMapper(json: PostgresJsonSupport): RowMapper<KeywordSearchMatch> =
+private fun artifactSummary(json: PostgresJsonSupport, rs: ResultSet): ArtifactSummary {
+    val metadata = json.metadataFromJson(rs.getString("metadata"))
+    return ArtifactSummary(
+        artifactType = ArtifactType.valueOf(rs.getString("artifact_type")),
+        artifactId = rs.getString("artifact_id"),
+        projectId = ProjectId(rs.getString("project_id")),
+        iterationId = rs.getString("iteration_id")?.let(::IterationId),
+        taskId = rs.getString("task_id")?.let(::TaskId),
+        runId = rs.getString("run_id")?.let(::RunId),
+        sourcePath = rs.getString("source_path"),
+        title = rs.getString("title"),
+        contentHash = rs.getString("content_hash")?.let(::ContentHash),
+        sourceReference = json.sourceReferenceFrom(metadata),
+        createdAt = rs.instant("created_at"),
+        updatedAt = rs.nullableInstant("updated_at"),
+        metadata = sourceMetadata(json, metadata, rs),
+    )
+}
+
+private fun keywordSearchRowMapper(json: PostgresJsonSupport): RowMapper<KeywordSearchRow> =
     RowMapper { rs, _ ->
-        val metadata = json.metadataFromJson(rs.getString("metadata"))
-        KeywordSearchMatch(
-            chunkId = rs.getString("chunk_id")?.let(::DocumentChunkId),
-            documentId = rs.getString("document_id")?.let(::DocumentId),
-            projectId = ProjectId(rs.getString("project_id")),
-            iterationId = rs.getString("iteration_id")?.let(::IterationId),
-            artifactType = ArtifactType.valueOf(rs.getString("artifact_type")),
-            sourcePath = rs.getString("source_path"),
-            chunkIndex = rs.nullableInt("chunk_index"),
-            content = rs.getString("content"),
-            score = rs.getDouble("score"),
-            matchReason = rs.getString("match_reason"),
-            metadata = sourceMetadata(json, metadata, rs),
+        val match = keywordSearchMatch(json, rs)
+        KeywordSearchRow(
+            match = match,
+            cursor = KeywordCursor(
+                score = rs.getDouble("score"),
+                snapshotSort = rs.nullableInt("snapshot_version") ?: -1,
+                sortTimestamp = rs.instant("sort_timestamp").toString(),
+                chunkIndexSort = rs.nullableInt("chunk_index") ?: NULLS_LAST_INT,
+                documentId = rs.getString("document_id"),
+                chunkId = rs.getString("chunk_id") ?: "",
+            ),
         )
     }
 
-private fun vectorSearchMatchMapper(json: PostgresJsonSupport): RowMapper<VectorSearchMatch> =
+private fun keywordSearchMatch(json: PostgresJsonSupport, rs: ResultSet): KeywordSearchMatch {
+    val metadata = json.metadataFromJson(rs.getString("metadata"))
+    return KeywordSearchMatch(
+        chunkId = rs.getString("chunk_id")?.let(::DocumentChunkId),
+        documentId = rs.getString("document_id")?.let(::DocumentId),
+        projectId = ProjectId(rs.getString("project_id")),
+        iterationId = rs.getString("iteration_id")?.let(::IterationId),
+        artifactType = ArtifactType.valueOf(rs.getString("artifact_type")),
+        sourcePath = rs.getString("source_path"),
+        chunkIndex = rs.nullableInt("chunk_index"),
+        content = rs.getString("content"),
+        score = rs.getDouble("score"),
+        matchReason = rs.getString("match_reason"),
+        metadata = sourceMetadata(json, metadata, rs),
+    )
+}
+
+private fun vectorSearchRowMapper(json: PostgresJsonSupport): RowMapper<VectorSearchRow> =
     RowMapper { rs, _ ->
-        val metadata = json.metadataFromJson(rs.getString("metadata"))
-        VectorSearchMatch(
-            chunkId = rs.getString("chunk_id")?.let(::DocumentChunkId),
-            documentId = rs.getString("document_id")?.let(::DocumentId),
-            projectId = ProjectId(rs.getString("project_id")),
-            iterationId = rs.getString("iteration_id")?.let(::IterationId),
-            artifactType = ArtifactType.valueOf(rs.getString("artifact_type")),
-            sourcePath = rs.getString("source_path"),
-            chunkIndex = rs.nullableInt("chunk_index"),
-            content = rs.getString("content"),
-            score = rs.getDouble("score"),
-            distanceMetric = distanceMetricFromDbValue(rs.getString("distance_metric")),
-            embeddingModel = rs.getString("embedding_model"),
-            embeddingVersion = rs.getString("embedding_version"),
-            metadata = sourceMetadata(json, metadata, rs),
+        val match = vectorSearchMatch(json, rs)
+        VectorSearchRow(
+            match = match,
+            cursor = VectorCursor(
+                sortValue = rs.getDouble("sort_value"),
+                snapshotSort = rs.nullableInt("snapshot_version") ?: -1,
+                sortTimestamp = rs.instant("sort_timestamp").toString(),
+                chunkIndexSort = rs.nullableInt("chunk_index") ?: NULLS_LAST_INT,
+                chunkId = rs.getString("chunk_id"),
+            ),
         )
+    }
+
+private fun vectorSearchMatch(json: PostgresJsonSupport, rs: ResultSet): VectorSearchMatch {
+    val metadata = json.metadataFromJson(rs.getString("metadata"))
+    return VectorSearchMatch(
+        chunkId = rs.getString("chunk_id")?.let(::DocumentChunkId),
+        documentId = rs.getString("document_id")?.let(::DocumentId),
+        projectId = ProjectId(rs.getString("project_id")),
+        iterationId = rs.getString("iteration_id")?.let(::IterationId),
+        artifactType = ArtifactType.valueOf(rs.getString("artifact_type")),
+        sourcePath = rs.getString("source_path"),
+        chunkIndex = rs.nullableInt("chunk_index"),
+        content = rs.getString("content"),
+        score = rs.getDouble("score"),
+        distanceMetric = distanceMetricFromDbValue(rs.getString("distance_metric")),
+        embeddingModel = rs.getString("embedding_model"),
+        embeddingVersion = rs.getString("embedding_version"),
+        metadata = sourceMetadata(json, metadata, rs),
+    )
+}
+
+private data class ArtifactCursor(
+    val kind: String = ARTIFACT_CURSOR_KIND,
+    val sortTimestamp: String,
+    val artifactType: String,
+    val artifactId: String,
+)
+
+private data class KeywordCursor(
+    val kind: String = KEYWORD_CURSOR_KIND,
+    val score: Double,
+    val snapshotSort: Int,
+    val sortTimestamp: String,
+    val chunkIndexSort: Int,
+    val documentId: String,
+    val chunkId: String,
+)
+
+private data class VectorCursor(
+    val kind: String = VECTOR_CURSOR_KIND,
+    val sortValue: Double,
+    val snapshotSort: Int,
+    val sortTimestamp: String,
+    val chunkIndexSort: Int,
+    val chunkId: String,
+)
+
+private class SearchCursorCodec(
+    private val objectMapper: ObjectMapper,
+) {
+    fun encode(cursor: ArtifactCursor): String = encodeCursor(cursor)
+
+    fun encode(cursor: KeywordCursor): String = encodeCursor(cursor)
+
+    fun encode(cursor: VectorCursor): String = encodeCursor(cursor)
+
+    fun decodeArtifact(value: String): ArtifactCursor =
+        decodeCursor(value, ArtifactCursor::class.java).also {
+            require(it.kind == ARTIFACT_CURSOR_KIND) { "cursor does not belong to artifact lookup" }
+        }
+
+    fun decodeKeyword(value: String): KeywordCursor =
+        decodeCursor(value, KeywordCursor::class.java).also {
+            require(it.kind == KEYWORD_CURSOR_KIND) { "cursor does not belong to keyword search" }
+        }
+
+    fun decodeVector(value: String): VectorCursor =
+        decodeCursor(value, VectorCursor::class.java).also {
+            require(it.kind == VECTOR_CURSOR_KIND) { "cursor does not belong to vector search" }
+        }
+
+    private fun encodeCursor(cursor: Any): String =
+        Base64.getUrlEncoder()
+            .withoutPadding()
+            .encodeToString(objectMapper.writeValueAsBytes(cursor))
+
+    private fun <T> decodeCursor(value: String, type: Class<T>): T {
+        val decoded = try {
+            Base64.getUrlDecoder().decode(value)
+        } catch (_: IllegalArgumentException) {
+            throw IllegalArgumentException("cursor has invalid format")
+        }
+        return try {
+            objectMapper.readValue(decoded, type)
+        } catch (_: Exception) {
+            throw IllegalArgumentException("cursor has invalid format")
+        }
+    }
+}
+
+private fun <R, T> List<R>.toPagedResult(
+    limit: Int,
+    value: (R) -> T,
+    cursor: (R) -> String,
+): PagedResult<T> {
+    val pageRows = if (size > limit) take(limit) else this
+    val nextCursor = if (size > limit) cursor(pageRows.last()) else null
+    return PagedResult(
+        items = pageRows.map(value),
+        nextCursor = nextCursor,
+    )
+}
+
+private fun parseCursorTimestamp(value: String): Timestamp =
+    try {
+        Timestamp.from(Instant.parse(value))
+    } catch (_: Exception) {
+        throw IllegalArgumentException("cursor has invalid format")
     }
 
 private fun sourceMetadata(
@@ -837,4 +1115,8 @@ private fun ResultSet.instant(column: String): Instant =
 private fun ResultSet.nullableInstant(column: String): Instant? =
     getTimestamp(column)?.toInstant()
 
+private const val ARTIFACT_CURSOR_KIND = "artifact.v1"
+private const val KEYWORD_CURSOR_KIND = "keyword.v1"
+private const val VECTOR_CURSOR_KIND = "vector.v1"
+private const val NULLS_LAST_INT = 2147483647
 private const val MAX_VECTOR_DIMENSION = 2000

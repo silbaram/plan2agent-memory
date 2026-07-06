@@ -1,8 +1,10 @@
 package com.github.silbaram.plan2agent.memory.adapter.out.postgres
 
+import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactQueryPort
 import com.github.silbaram.plan2agent.memory.application.port.out.KeywordSearchPort
 import com.github.silbaram.plan2agent.memory.application.port.out.VectorSearchPort
 import com.github.silbaram.plan2agent.memory.application.usecase.DocumentChunkWrite
+import com.github.silbaram.plan2agent.memory.application.usecase.FindArtifactsQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.KeywordSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.RegisterIterationCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.RegisterProjectCommand
@@ -71,6 +73,9 @@ class PostgresSearchIntegrationTest {
     private lateinit var writeUseCase: WriteUseCaseService
 
     @Autowired
+    private lateinit var artifactQuery: ArtifactQueryPort
+
+    @Autowired
     private lateinit var keywordSearch: KeywordSearchPort
 
     @Autowired
@@ -121,7 +126,7 @@ class PostgresSearchIntegrationTest {
                 iterationId = fixture.iteration.id,
                 limit = 10,
             ),
-        )
+        ).items
 
         assertThat(matches).hasSizeGreaterThanOrEqualTo(2)
         assertThat(matches.first().chunkId).isEqualTo(chunk.id)
@@ -168,14 +173,14 @@ class PostgresSearchIntegrationTest {
 
         val documentMatches = keywordSearch.search(
             KeywordSearchQuery(query = "document target token", projectId = fixture.project.id),
-        )
+        ).items
         assertThat(documentMatches.map { it.documentId }).contains(documentContentTarget.id)
         assertThat(documentMatches.single { it.documentId == documentContentTarget.id }.matchReason)
             .isEqualTo("document.content")
 
         val pathMatches = keywordSearch.search(
             KeywordSearchQuery(query = "source-path-target", projectId = fixture.project.id),
-        )
+        ).items
         assertThat(pathMatches.single { it.documentId == sourcePathTarget.id }.matchReason)
             .isEqualTo("sourcePath")
 
@@ -185,7 +190,7 @@ class PostgresSearchIntegrationTest {
                 projectId = fixture.project.id,
                 sourcePath = artifactTypeTarget.sourcePath,
             ),
-        )
+        ).items
         val artifactTypeMatch = artifactTypeMatches.single()
         assertThat(artifactTypeMatch.documentId).isEqualTo(artifactTypeTarget.id)
         assertThat(artifactTypeMatch.matchReason).isEqualTo("artifactType")
@@ -264,10 +269,78 @@ class PostgresSearchIntegrationTest {
                 metadataFilters = mapOf("phase" to "gate-d", "kind" to "decision"),
                 limit = 10,
             ),
-        )
+        ).items
 
         assertThat(matches.map { it.chunkId }).containsExactly(matchingChunk.id)
         assertThat(matches.single().matchReason).isEqualTo("chunk.content")
+    }
+
+    @Test
+    fun `artifact lookup paginates with opaque keyset cursor`() {
+        val fixture = saveProjectAndIteration("artifact-page")
+        val documents = listOf("a", "b", "c").map {
+            saveDocument(
+                scope = "artifact-page-$it",
+                fixture = fixture,
+                sourcePath = "docs/artifact-page-$it.md",
+                content = "Artifact page $it",
+            )
+        }
+        val query = FindArtifactsQuery(
+            projectId = fixture.project.id,
+            iterationId = fixture.iteration.id,
+            artifactType = ArtifactType.DOCUMENT_SNAPSHOT,
+            limit = 2,
+        )
+
+        val firstPage = artifactQuery.findArtifacts(query)
+        val secondPage = artifactQuery.findArtifacts(query.copy(cursor = requireNotNull(firstPage.nextCursor)))
+
+        assertThat(firstPage.items).hasSize(2)
+        assertThat(firstPage.nextCursor).isNotBlank()
+        assertThat(secondPage.items).hasSize(1)
+        assertThat(secondPage.nextCursor).isNull()
+        assertThat((firstPage.items + secondPage.items).map { it.artifactId })
+            .containsExactlyInAnyOrderElementsOf(documents.map { it.id.value })
+        assertThat(firstPage.items.map { it.artifactId }.toSet())
+            .doesNotContainAnyElementsOf(secondPage.items.map { it.artifactId }.toSet())
+    }
+
+    @Test
+    fun `keyword search paginates ranked results with opaque keyset cursor`() {
+        val fixture = saveProjectAndIteration("keyword-page")
+        val document = saveDocument(
+            scope = "keyword-page",
+            fixture = fixture,
+            sourcePath = "docs/keyword-page.md",
+            content = "Neutral document text.",
+        )
+        val chunks = (0..2).map { index ->
+            saveChunk(
+                scope = "keyword-page-$index",
+                document = document,
+                chunkIndex = index,
+                content = "keyword-page-token appears in chunk $index.",
+            )
+        }
+        val query = KeywordSearchQuery(
+            query = "keyword-page-token",
+            projectId = fixture.project.id,
+            iterationId = fixture.iteration.id,
+            limit = 2,
+        )
+
+        val firstPage = keywordSearch.search(query)
+        val secondPage = keywordSearch.search(query.copy(cursor = requireNotNull(firstPage.nextCursor)))
+
+        assertThat(firstPage.items).hasSize(2)
+        assertThat(firstPage.nextCursor).isNotBlank()
+        assertThat(secondPage.items).hasSize(1)
+        assertThat(secondPage.nextCursor).isNull()
+        assertThat((firstPage.items + secondPage.items).map { it.chunkId })
+            .containsExactlyInAnyOrderElementsOf(chunks.map { it.id })
+        assertThat(firstPage.items.map { it.chunkId }.toSet())
+            .doesNotContainAnyElementsOf(secondPage.items.map { it.chunkId }.toSet())
     }
 
     @Test
@@ -342,7 +415,7 @@ class PostgresSearchIntegrationTest {
                 iterationId = fixture.iteration.id,
                 limit = 10,
             ),
-        )
+        ).items
 
         assertThat(matches.map { it.chunkId }).containsExactly(nearest.id, middle.id, farthest.id)
         assertThat(matches.zipWithNext().all { it.first.score <= it.second.score }).isTrue()
@@ -353,6 +426,63 @@ class PostgresSearchIntegrationTest {
             assertThat(it.score).isGreaterThanOrEqualTo(0.0)
             assertThat(it.metadata).containsEntry("snapshotVersion", "1")
         }
+    }
+
+    @Test
+    fun `vector search paginates exact ranking with opaque keyset cursor`() {
+        val fixture = saveProjectAndIteration("vector-page")
+        val document = saveDocument(
+            scope = "vector-page",
+            fixture = fixture,
+            sourcePath = "docs/vector-page.md",
+            content = "Vector page fixture.",
+        )
+        val embeddingSet = embeddingSet("vector-page", fixture.project.id)
+        val chunks = listOf(
+            saveChunk(
+                scope = "vector-page-nearest",
+                document = document,
+                content = "nearest vector page result",
+                embeddingSet = embeddingSet,
+                embedding = Embedding(listOf(1.0f, 0.0f)),
+            ),
+            saveChunk(
+                scope = "vector-page-middle",
+                document = document,
+                chunkIndex = 1,
+                content = "middle vector page result",
+                embeddingSet = embeddingSet,
+                embedding = Embedding(listOf(0.7f, 0.7f)),
+            ),
+            saveChunk(
+                scope = "vector-page-farthest",
+                document = document,
+                chunkIndex = 2,
+                content = "farthest vector page result",
+                embeddingSet = embeddingSet,
+                embedding = Embedding(listOf(0.0f, 1.0f)),
+            ),
+        )
+        val query = VectorSearchQuery(
+            embedding = Embedding(listOf(1.0f, 0.0f)),
+            embeddingModel = embeddingSet.embeddingModel,
+            embeddingDimension = embeddingSet.embeddingDimension,
+            embeddingVersion = embeddingSet.embeddingVersion,
+            distanceMetric = DistanceMetric.COSINE,
+            projectId = fixture.project.id,
+            iterationId = fixture.iteration.id,
+            limit = 2,
+        )
+
+        val firstPage = vectorSearch.search(query)
+        val secondPage = vectorSearch.search(query.copy(cursor = requireNotNull(firstPage.nextCursor)))
+
+        assertThat(firstPage.items).hasSize(2)
+        assertThat(firstPage.nextCursor).isNotBlank()
+        assertThat(secondPage.items).hasSize(1)
+        assertThat(secondPage.nextCursor).isNull()
+        assertThat((firstPage.items + secondPage.items).map { it.chunkId })
+            .containsExactlyElementsOf(chunks.map { it.id })
     }
 
     @Test
@@ -386,7 +516,7 @@ class PostgresSearchIntegrationTest {
                     distanceMetric = DistanceMetric.COSINE,
                     projectId = fixture.project.id,
                 ),
-            ),
+            ).items,
         ).isEmpty()
         assertThat(
             vectorSearch.search(
@@ -398,7 +528,7 @@ class PostgresSearchIntegrationTest {
                     distanceMetric = DistanceMetric.COSINE,
                     projectId = fixture.project.id,
                 ),
-            ),
+            ).items,
         ).isEmpty()
         assertThatThrownBy {
             vectorSearch.search(

@@ -345,10 +345,13 @@ Task 실행 기록을 저장합니다.
 | `sourceReferenceCanonicalServerId` | 선택 | Source reference canonical server ID filter입니다. |
 | `sourceReferenceUri` | 선택 | Source reference URI filter입니다. |
 | `limit` | 선택 | 최대 응답 개수입니다. |
+| `cursor` | 선택 | 이전 응답의 `nextCursor`입니다. 같은 filter와 함께 넘기면 다음 페이지를 keyset 방식으로 조회합니다. |
 
 | Response | 포함 정보 |
 | --- | --- |
-| `ArtifactLookupResponse[]` | 각 항목의 `lineage`, `sourceIds`, `sourceReference`, `contentHash`, `snapshotVersion` |
+| `PagedResponse<ArtifactLookupResponse>` | `items`, 다음 페이지가 있을 때만 채워지는 opaque `nextCursor` |
+
+Artifact lookup은 `sort_timestamp DESC, artifactType ASC, artifactId ASC` keyset cursor를 사용합니다. Cursor는 서버 opaque 값이므로 클라이언트에서 파싱하지 말고 그대로 전달해야 합니다.
 
 ### `GET /api/search/keyword`
 
@@ -364,6 +367,7 @@ RAG/history lookup을 위한 deterministic lexical retrieval입니다.
 | `taskId` | 선택 | Canonical task ID filter입니다. |
 | `runId` | 선택 | Canonical run ID filter입니다. |
 | `limit` | 선택 | 최대 응답 개수입니다. |
+| `cursor` | 선택 | 이전 응답의 `nextCursor`입니다. 같은 filter와 함께 넘기면 다음 페이지를 keyset 방식으로 조회합니다. |
 
 | 검색 동작 | 설명 |
 | --- | --- |
@@ -371,11 +375,11 @@ RAG/history lookup을 위한 deterministic lexical retrieval입니다.
 | Matching | Case-insensitive matching입니다. |
 | Filter semantics | 여러 filter는 AND semantics로 적용됩니다. |
 | Score | `score`는 backend-opaque 값이며 API 안정 계약으로 고정하지 않습니다. |
-| Tie-break | 동률은 snapshot/version/timestamp/chunkIndex 기준으로 정렬합니다. |
+| Tie-break | 동률은 snapshot/version/timestamp/chunkIndex/documentId/chunkId 기준으로 정렬합니다. |
 
 | Response | 포함 정보 |
 | --- | --- |
-| `KeywordSearchResponse[]` | `content`, `score`, `matchReason`, `lineage`, `sourceIds`, `metadata` |
+| `PagedResponse<KeywordSearchResponse>` | `items` 안의 `content`, `score`, `matchReason`, `lineage`, `sourceIds`, `metadata`; 다음 페이지가 있을 때만 채워지는 opaque `nextCursor` |
 
 ### `POST /api/search/vector`
 
@@ -396,6 +400,7 @@ RAG/history lookup을 위한 deterministic lexical retrieval입니다.
 | `runId` | 선택 | Canonical run ID filter입니다. |
 | `metadataFilters` | 선택 | Metadata key/value filter입니다. |
 | `limit` | 선택 | 최대 응답 개수입니다. |
+| `cursor` | 선택 | 이전 응답의 `nextCursor`입니다. 같은 filter와 함께 넘기면 다음 페이지를 keyset 방식으로 조회합니다. |
 
 | 검색 동작 | 설명 |
 | --- | --- |
@@ -405,7 +410,7 @@ RAG/history lookup을 위한 deterministic lexical retrieval입니다.
 
 | Response | 포함 정보 |
 | --- | --- |
-| `VectorSearchResponse[]` | `score`, `distanceMetric`, `embeddingModel`, `embeddingVersion`, `lineage`, `sourceIds` |
+| `PagedResponse<VectorSearchResponse>` | `items` 안의 `score`, `distanceMetric`, `embeddingModel`, `embeddingVersion`, `lineage`, `sourceIds`; 다음 페이지가 있을 때만 채워지는 opaque `nextCursor` |
 
 ### Observability endpoints
 

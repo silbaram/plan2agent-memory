@@ -35,7 +35,8 @@ class QueryRestController(
         @RequestParam(required = false) sourceReferenceCanonicalServerId: String?,
         @RequestParam(required = false) sourceReferenceUri: String?,
         @RequestParam(required = false) limit: Int?,
-    ): List<ArtifactLookupResponse> =
+        @RequestParam(required = false) cursor: String?,
+    ): PagedResponse<ArtifactLookupResponse> =
         findArtifactsUseCase.findArtifacts(
             ArtifactLookupRequest(
                 projectId = projectId,
@@ -54,8 +55,9 @@ class QueryRestController(
                 sourceReferenceCanonicalServerId = sourceReferenceCanonicalServerId,
                 sourceReferenceUri = sourceReferenceUri,
                 limit = limit,
+                cursor = cursor,
             ).toQuery(),
-        ).map { it.toLookupResponse() }
+        ).toRestPage { it.toLookupResponse() }
 
     @GetMapping("/search/keyword")
     fun keywordSearch(
@@ -67,7 +69,8 @@ class QueryRestController(
         @RequestParam(required = false) taskId: String?,
         @RequestParam(required = false) runId: String?,
         @RequestParam(required = false) limit: Int?,
-    ): List<KeywordSearchResponse> =
+        @RequestParam(required = false) cursor: String?,
+    ): PagedResponse<KeywordSearchResponse> =
         keywordSearchUseCase.keywordSearch(
             KeywordSearchRequest(
                 q = q,
@@ -78,12 +81,13 @@ class QueryRestController(
                 taskId = taskId,
                 runId = runId,
                 limit = limit,
+                cursor = cursor,
             ).toQuery(),
-        ).map { it.toResponse() }
+        ).toRestPage { it.toResponse() }
 
     @PostMapping("/search/vector")
-    fun vectorSearch(@RequestBody request: VectorSearchRequest): List<VectorSearchResponse> =
-        vectorSearchUseCase.vectorSearch(request.toQuery()).map { it.toResponse() }
+    fun vectorSearch(@RequestBody request: VectorSearchRequest): PagedResponse<VectorSearchResponse> =
+        vectorSearchUseCase.vectorSearch(request.toQuery()).toRestPage { it.toResponse() }
 }
 
 @RestController

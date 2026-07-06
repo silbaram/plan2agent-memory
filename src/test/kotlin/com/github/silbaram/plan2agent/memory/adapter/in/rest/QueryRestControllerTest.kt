@@ -5,6 +5,7 @@ import com.github.silbaram.plan2agent.memory.application.port.`in`.KeywordSearch
 import com.github.silbaram.plan2agent.memory.application.port.`in`.VectorSearchUseCase
 import com.github.silbaram.plan2agent.memory.application.usecase.FindArtifactsQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.KeywordSearchQuery
+import com.github.silbaram.plan2agent.memory.application.usecase.PagedResult
 import com.github.silbaram.plan2agent.memory.application.usecase.VectorSearchQuery
 import com.github.silbaram.plan2agent.memory.domain.ArtifactSummary
 import com.github.silbaram.plan2agent.memory.domain.ArtifactType
@@ -47,31 +48,34 @@ class QueryRestControllerTest {
         )
         val createdAt = Instant.parse("2026-06-29T01:00:00Z")
         val updatedAt = Instant.parse("2026-06-29T02:00:00Z")
-        findArtifacts.result = listOf(
-            ArtifactSummary(
-                artifactType = ArtifactType.DOCUMENT_SNAPSHOT,
-                artifactId = RestTestIds.documentId.value,
-                projectId = RestTestIds.projectId,
-                iterationId = RestTestIds.iterationId,
-                taskId = RestTestIds.taskId,
-                runId = RestTestIds.runId,
-                sourcePath = "spec.md",
-                title = "Spec",
-                contentHash = ContentHash("content-hash"),
-                sourceReference = sourceReference,
-                createdAt = createdAt,
-                updatedAt = updatedAt,
-                metadata = mapOf(
-                    "sourceProjectId" to "source-project",
-                    "sourceIterationId" to "source-iteration",
-                    "sourceDocumentId" to "source-document",
-                    "sourceTaskGraphId" to "source-graph",
-                    "sourceTaskId" to "source-task",
-                    "sourceRunId" to "source-run",
-                    "snapshotVersion" to "3",
-                    "custom" to "value",
+        findArtifacts.result = PagedResult(
+            items = listOf(
+                ArtifactSummary(
+                    artifactType = ArtifactType.DOCUMENT_SNAPSHOT,
+                    artifactId = RestTestIds.documentId.value,
+                    projectId = RestTestIds.projectId,
+                    iterationId = RestTestIds.iterationId,
+                    taskId = RestTestIds.taskId,
+                    runId = RestTestIds.runId,
+                    sourcePath = "spec.md",
+                    title = "Spec",
+                    contentHash = ContentHash("content-hash"),
+                    sourceReference = sourceReference,
+                    createdAt = createdAt,
+                    updatedAt = updatedAt,
+                    metadata = mapOf(
+                        "sourceProjectId" to "source-project",
+                        "sourceIterationId" to "source-iteration",
+                        "sourceDocumentId" to "source-document",
+                        "sourceTaskGraphId" to "source-graph",
+                        "sourceTaskId" to "source-task",
+                        "sourceRunId" to "source-run",
+                        "snapshotVersion" to "3",
+                        "custom" to "value",
+                    ),
                 ),
             ),
+            nextCursor = "next-artifact-cursor",
         )
 
         val response = controller.findArtifacts(
@@ -91,6 +95,7 @@ class QueryRestControllerTest {
             sourceReferenceCanonicalServerId = "local-server",
             sourceReferenceUri = "file:///repo/spec.md",
             limit = 25,
+            cursor = "artifact-cursor",
         )
 
         assertThat(findArtifacts.received).isEqualTo(
@@ -110,32 +115,37 @@ class QueryRestControllerTest {
                 contentHash = ContentHash("content-hash"),
                 sourceReference = SourceReference(CanonicalServerId("local-server"), "file:///repo/spec.md"),
                 limit = 25,
+                cursor = "artifact-cursor",
             ),
         )
-        assertThat(response.single().snapshotVersion).isEqualTo(3)
-        assertThat(response.single().createdAt).isEqualTo(createdAt)
-        assertThat(response.single().updatedAt).isEqualTo(updatedAt)
-        assertThat(response.single().sourceIds.sourceTaskGraphId).isEqualTo("source-graph")
-        assertThat(response.single().sourceReference?.path).isEqualTo("spec.md")
-        assertThat(response.single().metadata).containsEntry("custom", "value")
+        assertThat(response.items.single().snapshotVersion).isEqualTo(3)
+        assertThat(response.items.single().createdAt).isEqualTo(createdAt)
+        assertThat(response.items.single().updatedAt).isEqualTo(updatedAt)
+        assertThat(response.items.single().sourceIds.sourceTaskGraphId).isEqualTo("source-graph")
+        assertThat(response.items.single().sourceReference?.path).isEqualTo("spec.md")
+        assertThat(response.items.single().metadata).containsEntry("custom", "value")
+        assertThat(response.nextCursor).isEqualTo("next-artifact-cursor")
     }
 
     @Test
     fun `keyword search validates q and returns RAG ready match payload`() {
-        keywordSearch.result = listOf(
-            KeywordSearchMatch(
-                chunkId = RestTestIds.chunkId,
-                documentId = RestTestIds.documentId,
-                projectId = RestTestIds.projectId,
-                iterationId = RestTestIds.iterationId,
-                artifactType = ArtifactType.DOCUMENT_CHUNK,
-                sourcePath = "runs/task.md",
-                chunkIndex = 2,
-                content = "decision content",
-                score = 3.0,
-                matchReason = "chunk.content",
-                metadata = mapOf("sourceDocumentId" to "source-document", "sourceTaskId" to "source-task"),
+        keywordSearch.result = PagedResult(
+            items = listOf(
+                KeywordSearchMatch(
+                    chunkId = RestTestIds.chunkId,
+                    documentId = RestTestIds.documentId,
+                    projectId = RestTestIds.projectId,
+                    iterationId = RestTestIds.iterationId,
+                    artifactType = ArtifactType.DOCUMENT_CHUNK,
+                    sourcePath = "runs/task.md",
+                    chunkIndex = 2,
+                    content = "decision content",
+                    score = 3.0,
+                    matchReason = "chunk.content",
+                    metadata = mapOf("sourceDocumentId" to "source-document", "sourceTaskId" to "source-task"),
+                ),
             ),
+            nextCursor = "next-keyword-cursor",
         )
 
         val response = controller.keywordSearch(
@@ -147,6 +157,7 @@ class QueryRestControllerTest {
             taskId = RestTestIds.taskId.value,
             runId = RestTestIds.runId.value,
             limit = 10,
+            cursor = "keyword-cursor",
         )
 
         assertThat(keywordSearch.received).isEqualTo(
@@ -159,12 +170,14 @@ class QueryRestControllerTest {
                 taskId = RestTestIds.taskId,
                 runId = RestTestIds.runId,
                 limit = 10,
+                cursor = "keyword-cursor",
             ),
         )
-        assertThat(response.single().content).isEqualTo("decision content")
-        assertThat(response.single().score).isEqualTo(3.0)
-        assertThat(response.single().matchReason).isEqualTo("chunk.content")
-        assertThat(response.single().sourceIds.sourceDocumentId).isEqualTo("source-document")
+        assertThat(response.items.single().content).isEqualTo("decision content")
+        assertThat(response.items.single().score).isEqualTo(3.0)
+        assertThat(response.items.single().matchReason).isEqualTo("chunk.content")
+        assertThat(response.items.single().sourceIds.sourceDocumentId).isEqualTo("source-document")
+        assertThat(response.nextCursor).isEqualTo("next-keyword-cursor")
 
         assertThatThrownBy {
             controller.keywordSearch(
@@ -176,6 +189,7 @@ class QueryRestControllerTest {
                 taskId = null,
                 runId = null,
                 limit = null,
+                cursor = null,
             )
         }
             .isInstanceOf(IllegalArgumentException::class.java)
@@ -191,6 +205,7 @@ class QueryRestControllerTest {
                 taskId = null,
                 runId = null,
                 limit = null,
+                cursor = null,
             )
         }
             .isInstanceOf(IllegalArgumentException::class.java)
@@ -216,6 +231,7 @@ class QueryRestControllerTest {
             sourceReferenceCanonicalServerId = null,
             sourceReferenceUri = null,
             limit = 10,
+            cursor = null,
         )
 
         assertThat(findArtifacts.received?.artifactType).isEqualTo(ArtifactType.PROPOSAL)
@@ -224,22 +240,25 @@ class QueryRestControllerTest {
 
     @Test
     fun `vector search validates embedding request and maps metadata filters`() {
-        vectorSearch.result = listOf(
-            VectorSearchMatch(
-                chunkId = RestTestIds.chunkId,
-                documentId = RestTestIds.documentId,
-                projectId = RestTestIds.projectId,
-                iterationId = RestTestIds.iterationId,
-                artifactType = ArtifactType.DOCUMENT_CHUNK,
-                sourcePath = "runs/task.md",
-                chunkIndex = 1,
-                content = "similar content",
-                score = 0.12,
-                distanceMetric = DistanceMetric.COSINE,
-                embeddingModel = "text-embedding-test",
-                embeddingVersion = "v1",
-                metadata = mapOf("sourceRunId" to "source-run", "sourceChunkId" to "source-chunk"),
+        vectorSearch.result = PagedResult(
+            items = listOf(
+                VectorSearchMatch(
+                    chunkId = RestTestIds.chunkId,
+                    documentId = RestTestIds.documentId,
+                    projectId = RestTestIds.projectId,
+                    iterationId = RestTestIds.iterationId,
+                    artifactType = ArtifactType.DOCUMENT_CHUNK,
+                    sourcePath = "runs/task.md",
+                    chunkIndex = 1,
+                    content = "similar content",
+                    score = 0.12,
+                    distanceMetric = DistanceMetric.COSINE,
+                    embeddingModel = "text-embedding-test",
+                    embeddingVersion = "v1",
+                    metadata = mapOf("sourceRunId" to "source-run", "sourceChunkId" to "source-chunk"),
+                ),
             ),
+            nextCursor = "next-vector-cursor",
         )
 
         val response = controller.vectorSearch(
@@ -257,6 +276,7 @@ class QueryRestControllerTest {
                 runId = RestTestIds.runId.value,
                 metadataFilters = mapOf("kind" to "gate-d"),
                 limit = 5,
+                cursor = "vector-cursor",
             ),
         )
 
@@ -275,10 +295,12 @@ class QueryRestControllerTest {
                 runId = RestTestIds.runId,
                 metadataFilters = mapOf("kind" to "gate-d"),
                 limit = 5,
+                cursor = "vector-cursor",
             ),
         )
-        assertThat(response.single().embeddingModel).isEqualTo("text-embedding-test")
-        assertThat(response.single().sourceIds.sourceRunId).isEqualTo("source-run")
+        assertThat(response.items.single().embeddingModel).isEqualTo("text-embedding-test")
+        assertThat(response.items.single().sourceIds.sourceRunId).isEqualTo("source-run")
+        assertThat(response.nextCursor).isEqualTo("next-vector-cursor")
 
         assertThatThrownBy {
             controller.vectorSearch(
@@ -302,9 +324,9 @@ class QueryRestControllerTest {
 
 private class FakeFindArtifactsUseCase : FindArtifactsUseCase {
     var received: FindArtifactsQuery? = null
-    var result: List<ArtifactSummary> = emptyList()
+    var result: PagedResult<ArtifactSummary> = PagedResult(emptyList(), nextCursor = "next-artifact-cursor")
 
-    override fun findArtifacts(query: FindArtifactsQuery): List<ArtifactSummary> {
+    override fun findArtifacts(query: FindArtifactsQuery): PagedResult<ArtifactSummary> {
         received = query
         return result
     }
@@ -312,9 +334,9 @@ private class FakeFindArtifactsUseCase : FindArtifactsUseCase {
 
 private class FakeKeywordSearchUseCase : KeywordSearchUseCase {
     var received: KeywordSearchQuery? = null
-    var result: List<KeywordSearchMatch> = emptyList()
+    var result: PagedResult<KeywordSearchMatch> = PagedResult(emptyList(), nextCursor = "next-keyword-cursor")
 
-    override fun keywordSearch(query: KeywordSearchQuery): List<KeywordSearchMatch> {
+    override fun keywordSearch(query: KeywordSearchQuery): PagedResult<KeywordSearchMatch> {
         received = query
         return result
     }
@@ -322,9 +344,9 @@ private class FakeKeywordSearchUseCase : KeywordSearchUseCase {
 
 private class FakeVectorSearchUseCase : VectorSearchUseCase {
     var received: VectorSearchQuery? = null
-    var result: List<VectorSearchMatch> = emptyList()
+    var result: PagedResult<VectorSearchMatch> = PagedResult(emptyList(), nextCursor = "next-vector-cursor")
 
-    override fun vectorSearch(query: VectorSearchQuery): List<VectorSearchMatch> {
+    override fun vectorSearch(query: VectorSearchQuery): PagedResult<VectorSearchMatch> {
         received = query
         return result
     }

@@ -22,23 +22,25 @@ class ReadUseCaseService(
     VectorSearchUseCase {
 
     @Transactional(readOnly = true)
-    override fun findArtifacts(query: FindArtifactsQuery): List<ArtifactSummary> {
+    override fun findArtifacts(query: FindArtifactsQuery): PagedResult<ArtifactSummary> {
         validateLimit(query.limit, "FindArtifactsQuery")
         validateOptionalSourcePath(query.sourcePath, "FindArtifactsQuery")
+        validateOptionalCursor(query.cursor, "FindArtifactsQuery")
         return artifactQueryPort.findArtifacts(query)
     }
 
     @Transactional(readOnly = true)
-    override fun keywordSearch(query: KeywordSearchQuery): List<KeywordSearchMatch> {
+    override fun keywordSearch(query: KeywordSearchQuery): PagedResult<KeywordSearchMatch> {
         require(query.query.isNotBlank()) { "KeywordSearchQuery query must not be blank" }
         validateLimit(query.limit, "KeywordSearchQuery")
         validateOptionalSourcePath(query.sourcePath, "KeywordSearchQuery")
         validateMetadataFilters(query.metadataFilters, "KeywordSearchQuery")
+        validateOptionalCursor(query.cursor, "KeywordSearchQuery")
         return keywordSearchPort.search(query)
     }
 
     @Transactional(readOnly = true)
-    override fun vectorSearch(query: VectorSearchQuery): List<VectorSearchMatch> {
+    override fun vectorSearch(query: VectorSearchQuery): PagedResult<VectorSearchMatch> {
         require(query.embedding.values.isNotEmpty()) { "VectorSearchQuery embedding must not be empty" }
         require(query.embedding.values.all { it.isFinite() }) { "VectorSearchQuery embedding values must be finite" }
         require(query.embeddingModel.isNotBlank()) { "VectorSearchQuery embeddingModel must not be blank" }
@@ -50,6 +52,7 @@ class ReadUseCaseService(
         validateLimit(query.limit, "VectorSearchQuery")
         validateOptionalSourcePath(query.sourcePath, "VectorSearchQuery")
         validateMetadataFilters(query.metadataFilters, "VectorSearchQuery")
+        validateOptionalCursor(query.cursor, "VectorSearchQuery")
         return vectorSearchPort.search(query)
     }
 
@@ -66,5 +69,11 @@ class ReadUseCaseService(
     private fun validateMetadataFilters(metadataFilters: Map<String, String>, label: String) {
         require(metadataFilters.keys.all { it.isNotBlank() }) { "$label metadata filter keys must not be blank" }
         require(metadataFilters.values.all { it.isNotBlank() }) { "$label metadata filter values must not be blank" }
+    }
+
+    private fun validateOptionalCursor(cursor: String?, label: String) {
+        cursor?.let {
+            require(it.isNotBlank()) { "$label cursor must not be blank when supplied" }
+        }
     }
 }

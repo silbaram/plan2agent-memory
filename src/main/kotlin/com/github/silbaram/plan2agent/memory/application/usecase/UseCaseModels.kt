@@ -126,6 +126,11 @@ data class DocumentChunkWrite(
     }
 }
 
+data class PagedResult<T>(
+    val items: List<T>,
+    val nextCursor: String? = null,
+)
+
 data class FindArtifactsQuery(
     val projectId: ProjectId? = null,
     val iterationId: IterationId? = null,
@@ -142,9 +147,11 @@ data class FindArtifactsQuery(
     val contentHash: ContentHash? = null,
     val sourceReference: SourceReference? = null,
     val limit: Int = 50,
+    val cursor: String? = null,
 ) {
     init {
         require(limit > 0) { "FindArtifactsQuery limit must be positive" }
+        require(cursor == null || cursor.isNotBlank()) { "FindArtifactsQuery cursor must not be blank" }
     }
 }
 
@@ -158,6 +165,7 @@ data class KeywordSearchQuery(
     val runId: RunId? = null,
     val metadataFilters: Map<String, String> = emptyMap(),
     val limit: Int = 20,
+    val cursor: String? = null,
 ) {
     init {
         require(query.isNotBlank()) { "KeywordSearchQuery query must not be blank" }
@@ -168,6 +176,7 @@ data class KeywordSearchQuery(
             "KeywordSearchQuery metadata filter values must not be blank"
         }
         require(limit > 0) { "KeywordSearchQuery limit must be positive" }
+        require(cursor == null || cursor.isNotBlank()) { "KeywordSearchQuery cursor must not be blank" }
     }
 }
 
@@ -185,6 +194,7 @@ data class VectorSearchQuery(
     val runId: RunId? = null,
     val metadataFilters: Map<String, String> = emptyMap(),
     val limit: Int = 20,
+    val cursor: String? = null,
 ) {
     init {
         require(embedding.values.all { it.isFinite() }) { "VectorSearchQuery embedding values must be finite" }
@@ -198,5 +208,6 @@ data class VectorSearchQuery(
             "VectorSearchQuery metadata filter values must not be blank"
         }
         require(limit > 0) { "VectorSearchQuery limit must be positive" }
+        require(cursor == null || cursor.isNotBlank()) { "VectorSearchQuery cursor must not be blank" }
     }
 }

@@ -2,6 +2,7 @@ package com.github.silbaram.plan2agent.memory.adapter.`in`.rest
 
 import com.github.silbaram.plan2agent.memory.application.usecase.FindArtifactsQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.KeywordSearchQuery
+import com.github.silbaram.plan2agent.memory.application.usecase.PagedResult
 import com.github.silbaram.plan2agent.memory.application.usecase.VectorSearchQuery
 import com.github.silbaram.plan2agent.memory.domain.ArtifactSummary
 import com.github.silbaram.plan2agent.memory.domain.ArtifactType
@@ -44,6 +45,7 @@ data class ArtifactLookupRequest(
     val sourceReferenceCanonicalServerId: String? = null,
     val sourceReferenceUri: String? = null,
     val limit: Int? = null,
+    val cursor: String? = null,
 )
 
 data class KeywordSearchRequest(
@@ -56,6 +58,7 @@ data class KeywordSearchRequest(
     val runId: String? = null,
     val metadataFilters: Map<String, String> = emptyMap(),
     val limit: Int? = null,
+    val cursor: String? = null,
 )
 
 data class VectorSearchRequest(
@@ -72,6 +75,12 @@ data class VectorSearchRequest(
     val runId: String? = null,
     val metadataFilters: Map<String, String> = emptyMap(),
     val limit: Int? = null,
+    val cursor: String? = null,
+)
+
+data class PagedResponse<T>(
+    val items: List<T>,
+    val nextCursor: String? = null,
 )
 
 data class SourceIdsResponse(
@@ -168,6 +177,7 @@ fun ArtifactLookupRequest.toQuery(): FindArtifactsQuery =
         contentHash = contentHash.toOptionalId(::ContentHash),
         sourceReference = toSourceReferenceFilter(),
         limit = limit ?: DEFAULT_ARTIFACT_LIMIT,
+        cursor = cursor.normalizedCursor(),
     )
 
 fun KeywordSearchRequest.toQuery(): KeywordSearchQuery =
@@ -181,6 +191,7 @@ fun KeywordSearchRequest.toQuery(): KeywordSearchQuery =
         runId = runId.toOptionalId(::RunId),
         metadataFilters = metadataFilters.validateMetadataFilters("metadataFilters"),
         limit = limit ?: DEFAULT_SEARCH_LIMIT,
+        cursor = cursor.normalizedCursor(),
     )
 
 fun VectorSearchRequest.toQuery(): VectorSearchQuery {
@@ -204,8 +215,15 @@ fun VectorSearchRequest.toQuery(): VectorSearchQuery {
         runId = runId.toOptionalId(::RunId),
         metadataFilters = metadataFilters.validateMetadataFilters("metadataFilters"),
         limit = limit ?: DEFAULT_SEARCH_LIMIT,
+        cursor = cursor.normalizedCursor(),
     )
 }
+
+fun <T, R> PagedResult<T>.toRestPage(mapItem: (T) -> R): PagedResponse<R> =
+    PagedResponse(
+        items = items.map(mapItem),
+        nextCursor = nextCursor,
+    )
 
 fun ArtifactSummary.toLookupResponse(): ArtifactLookupResponse {
     val sourceIds = sourceIdsFrom(metadata)
@@ -307,6 +325,9 @@ private fun ArtifactLookupRequest.toSourceReferenceFilter(): SourceReference? {
 
 private fun <T> String?.toOptionalId(factory: (String) -> T): T? =
     this?.trim()?.takeIf(String::isNotEmpty)?.let(factory)
+
+private fun String?.normalizedCursor(): String? =
+    this?.trim()?.takeIf(String::isNotEmpty)
 
 private fun Map<String, String>.validateMetadataFilters(field: String): Map<String, String> {
     require(keys.all { it.isNotBlank() }) { "$field keys must not be blank" }

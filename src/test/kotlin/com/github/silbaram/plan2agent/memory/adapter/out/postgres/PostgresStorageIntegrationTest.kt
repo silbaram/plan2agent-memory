@@ -193,7 +193,7 @@ class PostgresStorageIntegrationTest {
                     iterationId = fixture.iteration.id,
                     artifactType = ArtifactType.TASK_GRAPH,
                 ),
-            ).single().sourcePath,
+            ).items.single().sourcePath,
         ).isEqualTo(fixture.document.sourcePath)
     }
 
@@ -361,7 +361,7 @@ class PostgresStorageIntegrationTest {
                 sourcePath = normalizedPath,
             ),
         )
-        assertThat(found.map { it.artifactId }).containsExactly(first.id.value)
+        assertThat(found.items.map { it.artifactId }).containsExactly(first.id.value)
     }
 
     private fun saveFixture(scope: String): StoredFixture {
