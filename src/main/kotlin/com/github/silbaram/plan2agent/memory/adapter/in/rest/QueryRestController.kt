@@ -1,6 +1,7 @@
 package com.github.silbaram.plan2agent.memory.adapter.`in`.rest
 
 import com.github.silbaram.plan2agent.memory.application.port.`in`.FindArtifactsUseCase
+import com.github.silbaram.plan2agent.memory.application.port.`in`.HybridSearchUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.KeywordSearchUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.VectorSearchUseCase
 import org.springframework.web.bind.annotation.GetMapping
@@ -16,6 +17,7 @@ class QueryRestController(
     private val findArtifactsUseCase: FindArtifactsUseCase,
     private val keywordSearchUseCase: KeywordSearchUseCase,
     private val vectorSearchUseCase: VectorSearchUseCase,
+    private val hybridSearchUseCase: HybridSearchUseCase,
 ) {
     @GetMapping("/artifacts")
     fun findArtifacts(
@@ -88,6 +90,10 @@ class QueryRestController(
     @PostMapping("/search/vector")
     fun vectorSearch(@RequestBody request: VectorSearchRequest): PagedResponse<VectorSearchResponse> =
         vectorSearchUseCase.vectorSearch(request.toQuery()).toRestPage { it.toResponse() }
+
+    @PostMapping("/search/hybrid")
+    fun hybridSearch(@RequestBody request: HybridSearchRequest): PagedResponse<HybridSearchResponse> =
+        hybridSearchUseCase.hybridSearch(request.toQuery()).toRestPage { it.toResponse() }
 }
 
 @RestController

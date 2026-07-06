@@ -263,6 +263,7 @@ data class KeywordSearchMatch(
     val score: Double,
     val matchReason: String,
     val metadata: Map<String, String> = emptyMap(),
+    val sourceReference: SourceReference? = null,
 ) {
     init {
         require(content.isNotBlank()) { "KeywordSearchMatch content must not be blank" }
@@ -286,6 +287,7 @@ data class VectorSearchMatch(
     val embeddingModel: String,
     val embeddingVersion: String,
     val metadata: Map<String, String> = emptyMap(),
+    val sourceReference: SourceReference? = null,
 ) {
     init {
         require(content.isNotBlank()) { "VectorSearchMatch content must not be blank" }
@@ -293,5 +295,40 @@ data class VectorSearchMatch(
         require(embeddingModel.isNotBlank()) { "VectorSearchMatch embeddingModel must not be blank" }
         require(embeddingVersion.isNotBlank()) { "VectorSearchMatch embeddingVersion must not be blank" }
         require(chunkIndex == null || chunkIndex >= 0) { "VectorSearchMatch chunkIndex must not be negative" }
+    }
+}
+
+data class HybridSearchArm(
+    val rank: Int,
+    val score: Double,
+) {
+    init {
+        require(rank > 0) { "HybridSearchArm rank must be positive" }
+        require(score >= 0.0) { "HybridSearchArm score must not be negative" }
+    }
+}
+
+data class HybridSearchMatch(
+    val chunkId: DocumentChunkId?,
+    val documentId: DocumentId?,
+    val projectId: ProjectId,
+    val iterationId: IterationId?,
+    val artifactType: ArtifactType,
+    val sourcePath: String?,
+    val chunkIndex: Int?,
+    val content: String,
+    val score: Double,
+    val matchReason: String,
+    val keyword: HybridSearchArm? = null,
+    val vector: HybridSearchArm? = null,
+    val metadata: Map<String, String> = emptyMap(),
+    val sourceReference: SourceReference? = null,
+) {
+    init {
+        require(content.isNotBlank()) { "HybridSearchMatch content must not be blank" }
+        require(score >= 0.0) { "HybridSearchMatch score must not be negative" }
+        require(matchReason.isNotBlank()) { "HybridSearchMatch matchReason must not be blank" }
+        require(keyword != null || vector != null) { "HybridSearchMatch must include at least one search arm" }
+        require(chunkIndex == null || chunkIndex >= 0) { "HybridSearchMatch chunkIndex must not be negative" }
     }
 }

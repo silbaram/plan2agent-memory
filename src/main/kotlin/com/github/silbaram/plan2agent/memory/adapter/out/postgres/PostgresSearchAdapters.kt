@@ -627,8 +627,14 @@ class PostgresVectorSearchAdapter(
         val chunkWhere = chunkFilterClauses(query, params, alias = "dc")
             .withMetadataFilters(query.metadataFilters, alias = "dc")
             .toWhereClause(prefix = "WHERE")
-        val distanceExpression = query.distanceMetric.distanceExpression()
-        val orderExpression = query.distanceMetric.orderExpression()
+        val typedVectorSource = typedVectorSource(query.embeddingDimension)
+        val embeddingColumn = typedVectorSource?.let { "tev.embedding" } ?: "ce.embedding"
+        val queryVectorType = typedVectorSource?.vectorType ?: "vector"
+        val typedVectorJoin = typedVectorSource?.let {
+            "JOIN ${it.tableName} tev ON tev.chunk_embedding_id = ce.chunk_embedding_id"
+        } ?: ""
+        val distanceExpression = query.distanceMetric.distanceExpression(embeddingColumn, queryVectorType)
+        val orderExpression = query.distanceMetric.orderExpression(embeddingColumn, queryVectorType)
         val cursorWhere = vectorCursorWhere(query.cursor, params, orderExpression)
 
         val rows = jdbc.query(
@@ -658,6 +664,7 @@ class PostgresVectorSearchAdapter(
                 d.snapshot_version,
                 COALESCE(dc.updated_at, dc.created_at) AS sort_timestamp
             FROM chunk_embeddings ce
+            $typedVectorJoin
             JOIN embedding_sets es ON es.embedding_set_id = ce.embedding_set_id
             JOIN document_chunks dc ON dc.chunk_id = ce.chunk_id
             JOIN projects p ON p.project_id = dc.project_id
@@ -904,6 +911,7 @@ private fun keywordSearchMatch(json: PostgresJsonSupport, rs: ResultSet): Keywor
         score = rs.getDouble("score"),
         matchReason = rs.getString("match_reason"),
         metadata = sourceMetadata(json, metadata, rs),
+        sourceReference = json.sourceReferenceFrom(metadata),
     )
 }
 
@@ -938,6 +946,7 @@ private fun vectorSearchMatch(json: PostgresJsonSupport, rs: ResultSet): VectorS
         embeddingModel = rs.getString("embedding_model"),
         embeddingVersion = rs.getString("embedding_version"),
         metadata = sourceMetadata(json, metadata, rs),
+        sourceReference = json.sourceReferenceFrom(metadata),
     )
 }
 
@@ -1079,18 +1088,30 @@ private fun distanceMetricFromDbValue(value: String): DistanceMetric =
         else -> error("Unsupported distance metric: $value")
     }
 
-private fun DistanceMetric.distanceExpression(): String =
-    when (this) {
-        DistanceMetric.COSINE -> "(ce.embedding <=> CAST(:queryEmbedding AS vector))"
-        DistanceMetric.L2 -> "(ce.embedding <-> CAST(:queryEmbedding AS vector))"
-        DistanceMetric.INNER_PRODUCT -> "GREATEST(0.0, (ce.embedding <#> CAST(:queryEmbedding AS vector)) * -1)"
+private data class TypedVectorSource(
+    val tableName: String,
+    val vectorType: String,
+)
+
+private fun typedVectorSource(embeddingDimension: Int): TypedVectorSource? =
+    when (embeddingDimension) {
+        2 -> TypedVectorSource(tableName = "chunk_embedding_vectors_2", vectorType = "vector(2)")
+        1536 -> TypedVectorSource(tableName = "chunk_embedding_vectors_1536", vectorType = "vector(1536)")
+        else -> null
     }
 
-private fun DistanceMetric.orderExpression(): String =
+private fun DistanceMetric.distanceExpression(embeddingColumn: String, queryVectorType: String): String =
     when (this) {
-        DistanceMetric.COSINE -> "(ce.embedding <=> CAST(:queryEmbedding AS vector))"
-        DistanceMetric.L2 -> "(ce.embedding <-> CAST(:queryEmbedding AS vector))"
-        DistanceMetric.INNER_PRODUCT -> "(ce.embedding <#> CAST(:queryEmbedding AS vector))"
+        DistanceMetric.COSINE -> "($embeddingColumn <=> CAST(:queryEmbedding AS $queryVectorType))"
+        DistanceMetric.L2 -> "($embeddingColumn <-> CAST(:queryEmbedding AS $queryVectorType))"
+        DistanceMetric.INNER_PRODUCT -> "GREATEST(0.0, ($embeddingColumn <#> CAST(:queryEmbedding AS $queryVectorType)) * -1)"
+    }
+
+private fun DistanceMetric.orderExpression(embeddingColumn: String, queryVectorType: String): String =
+    when (this) {
+        DistanceMetric.COSINE -> "($embeddingColumn <=> CAST(:queryEmbedding AS $queryVectorType))"
+        DistanceMetric.L2 -> "($embeddingColumn <-> CAST(:queryEmbedding AS $queryVectorType))"
+        DistanceMetric.INNER_PRODUCT -> "($embeddingColumn <#> CAST(:queryEmbedding AS $queryVectorType))"
     }
 
 private fun Embedding.toPgVectorLiteral(): String {

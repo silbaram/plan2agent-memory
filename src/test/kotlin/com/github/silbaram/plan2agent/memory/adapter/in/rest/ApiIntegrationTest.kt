@@ -157,6 +157,8 @@ class ApiIntegrationTest {
         assertThat(keywordResults["items"].single()["matchReason"].asText()).isEqualTo("chunk.content")
         assertThat(keywordResults["items"].single()["score"].asDouble()).isGreaterThanOrEqualTo(0.0)
         assertThat(keywordResults["items"].single()["sourceIds"]["sourceTaskId"].asText()).isEqualTo(fixture.sourceTaskId)
+        assertThat(keywordResults["items"].single()["citation"]["sourceReference"]["path"].asText())
+            .isEqualTo("${fixture.sourcePath}#chunk-0")
         assertThat(keywordResults["nextCursor"].isNull).isTrue()
 
         val vectorResults = postJson(
@@ -179,7 +181,35 @@ class ApiIntegrationTest {
         assertThat(vectorResults["items"].single()["distanceMetric"].asText()).isEqualTo("COSINE")
         assertThat(vectorResults["items"].single()["embeddingModel"].asText()).isEqualTo(fixture.embeddingModel)
         assertThat(vectorResults["items"].single()["sourceIds"]["sourceRunId"].asText()).isEqualTo(fixture.sourceRunId)
+        assertThat(vectorResults["items"].single()["citation"]["sourceReference"]["path"].asText())
+            .isEqualTo("${fixture.sourcePath}#chunk-0")
         assertThat(vectorResults["nextCursor"].isNull).isTrue()
+
+        val hybridResults = postJson(
+            "/api/search/hybrid",
+            mapOf(
+                "q" to "api-search-needle",
+                "embedding" to listOf(1.0f, 0.0f),
+                "embeddingModel" to fixture.embeddingModel,
+                "embeddingDimension" to 2,
+                "embeddingVersion" to fixture.embeddingVersion,
+                "distanceMetric" to "COSINE",
+                "projectId" to fixture.projectId,
+                "iterationId" to fixture.iterationId,
+                "taskId" to fixture.taskId,
+                "runId" to fixture.runId,
+                "metadataFilters" to emptyMap<String, String>(),
+                "candidateLimit" to 10,
+                "limit" to 5,
+            ),
+        ).expectOkJson()
+        assertThat(hybridResults["items"].single()["chunkId"].asText()).isEqualTo(fixture.chunkId)
+        assertThat(hybridResults["items"].single()["matchReason"].asText()).isEqualTo("hybrid.keyword+vector")
+        assertThat(hybridResults["items"].single()["keyword"]["rank"].asInt()).isEqualTo(1)
+        assertThat(hybridResults["items"].single()["vector"]["rank"].asInt()).isEqualTo(1)
+        assertThat(hybridResults["items"].single()["citation"]["sourceReference"]["path"].asText())
+            .isEqualTo("${fixture.sourcePath}#chunk-0")
+        assertThat(hybridResults["nextCursor"].isNull).isTrue()
 
         getWithoutToken("/actuator/metrics/p2a.memory.write.calls")
             .andExpect(status().isOk())

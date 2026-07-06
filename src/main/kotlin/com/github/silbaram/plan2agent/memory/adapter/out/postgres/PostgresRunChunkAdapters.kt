@@ -409,6 +409,7 @@ class PostgresChunkEmbeddingStoreAdapter(
                     """.trimIndent(),
                     embeddingsToInsert.map(::chunkEmbeddingParams).toTypedArray(),
                 )
+                saveTypedVectorCopies(embeddingsToInsert)
             }
             val insertedById = findByIds(embeddingsToInsert.map { it.id }).associateBy { it.id }
             chunkEmbeddings.map { chunkEmbedding ->
@@ -478,6 +479,58 @@ class PostgresChunkEmbeddingStoreAdapter(
                 chunkEmbeddingMapper(json),
             )
         }
+
+    private fun saveTypedVectorCopies(chunkEmbeddings: List<ChunkEmbedding>) {
+        val dimensionsBySet = embeddingDimensionsBySet(chunkEmbeddings.map { it.embeddingSetId }.toSet())
+        val byDimension = chunkEmbeddings.groupBy { chunkEmbedding ->
+            val dimension = requireNotNull(dimensionsBySet[chunkEmbedding.embeddingSetId]) {
+                "Embedding set ${chunkEmbedding.embeddingSetId.value} was not found"
+            }
+            require(chunkEmbedding.embedding.values.size == dimension) {
+                "Chunk embedding ${chunkEmbedding.id.value} dimension must match embedding set dimension $dimension"
+            }
+            dimension
+        }
+        byDimension[2]?.let { insertTypedVectors(it, tableName = "chunk_embedding_vectors_2", vectorType = "vector(2)") }
+        byDimension[1536]?.let {
+            insertTypedVectors(it, tableName = "chunk_embedding_vectors_1536", vectorType = "vector(1536)")
+        }
+    }
+
+    private fun embeddingDimensionsBySet(ids: Set<EmbeddingSetId>): Map<EmbeddingSetId, Int> =
+        if (ids.isEmpty()) {
+            emptyMap()
+        } else {
+            jdbc.query(
+                """
+                SELECT embedding_set_id::text, embedding_dimension
+                FROM embedding_sets
+                WHERE embedding_set_id IN (:embeddingSetIds)
+                """.trimIndent(),
+                MapSqlParameterSource("embeddingSetIds", ids.map { uuid(it.value) }),
+            ) { rs, _ -> EmbeddingSetId(rs.getString("embedding_set_id")) to rs.getInt("embedding_dimension") }
+                .toMap()
+        }
+
+    private fun insertTypedVectors(
+        chunkEmbeddings: List<ChunkEmbedding>,
+        tableName: String,
+        vectorType: String,
+    ) {
+        jdbc.batchUpdate(
+            """
+            INSERT INTO $tableName (chunk_embedding_id, embedding)
+            VALUES (:chunkEmbeddingId, CAST(:embedding AS $vectorType))
+            ON CONFLICT (chunk_embedding_id) DO UPDATE SET
+                embedding = EXCLUDED.embedding
+            """.trimIndent(),
+            chunkEmbeddings.map {
+                MapSqlParameterSource()
+                    .addValue("chunkEmbeddingId", uuid(it.id.value))
+                    .addValue("embedding", it.embedding.toPgVectorLiteral())
+            }.toTypedArray(),
+        )
+    }
 }
 
 private fun runRecordMapper(json: PostgresJsonSupport): RowMapper<RunRecord> =

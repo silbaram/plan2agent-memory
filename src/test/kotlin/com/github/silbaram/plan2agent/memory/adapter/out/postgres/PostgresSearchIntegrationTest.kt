@@ -429,6 +429,59 @@ class PostgresSearchIntegrationTest {
     }
 
     @Test
+    fun `vector search uses typed fixed dimension copy for indexed dimensions`() {
+        val fixture = saveProjectAndIteration("vector-typed-copy")
+        val document = saveDocument(
+            scope = "vector-typed-copy",
+            fixture = fixture,
+            sourcePath = "docs/vector-typed-copy.md",
+            content = "Vector typed copy fixture.",
+        )
+        val embeddingSet = embeddingSet("vector-typed-copy", fixture.project.id)
+        val typedNearest = saveChunk(
+            scope = "vector-typed-copy-nearest",
+            document = document,
+            content = "typed nearest vector",
+            embeddingSet = embeddingSet,
+            embedding = Embedding(listOf(1.0f, 0.0f)),
+        )
+        val typedFarthest = saveChunk(
+            scope = "vector-typed-copy-farthest",
+            document = document,
+            chunkIndex = 1,
+            content = "typed farthest vector",
+            embeddingSet = embeddingSet,
+            embedding = Embedding(listOf(0.0f, 1.0f)),
+        )
+
+        jdbc.update(
+            "UPDATE chunk_embeddings SET embedding = CAST(? AS vector) WHERE chunk_id = ?",
+            "[0.0,1.0]",
+            UUID.fromString(typedNearest.id.value),
+        )
+        jdbc.update(
+            "UPDATE chunk_embeddings SET embedding = CAST(? AS vector) WHERE chunk_id = ?",
+            "[1.0,0.0]",
+            UUID.fromString(typedFarthest.id.value),
+        )
+
+        val matches = vectorSearch.search(
+            VectorSearchQuery(
+                embedding = Embedding(listOf(1.0f, 0.0f)),
+                embeddingModel = embeddingSet.embeddingModel,
+                embeddingDimension = embeddingSet.embeddingDimension,
+                embeddingVersion = embeddingSet.embeddingVersion,
+                distanceMetric = DistanceMetric.COSINE,
+                projectId = fixture.project.id,
+                iterationId = fixture.iteration.id,
+                limit = 2,
+            ),
+        ).items
+
+        assertThat(matches.map { it.chunkId }).containsExactly(typedNearest.id, typedFarthest.id)
+    }
+
+    @Test
     fun `vector search paginates exact ranking with opaque keyset cursor`() {
         val fixture = saveProjectAndIteration("vector-page")
         val document = saveDocument(

@@ -1,9 +1,11 @@
 package com.github.silbaram.plan2agent.memory.adapter.`in`.rest
 
 import com.github.silbaram.plan2agent.memory.application.port.`in`.FindArtifactsUseCase
+import com.github.silbaram.plan2agent.memory.application.port.`in`.HybridSearchUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.KeywordSearchUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.VectorSearchUseCase
 import com.github.silbaram.plan2agent.memory.application.usecase.FindArtifactsQuery
+import com.github.silbaram.plan2agent.memory.application.usecase.HybridSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.KeywordSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.PagedResult
 import com.github.silbaram.plan2agent.memory.application.usecase.VectorSearchQuery
@@ -15,6 +17,8 @@ import com.github.silbaram.plan2agent.memory.domain.DistanceMetric
 import com.github.silbaram.plan2agent.memory.domain.DocumentChunkId
 import com.github.silbaram.plan2agent.memory.domain.DocumentId
 import com.github.silbaram.plan2agent.memory.domain.Embedding
+import com.github.silbaram.plan2agent.memory.domain.HybridSearchArm
+import com.github.silbaram.plan2agent.memory.domain.HybridSearchMatch
 import com.github.silbaram.plan2agent.memory.domain.IterationId
 import com.github.silbaram.plan2agent.memory.domain.KeywordSearchMatch
 import com.github.silbaram.plan2agent.memory.domain.ProjectId
@@ -37,7 +41,8 @@ class QueryRestControllerTest {
     private val findArtifacts = FakeFindArtifactsUseCase()
     private val keywordSearch = FakeKeywordSearchUseCase()
     private val vectorSearch = FakeVectorSearchUseCase()
-    private val controller = QueryRestController(findArtifacts, keywordSearch, vectorSearch)
+    private val hybridSearch = FakeHybridSearchUseCase()
+    private val controller = QueryRestController(findArtifacts, keywordSearch, vectorSearch, hybridSearch)
 
     @Test
     fun `artifact lookup maps query params to use case and returns canonical source metadata`() {
@@ -143,6 +148,7 @@ class QueryRestControllerTest {
                     score = 3.0,
                     matchReason = "chunk.content",
                     metadata = mapOf("sourceDocumentId" to "source-document", "sourceTaskId" to "source-task"),
+                    sourceReference = SourceReference(CanonicalServerId(RestTestIds.chunkId.value), "file:///repo/runs/task.md"),
                 ),
             ),
             nextCursor = "next-keyword-cursor",
@@ -177,6 +183,7 @@ class QueryRestControllerTest {
         assertThat(response.items.single().score).isEqualTo(3.0)
         assertThat(response.items.single().matchReason).isEqualTo("chunk.content")
         assertThat(response.items.single().sourceIds.sourceDocumentId).isEqualTo("source-document")
+        assertThat(response.items.single().citation.sourceReference?.uri).isEqualTo("file:///repo/runs/task.md")
         assertThat(response.nextCursor).isEqualTo("next-keyword-cursor")
 
         assertThatThrownBy {
@@ -256,6 +263,7 @@ class QueryRestControllerTest {
                     embeddingModel = "text-embedding-test",
                     embeddingVersion = "v1",
                     metadata = mapOf("sourceRunId" to "source-run", "sourceChunkId" to "source-chunk"),
+                    sourceReference = SourceReference(CanonicalServerId(RestTestIds.chunkId.value), "file:///repo/runs/task.md"),
                 ),
             ),
             nextCursor = "next-vector-cursor",
@@ -300,6 +308,7 @@ class QueryRestControllerTest {
         )
         assertThat(response.items.single().embeddingModel).isEqualTo("text-embedding-test")
         assertThat(response.items.single().sourceIds.sourceRunId).isEqualTo("source-run")
+        assertThat(response.items.single().citation.sourceReference?.uri).isEqualTo("file:///repo/runs/task.md")
         assertThat(response.nextCursor).isEqualTo("next-vector-cursor")
 
         assertThatThrownBy {
@@ -314,6 +323,80 @@ class QueryRestControllerTest {
         }
             .isInstanceOf(IllegalArgumentException::class.java)
             .hasMessageContaining("embeddingDimension must match embedding size")
+    }
+
+    @Test
+    fun `hybrid search maps request to use case and returns fused arm scores with citation`() {
+        hybridSearch.result = PagedResult(
+            items = listOf(
+                HybridSearchMatch(
+                    chunkId = RestTestIds.chunkId,
+                    documentId = RestTestIds.documentId,
+                    projectId = RestTestIds.projectId,
+                    iterationId = RestTestIds.iterationId,
+                    artifactType = ArtifactType.DOCUMENT_CHUNK,
+                    sourcePath = "runs/task.md",
+                    chunkIndex = 0,
+                    content = "hybrid content",
+                    score = 0.032,
+                    matchReason = "hybrid.keyword+vector",
+                    keyword = HybridSearchArm(rank = 1, score = 4.0),
+                    vector = HybridSearchArm(rank = 2, score = 0.1),
+                    metadata = mapOf("sourceDocumentId" to "source-document", "sourceRunId" to "source-run"),
+                    sourceReference = SourceReference(CanonicalServerId(RestTestIds.chunkId.value), "file:///repo/runs/task.md"),
+                ),
+            ),
+            nextCursor = "next-hybrid-cursor",
+        )
+
+        val response = controller.hybridSearch(
+            HybridSearchRequest(
+                q = "decision",
+                embedding = listOf(0.1f, 0.2f),
+                embeddingModel = "text-embedding-test",
+                embeddingDimension = 2,
+                embeddingVersion = "v1",
+                distanceMetric = "cosine",
+                projectId = RestTestIds.projectId.value,
+                iterationId = RestTestIds.iterationId.value,
+                artifactType = "document_chunk",
+                sourcePath = "runs/task.md",
+                taskId = RestTestIds.taskId.value,
+                runId = RestTestIds.runId.value,
+                metadataFilters = mapOf("kind" to "gate-d"),
+                rrfK = 60,
+                candidateLimit = 12,
+                limit = 5,
+                cursor = "hybrid-cursor",
+            ),
+        )
+
+        assertThat(hybridSearch.received).isEqualTo(
+            HybridSearchQuery(
+                query = "decision",
+                embedding = Embedding(listOf(0.1f, 0.2f)),
+                embeddingModel = "text-embedding-test",
+                embeddingDimension = 2,
+                embeddingVersion = "v1",
+                distanceMetric = DistanceMetric.COSINE,
+                projectId = RestTestIds.projectId,
+                iterationId = RestTestIds.iterationId,
+                artifactType = ArtifactType.DOCUMENT_CHUNK,
+                sourcePath = "runs/task.md",
+                taskId = RestTestIds.taskId,
+                runId = RestTestIds.runId,
+                metadataFilters = mapOf("kind" to "gate-d"),
+                rrfK = 60,
+                candidateLimit = 12,
+                limit = 5,
+                cursor = "hybrid-cursor",
+            ),
+        )
+        assertThat(response.items.single().matchReason).isEqualTo("hybrid.keyword+vector")
+        assertThat(response.items.single().keyword?.rank).isEqualTo(1)
+        assertThat(response.items.single().vector?.rank).isEqualTo(2)
+        assertThat(response.items.single().citation.sourceReference?.uri).isEqualTo("file:///repo/runs/task.md")
+        assertThat(response.nextCursor).isEqualTo("next-hybrid-cursor")
     }
 
     @Test
@@ -347,6 +430,16 @@ private class FakeVectorSearchUseCase : VectorSearchUseCase {
     var result: PagedResult<VectorSearchMatch> = PagedResult(emptyList(), nextCursor = "next-vector-cursor")
 
     override fun vectorSearch(query: VectorSearchQuery): PagedResult<VectorSearchMatch> {
+        received = query
+        return result
+    }
+}
+
+private class FakeHybridSearchUseCase : HybridSearchUseCase {
+    var received: HybridSearchQuery? = null
+    var result: PagedResult<HybridSearchMatch> = PagedResult(emptyList(), nextCursor = "next-hybrid-cursor")
+
+    override fun hybridSearch(query: HybridSearchQuery): PagedResult<HybridSearchMatch> {
         received = query
         return result
     }

@@ -139,6 +139,8 @@ class PostgresStorageIntegrationTest {
             "document_chunks",
             "embedding_sets",
             "chunk_embeddings",
+            "chunk_embedding_vectors_2",
+            "chunk_embedding_vectors_1536",
         )
         assertThat(columnNames("documents")).contains(
             "document_id",
@@ -165,6 +167,8 @@ class PostgresStorageIntegrationTest {
             "idx_documents_latest_snapshot",
             "idx_document_chunks_artifact_filters",
             "idx_chunk_embeddings_embedding_set_id",
+            "idx_chunk_embedding_vectors_2_hnsw_cosine",
+            "idx_chunk_embedding_vectors_1536_hnsw_cosine",
         )
     }
 
@@ -305,6 +309,8 @@ class PostgresStorageIntegrationTest {
             .containsExactlyInAnyOrder(firstSet.id, secondSet.id)
         assertThat(rowCount("document_chunks")).isEqualTo(1)
         assertThat(rowCount("chunk_embeddings")).isEqualTo(2)
+        assertThat(rowCount("chunk_embedding_vectors_2")).isEqualTo(2)
+        assertThat(rowCount("chunk_embedding_vectors_1536")).isEqualTo(0)
 
         assertThatThrownBy {
             writeUseCase.saveDocumentChunks(
