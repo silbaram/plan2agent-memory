@@ -1,0 +1,25 @@
+steps:
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - p2a-memory
+      - --source
+      - .
+      - --region
+      - us-central1
+      - --min-instances
+      - "0"
+      - --max-instances
+      - "1"
+      - --memory
+      - 1Gi
+      - --allow-unauthenticated
+      - --set-env-vars
+      - P2A_DB_URL=jdbc:postgresql:///p2a_artifact_store?cloudSqlInstance=$PROJECT_ID:us-central1:p2a-memory-db&socketFactory=com.google.cloud.sql.postgres.SocketFactory&cloudSqlRefreshStrategy=lazy,P2A_DB_USERNAME=p2a,SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE=3
+      - --set-secrets
+      - P2A_DB_PASSWORD=p2a-db-password:latest,P2A_LOCAL_TOKEN=p2a-local-token:latest
+
+options:
+  logging: CLOUD_LOGGING_ONLY
