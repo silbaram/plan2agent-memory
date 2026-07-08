@@ -65,6 +65,14 @@ gcloud auth login
 gcloud config set project PROJECT_ID
 ```
 
+이 프로젝트는 Java 21 toolchain을 사용한다. Buildpacks 원격 빌드에서도 JDK 21을 쓰도록 repository root의 `project.toml`에 아래 설정을 둔다.
+
+```toml
+[[build.env]]
+name = "GOOGLE_RUNTIME_VERSION"
+value = "21"
+```
+
 이 repository root에서 배포한다.
 
 ```bash
@@ -216,6 +224,8 @@ options:
 ```
 
 `$PROJECT_ID`는 Cloud Build가 자동으로 치환하는 내장 변수다. 직접 바꾸지 않아도 된다.
+
+Java 21은 repository root의 `project.toml`에 `GOOGLE_RUNTIME_VERSION=21`로 고정한다. 이 값은 Cloud Run 런타임 환경변수가 아니라 Buildpacks 빌드 환경변수다.
 
 이 파일은 Cloud Build가 `gcloud run deploy --source .`를 호출하는 단순 구성이다. 빌드 시간이 늘어나면 나중에 Dockerfile 또는 명시적인 image build 방식으로 바꿀 수 있다.
 
