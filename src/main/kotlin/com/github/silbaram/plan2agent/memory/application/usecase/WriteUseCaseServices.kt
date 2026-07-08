@@ -18,7 +18,9 @@ import com.github.silbaram.plan2agent.memory.application.port.out.TaskGraphStore
 import com.github.silbaram.plan2agent.memory.application.port.out.TaskStorePort
 import com.github.silbaram.plan2agent.memory.domain.ChunkEmbedding
 import com.github.silbaram.plan2agent.memory.domain.ChunkEmbeddingId
+import com.github.silbaram.plan2agent.memory.domain.ContentHash
 import com.github.silbaram.plan2agent.memory.domain.DocumentChunk
+import com.github.silbaram.plan2agent.memory.domain.DocumentChunkId
 import com.github.silbaram.plan2agent.memory.domain.DocumentSnapshot
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingSet
 import com.github.silbaram.plan2agent.memory.domain.Iteration
@@ -217,8 +219,8 @@ class WriteUseCaseService(
             write.copy(chunk = write.chunk.copy(sourcePath = write.chunk.sourcePath.normalizedSourcePath()))
         }
         val existingChunks = documentChunkStore.findByDocumentId(command.documentId)
-        val existingByHash = existingChunks.associateBy { it.chunkHash }
-        val existingById = existingChunks.associateBy { it.id }
+        val existingByHash: Map<ContentHash, DocumentChunk> = existingChunks.associateBy { it.chunkHash }
+        val existingById: Map<DocumentChunkId, DocumentChunk> = existingChunks.associateBy { it.id }
         val chunks = writes.map { write ->
             validateChunkRelations(write.chunk, document)
             write.chunk
@@ -240,7 +242,7 @@ class WriteUseCaseService(
                 }
             }
         }
-        val newChunks = chunks.filter { it.chunkHash !in existingByHash }
+        val newChunks = chunks.filter { chunk -> !existingByHash.containsKey(chunk.chunkHash) }
         val newlySavedChunks = documentChunkStore.saveAll(newChunks)
         val savedChunks = chunks.map { chunk ->
             existingByHash[chunk.chunkHash] ?: newlySavedChunks.first { it.id == chunk.id }
