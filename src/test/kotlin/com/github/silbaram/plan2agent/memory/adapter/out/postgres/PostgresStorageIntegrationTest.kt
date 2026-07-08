@@ -139,6 +139,8 @@ class PostgresStorageIntegrationTest {
             "document_chunks",
             "embedding_sets",
             "chunk_embeddings",
+            "chunk_embedding_vectors_2",
+            "chunk_embedding_vectors_1536",
         )
         assertThat(columnNames("documents")).contains(
             "document_id",
@@ -165,6 +167,8 @@ class PostgresStorageIntegrationTest {
             "idx_documents_latest_snapshot",
             "idx_document_chunks_artifact_filters",
             "idx_chunk_embeddings_embedding_set_id",
+            "idx_chunk_embedding_vectors_2_hnsw_cosine",
+            "idx_chunk_embedding_vectors_1536_hnsw_cosine",
         )
     }
 
@@ -185,6 +189,16 @@ class PostgresStorageIntegrationTest {
         assertThat(documentChunkStore.findByDocumentId(fixture.document.id)).containsExactly(fixture.chunk)
         assertThat(runRecordStore.findByTaskId(fixture.task.id)).containsExactly(fixture.run)
         assertThat(taskStore.findByGraphId(fixture.taskGraph.id)).containsExactly(fixture.task)
+        assertThat(taskGraphDocumentId(fixture.taskGraph.id)).isEqualTo(fixture.document.id.value)
+        assertThat(
+            artifactQuery.findArtifacts(
+                FindArtifactsQuery(
+                    projectId = fixture.project.id,
+                    iterationId = fixture.iteration.id,
+                    artifactType = ArtifactType.TASK_GRAPH,
+                ),
+            ).items.single().sourcePath,
+        ).isEqualTo(fixture.document.sourcePath)
     }
 
     @Test
@@ -295,6 +309,8 @@ class PostgresStorageIntegrationTest {
             .containsExactlyInAnyOrder(firstSet.id, secondSet.id)
         assertThat(rowCount("document_chunks")).isEqualTo(1)
         assertThat(rowCount("chunk_embeddings")).isEqualTo(2)
+        assertThat(rowCount("chunk_embedding_vectors_2")).isEqualTo(2)
+        assertThat(rowCount("chunk_embedding_vectors_1536")).isEqualTo(0)
 
         assertThatThrownBy {
             writeUseCase.saveDocumentChunks(
@@ -351,7 +367,7 @@ class PostgresStorageIntegrationTest {
                 sourcePath = normalizedPath,
             ),
         )
-        assertThat(found.map { it.artifactId }).containsExactly(first.id.value)
+        assertThat(found.items.map { it.artifactId }).containsExactly(first.id.value)
     }
 
     private fun saveFixture(scope: String): StoredFixture {
@@ -414,6 +430,13 @@ class PostgresStorageIntegrationTest {
         jdbc.queryForMap(
             "SELECT source_path, raw_source_path FROM documents WHERE document_id = ?",
             UUID.fromString(documentId.value),
+        )
+
+    private fun taskGraphDocumentId(taskGraphId: TaskGraphId): String? =
+        jdbc.queryForObject(
+            "SELECT document_id::text FROM task_graphs WHERE task_graph_id = ?",
+            String::class.java,
+            UUID.fromString(taskGraphId.value),
         )
 
     companion object {

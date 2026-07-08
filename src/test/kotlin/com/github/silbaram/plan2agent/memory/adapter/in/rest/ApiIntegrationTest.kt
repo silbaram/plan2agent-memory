@@ -138,10 +138,11 @@ class ApiIntegrationTest {
                 "&taskId=${fixture.taskId}" +
                 "&runId=${fixture.runId}",
         ).andExpect(status().isOk()).andReturnJson()
-        assertThat(artifactLookup.single()["artifactId"].asText()).isEqualTo(fixture.chunkId)
-        assertThat(artifactLookup.single()["lineage"]["runId"].asText()).isEqualTo(fixture.runId)
-        assertThat(artifactLookup.single()["sourceIds"]["sourceDocumentId"].asText()).isEqualTo(fixture.sourceDocumentId)
-        assertThat(artifactLookup.single()["sourceIds"]["sourceRunId"].asText()).isEqualTo(fixture.sourceRunId)
+        assertThat(artifactLookup["items"].single()["artifactId"].asText()).isEqualTo(fixture.chunkId)
+        assertThat(artifactLookup["items"].single()["lineage"]["runId"].asText()).isEqualTo(fixture.runId)
+        assertThat(artifactLookup["items"].single()["sourceIds"]["sourceDocumentId"].asText()).isEqualTo(fixture.sourceDocumentId)
+        assertThat(artifactLookup["items"].single()["sourceIds"]["sourceRunId"].asText()).isEqualTo(fixture.sourceRunId)
+        assertThat(artifactLookup["nextCursor"].isNull).isTrue()
 
         val keywordResults = getJson(
             "/api/search/keyword" +
@@ -152,10 +153,13 @@ class ApiIntegrationTest {
                 "&runId=${fixture.runId}" +
                 "&limit=5",
         ).andExpect(status().isOk()).andReturnJson()
-        assertThat(keywordResults.single()["chunkId"].asText()).isEqualTo(fixture.chunkId)
-        assertThat(keywordResults.single()["matchReason"].asText()).isEqualTo("chunk.content")
-        assertThat(keywordResults.single()["score"].asDouble()).isGreaterThanOrEqualTo(0.0)
-        assertThat(keywordResults.single()["sourceIds"]["sourceTaskId"].asText()).isEqualTo(fixture.sourceTaskId)
+        assertThat(keywordResults["items"].single()["chunkId"].asText()).isEqualTo(fixture.chunkId)
+        assertThat(keywordResults["items"].single()["matchReason"].asText()).isEqualTo("chunk.content")
+        assertThat(keywordResults["items"].single()["score"].asDouble()).isGreaterThanOrEqualTo(0.0)
+        assertThat(keywordResults["items"].single()["sourceIds"]["sourceTaskId"].asText()).isEqualTo(fixture.sourceTaskId)
+        assertThat(keywordResults["items"].single()["citation"]["sourceReference"]["path"].asText())
+            .isEqualTo("${fixture.sourcePath}#chunk-0")
+        assertThat(keywordResults["nextCursor"].isNull).isTrue()
 
         val vectorResults = postJson(
             "/api/search/vector",
@@ -173,10 +177,46 @@ class ApiIntegrationTest {
                 "limit" to 5,
             ),
         ).expectOkJson()
-        assertThat(vectorResults.single()["chunkId"].asText()).isEqualTo(fixture.chunkId)
-        assertThat(vectorResults.single()["distanceMetric"].asText()).isEqualTo("COSINE")
-        assertThat(vectorResults.single()["embeddingModel"].asText()).isEqualTo(fixture.embeddingModel)
-        assertThat(vectorResults.single()["sourceIds"]["sourceRunId"].asText()).isEqualTo(fixture.sourceRunId)
+        assertThat(vectorResults["items"].single()["chunkId"].asText()).isEqualTo(fixture.chunkId)
+        assertThat(vectorResults["items"].single()["distanceMetric"].asText()).isEqualTo("COSINE")
+        assertThat(vectorResults["items"].single()["embeddingModel"].asText()).isEqualTo(fixture.embeddingModel)
+        assertThat(vectorResults["items"].single()["sourceIds"]["sourceRunId"].asText()).isEqualTo(fixture.sourceRunId)
+        assertThat(vectorResults["items"].single()["citation"]["sourceReference"]["path"].asText())
+            .isEqualTo("${fixture.sourcePath}#chunk-0")
+        assertThat(vectorResults["nextCursor"].isNull).isTrue()
+
+        val hybridResults = postJson(
+            "/api/search/hybrid",
+            mapOf(
+                "q" to "api-search-needle",
+                "embedding" to listOf(1.0f, 0.0f),
+                "embeddingModel" to fixture.embeddingModel,
+                "embeddingDimension" to 2,
+                "embeddingVersion" to fixture.embeddingVersion,
+                "distanceMetric" to "COSINE",
+                "projectId" to fixture.projectId,
+                "iterationId" to fixture.iterationId,
+                "taskId" to fixture.taskId,
+                "runId" to fixture.runId,
+                "metadataFilters" to emptyMap<String, String>(),
+                "candidateLimit" to 10,
+                "limit" to 5,
+            ),
+        ).expectOkJson()
+        assertThat(hybridResults["items"].single()["chunkId"].asText()).isEqualTo(fixture.chunkId)
+        assertThat(hybridResults["items"].single()["matchReason"].asText()).isEqualTo("hybrid.keyword+vector")
+        assertThat(hybridResults["items"].single()["keyword"]["rank"].asInt()).isEqualTo(1)
+        assertThat(hybridResults["items"].single()["vector"]["rank"].asInt()).isEqualTo(1)
+        assertThat(hybridResults["items"].single()["citation"]["sourceReference"]["path"].asText())
+            .isEqualTo("${fixture.sourcePath}#chunk-0")
+        assertThat(hybridResults["nextCursor"].isNull).isTrue()
+
+        getWithoutToken("/actuator/metrics/p2a.memory.write.calls")
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.name").value("p2a.memory.write.calls"))
+        getWithoutToken("/actuator/metrics/p2a.memory.search.calls")
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.name").value("p2a.memory.search.calls"))
     }
 
     @Test
@@ -229,9 +269,9 @@ class ApiIntegrationTest {
                 "&artifactType=PROPOSAL" +
                 "&sourcePath=$proposalPath",
         ).andExpect(status().isOk()).andReturnJson()
-        assertThat(artifacts.single()["artifactType"].asText()).isEqualTo("PROPOSAL")
-        assertThat(artifacts.single()["sourceIds"]["sourceDocumentId"].asText()).isEqualTo("proposal-run-123-harness-gap")
-        assertThat(artifacts.single()["metadata"]["proposalTarget"].asText()).isEqualTo("p2a_toolkit")
+        assertThat(artifacts["items"].single()["artifactType"].asText()).isEqualTo("PROPOSAL")
+        assertThat(artifacts["items"].single()["sourceIds"]["sourceDocumentId"].asText()).isEqualTo("proposal-run-123-harness-gap")
+        assertThat(artifacts["items"].single()["metadata"]["proposalTarget"].asText()).isEqualTo("p2a_toolkit")
 
         val search = getJson(
             "/api/search/keyword" +
@@ -241,15 +281,20 @@ class ApiIntegrationTest {
                 "&artifactType=PROPOSAL" +
                 "&limit=5",
         ).andExpect(status().isOk()).andReturnJson()
-        assertThat(search.single()["documentId"].asText()).isEqualTo(proposalId)
-        assertThat(search.single()["artifactType"].asText()).isEqualTo("PROPOSAL")
-        assertThat(search.single()["metadata"]["proposalTarget"].asText()).isEqualTo("p2a_toolkit")
+        assertThat(search["items"].single()["documentId"].asText()).isEqualTo(proposalId)
+        assertThat(search["items"].single()["artifactType"].asText()).isEqualTo("PROPOSAL")
+        assertThat(search["items"].single()["metadata"]["proposalTarget"].asText()).isEqualTo("p2a_toolkit")
     }
 
     @Test
     fun `API returns auth validation not found and conflict errors`() {
         getWithoutToken("/api/artifacts").andExpect(status().isUnauthorized())
             .andExpect(jsonPath("$.error").value("auth_error"))
+
+        getJson("/api/artifacts?cursor=not-a-cursor")
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.error").value("validation_error"))
+            .andExpect(jsonPath("$.message").value("cursor has invalid format"))
 
         postJson(
             "/api/projects",
@@ -296,6 +341,7 @@ class ApiIntegrationTest {
             "username: ${'$'}{P2A_DB_USERNAME:p2a}",
             "password: ${'$'}{P2A_DB_PASSWORD:p2a_local_password}",
             "/actuator/health",
+            "/actuator/metrics",
         )
 
         getWithoutToken("/api/health")
@@ -305,6 +351,9 @@ class ApiIntegrationTest {
         getWithoutToken("/actuator/health")
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.status").value("UP"))
+
+        getWithoutToken("/actuator/metrics")
+            .andExpect(status().isOk())
     }
 
     private fun saveSyncFixture(fixture: ApiFixture) {

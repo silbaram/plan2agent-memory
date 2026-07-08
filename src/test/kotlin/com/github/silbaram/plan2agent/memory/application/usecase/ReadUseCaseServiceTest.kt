@@ -62,7 +62,7 @@ class ReadUseCaseServiceTest {
         val result = service.findArtifacts(expected)
 
         assertThat(artifactQuery.received).isEqualTo(expected)
-        assertThat(result).containsExactly(
+        assertThat(result.items).containsExactly(
             ArtifactSummary(
                 artifactType = ArtifactType.DOCUMENT_SNAPSHOT,
                 artifactId = ReadTestIds.documentId.value,
@@ -121,7 +121,7 @@ class ReadUseCaseServiceTest {
         val result = service.keywordSearch(expected)
 
         assertThat(keywordSearch.received).isEqualTo(expected)
-        assertThat(result.single().metadata).containsEntry("sourceTaskId", "source-task")
+        assertThat(result.items.single().metadata).containsEntry("sourceTaskId", "source-task")
     }
 
     @Test
@@ -199,29 +199,184 @@ class ReadUseCaseServiceTest {
         val result = service.vectorSearch(expected)
 
         assertThat(vectorSearch.received).isEqualTo(expected)
-        assertThat(result.single().embeddingModel).isEqualTo("text-embedding-test")
-        assertThat(result.single().metadata).containsEntry("sourceRunId", "source-run")
+        assertThat(result.items.single().embeddingModel).isEqualTo("text-embedding-test")
+        assertThat(result.items.single().metadata).containsEntry("sourceRunId", "source-run")
+    }
+
+    @Test
+    fun `hybrid search fuses keyword and vector candidates with reciprocal rank`() {
+        val sharedChunk = DocumentChunkId(uuid(9))
+        val keywordOnlyChunk = DocumentChunkId(uuid(10))
+        keywordSearch.result = PagedResult(
+            items = listOf(
+                KeywordSearchMatch(
+                    chunkId = sharedChunk,
+                    documentId = ReadTestIds.documentId,
+                    projectId = ReadTestIds.projectId,
+                    iterationId = ReadTestIds.iterationId,
+                    artifactType = ArtifactType.DOCUMENT_CHUNK,
+                    sourcePath = "runs/shared.md",
+                    chunkIndex = 0,
+                    content = "shared keyword content",
+                    score = 4.0,
+                    matchReason = "chunk.content",
+                    metadata = mapOf("sourceTaskId" to "source-task"),
+                    sourceReference = SourceReference(CanonicalServerId(sharedChunk.value), "file:///repo/runs/shared.md"),
+                ),
+                KeywordSearchMatch(
+                    chunkId = keywordOnlyChunk,
+                    documentId = DocumentId(uuid(11)),
+                    projectId = ReadTestIds.projectId,
+                    iterationId = ReadTestIds.iterationId,
+                    artifactType = ArtifactType.DOCUMENT_CHUNK,
+                    sourcePath = "runs/keyword.md",
+                    chunkIndex = 1,
+                    content = "keyword only content",
+                    score = 3.0,
+                    matchReason = "chunk.content",
+                ),
+            ),
+        )
+        vectorSearch.result = PagedResult(
+            items = listOf(
+                VectorSearchMatch(
+                    chunkId = sharedChunk,
+                    documentId = ReadTestIds.documentId,
+                    projectId = ReadTestIds.projectId,
+                    iterationId = ReadTestIds.iterationId,
+                    artifactType = ArtifactType.DOCUMENT_CHUNK,
+                    sourcePath = "runs/shared.md",
+                    chunkIndex = 0,
+                    content = "shared vector content",
+                    score = 0.1,
+                    distanceMetric = DistanceMetric.COSINE,
+                    embeddingModel = "text-embedding-test",
+                    embeddingVersion = "v1",
+                    metadata = mapOf("sourceRunId" to "source-run"),
+                ),
+            ),
+        )
+        val query = HybridSearchQuery(
+            query = "decision",
+            embedding = Embedding(listOf(0.1f, 0.2f)),
+            embeddingModel = "text-embedding-test",
+            embeddingDimension = 2,
+            embeddingVersion = "v1",
+            distanceMetric = DistanceMetric.COSINE,
+            projectId = ReadTestIds.projectId,
+            iterationId = ReadTestIds.iterationId,
+            rrfK = 60,
+            candidateLimit = 10,
+            limit = 10,
+        )
+
+        val result = service.hybridSearch(query)
+
+        assertThat(keywordSearch.received?.limit).isEqualTo(10)
+        assertThat(keywordSearch.received?.cursor).isNull()
+        assertThat(vectorSearch.received?.limit).isEqualTo(10)
+        assertThat(vectorSearch.received?.cursor).isNull()
+        assertThat(result.items.map { it.chunkId }).containsExactly(sharedChunk, keywordOnlyChunk)
+        assertThat(result.items.first().keyword?.rank).isEqualTo(1)
+        assertThat(result.items.first().vector?.rank).isEqualTo(1)
+        assertThat(result.items.first().matchReason).isEqualTo("hybrid.keyword+vector")
+        assertThat(result.items.first().metadata).containsEntry("sourceRunId", "source-run")
+        assertThat(result.items.first().metadata).containsEntry("sourceTaskId", "source-task")
+        assertThat(result.items.first().sourceReference?.uri).isEqualTo("file:///repo/runs/shared.md")
+    }
+
+    @Test
+    fun `hybrid search paginates fused candidates with opaque cursor`() {
+        val firstChunk = DocumentChunkId(uuid(12))
+        val secondChunk = DocumentChunkId(uuid(13))
+        val thirdChunk = DocumentChunkId(uuid(14))
+        keywordSearch.result = PagedResult(
+            items = listOf(
+                keywordMatch(firstChunk, score = 3.0),
+                keywordMatch(secondChunk, score = 2.0),
+                keywordMatch(thirdChunk, score = 1.0),
+            ),
+        )
+        vectorSearch.result = PagedResult(emptyList())
+        val query = HybridSearchQuery(
+            query = "decision",
+            embedding = Embedding(listOf(0.1f, 0.2f)),
+            embeddingModel = "text-embedding-test",
+            embeddingDimension = 2,
+            embeddingVersion = "v1",
+            distanceMetric = DistanceMetric.COSINE,
+            projectId = ReadTestIds.projectId,
+            iterationId = ReadTestIds.iterationId,
+            candidateLimit = 3,
+            limit = 2,
+        )
+
+        val firstPage = service.hybridSearch(query)
+        val secondPage = service.hybridSearch(query.copy(cursor = requireNotNull(firstPage.nextCursor)))
+
+        assertThat(firstPage.items.map { it.chunkId }).containsExactly(firstChunk, secondChunk)
+        assertThat(firstPage.nextCursor).isNotBlank()
+        assertThat(secondPage.items.map { it.chunkId }).containsExactly(thirdChunk)
+        assertThat(secondPage.nextCursor).isNull()
+    }
+
+    @Test
+    fun `hybrid search rejects malformed cursor`() {
+        val query = HybridSearchQuery(
+            query = "decision",
+            embedding = Embedding(listOf(0.1f, 0.2f)),
+            embeddingModel = "text-embedding-test",
+            embeddingDimension = 2,
+            embeddingVersion = "v1",
+            distanceMetric = DistanceMetric.COSINE,
+            candidateLimit = 3,
+            limit = 2,
+            cursor = "not-a-cursor",
+        )
+
+        assertThatThrownBy { service.hybridSearch(query) }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessageContaining("cursor has invalid format")
     }
 }
+
+private fun keywordMatch(
+    chunkId: DocumentChunkId,
+    score: Double,
+): KeywordSearchMatch =
+    KeywordSearchMatch(
+        chunkId = chunkId,
+        documentId = ReadTestIds.documentId,
+        projectId = ReadTestIds.projectId,
+        iterationId = ReadTestIds.iterationId,
+        artifactType = ArtifactType.DOCUMENT_CHUNK,
+        sourcePath = "runs/${chunkId.value}.md",
+        chunkIndex = 0,
+        content = "keyword content ${chunkId.value}",
+        score = score,
+        matchReason = "chunk.content",
+    )
 
 private class FakeArtifactQueryPort : ArtifactQueryPort {
     var received: FindArtifactsQuery? = null
 
-    override fun findArtifacts(query: FindArtifactsQuery): List<ArtifactSummary> {
+    override fun findArtifacts(query: FindArtifactsQuery): PagedResult<ArtifactSummary> {
         received = query
-        return listOf(
-            ArtifactSummary(
-                artifactType = ArtifactType.DOCUMENT_SNAPSHOT,
-                artifactId = ReadTestIds.documentId.value,
-                projectId = ReadTestIds.projectId,
-                iterationId = ReadTestIds.iterationId,
-                taskId = ReadTestIds.taskId,
-                runId = ReadTestIds.runId,
-                sourcePath = "spec.md",
-                title = "Spec",
-                contentHash = ContentHash("content-hash"),
-                sourceReference = query.sourceReference,
-                metadata = mapOf("sourceDocumentId" to "source-document"),
+        return PagedResult(
+            items = listOf(
+                ArtifactSummary(
+                    artifactType = ArtifactType.DOCUMENT_SNAPSHOT,
+                    artifactId = ReadTestIds.documentId.value,
+                    projectId = ReadTestIds.projectId,
+                    iterationId = ReadTestIds.iterationId,
+                    taskId = ReadTestIds.taskId,
+                    runId = ReadTestIds.runId,
+                    sourcePath = "spec.md",
+                    title = "Spec",
+                    contentHash = ContentHash("content-hash"),
+                    sourceReference = query.sourceReference,
+                    metadata = mapOf("sourceDocumentId" to "source-document"),
+                ),
             ),
         )
     }
@@ -229,22 +384,25 @@ private class FakeArtifactQueryPort : ArtifactQueryPort {
 
 private class FakeKeywordSearchPort : KeywordSearchPort {
     var received: KeywordSearchQuery? = null
+    var result: PagedResult<KeywordSearchMatch>? = null
 
-    override fun search(query: KeywordSearchQuery): List<KeywordSearchMatch> {
+    override fun search(query: KeywordSearchQuery): PagedResult<KeywordSearchMatch> {
         received = query
-        return listOf(
-            KeywordSearchMatch(
-                chunkId = DocumentChunkId(uuid(7)),
-                documentId = ReadTestIds.documentId,
-                projectId = ReadTestIds.projectId,
-                iterationId = ReadTestIds.iterationId,
-                artifactType = ArtifactType.DOCUMENT_CHUNK,
-                sourcePath = query.sourcePath,
-                chunkIndex = 0,
-                content = "decision content",
-                score = 1.0,
-                matchReason = "content",
-                metadata = mapOf("sourceTaskId" to "source-task"),
+        return result ?: PagedResult(
+            items = listOf(
+                KeywordSearchMatch(
+                    chunkId = DocumentChunkId(uuid(7)),
+                    documentId = ReadTestIds.documentId,
+                    projectId = ReadTestIds.projectId,
+                    iterationId = ReadTestIds.iterationId,
+                    artifactType = ArtifactType.DOCUMENT_CHUNK,
+                    sourcePath = query.sourcePath,
+                    chunkIndex = 0,
+                    content = "decision content",
+                    score = 1.0,
+                    matchReason = "content",
+                    metadata = mapOf("sourceTaskId" to "source-task"),
+                ),
             ),
         )
     }
@@ -252,24 +410,27 @@ private class FakeKeywordSearchPort : KeywordSearchPort {
 
 private class FakeVectorSearchPort : VectorSearchPort {
     var received: VectorSearchQuery? = null
+    var result: PagedResult<VectorSearchMatch>? = null
 
-    override fun search(query: VectorSearchQuery): List<VectorSearchMatch> {
+    override fun search(query: VectorSearchQuery): PagedResult<VectorSearchMatch> {
         received = query
-        return listOf(
-            VectorSearchMatch(
-                chunkId = DocumentChunkId(uuid(8)),
-                documentId = ReadTestIds.documentId,
-                projectId = ReadTestIds.projectId,
-                iterationId = ReadTestIds.iterationId,
-                artifactType = ArtifactType.DOCUMENT_CHUNK,
-                sourcePath = query.sourcePath,
-                chunkIndex = 1,
-                content = "similar content",
-                score = 0.2,
-                distanceMetric = query.distanceMetric,
-                embeddingModel = query.embeddingModel,
-                embeddingVersion = query.embeddingVersion,
-                metadata = mapOf("sourceRunId" to "source-run"),
+        return result ?: PagedResult(
+            items = listOf(
+                VectorSearchMatch(
+                    chunkId = DocumentChunkId(uuid(8)),
+                    documentId = ReadTestIds.documentId,
+                    projectId = ReadTestIds.projectId,
+                    iterationId = ReadTestIds.iterationId,
+                    artifactType = ArtifactType.DOCUMENT_CHUNK,
+                    sourcePath = query.sourcePath,
+                    chunkIndex = 1,
+                    content = "similar content",
+                    score = 0.2,
+                    distanceMetric = query.distanceMetric,
+                    embeddingModel = query.embeddingModel,
+                    embeddingVersion = query.embeddingVersion,
+                    metadata = mapOf("sourceRunId" to "source-run"),
+                ),
             ),
         )
     }

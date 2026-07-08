@@ -126,6 +126,11 @@ data class DocumentChunkWrite(
     }
 }
 
+data class PagedResult<T>(
+    val items: List<T>,
+    val nextCursor: String? = null,
+)
+
 data class FindArtifactsQuery(
     val projectId: ProjectId? = null,
     val iterationId: IterationId? = null,
@@ -142,9 +147,11 @@ data class FindArtifactsQuery(
     val contentHash: ContentHash? = null,
     val sourceReference: SourceReference? = null,
     val limit: Int = 50,
+    val cursor: String? = null,
 ) {
     init {
         require(limit > 0) { "FindArtifactsQuery limit must be positive" }
+        require(cursor == null || cursor.isNotBlank()) { "FindArtifactsQuery cursor must not be blank" }
     }
 }
 
@@ -158,6 +165,7 @@ data class KeywordSearchQuery(
     val runId: RunId? = null,
     val metadataFilters: Map<String, String> = emptyMap(),
     val limit: Int = 20,
+    val cursor: String? = null,
 ) {
     init {
         require(query.isNotBlank()) { "KeywordSearchQuery query must not be blank" }
@@ -168,6 +176,7 @@ data class KeywordSearchQuery(
             "KeywordSearchQuery metadata filter values must not be blank"
         }
         require(limit > 0) { "KeywordSearchQuery limit must be positive" }
+        require(cursor == null || cursor.isNotBlank()) { "KeywordSearchQuery cursor must not be blank" }
     }
 }
 
@@ -185,6 +194,7 @@ data class VectorSearchQuery(
     val runId: RunId? = null,
     val metadataFilters: Map<String, String> = emptyMap(),
     val limit: Int = 20,
+    val cursor: String? = null,
 ) {
     init {
         require(embedding.values.all { it.isFinite() }) { "VectorSearchQuery embedding values must be finite" }
@@ -198,5 +208,48 @@ data class VectorSearchQuery(
             "VectorSearchQuery metadata filter values must not be blank"
         }
         require(limit > 0) { "VectorSearchQuery limit must be positive" }
+        require(cursor == null || cursor.isNotBlank()) { "VectorSearchQuery cursor must not be blank" }
     }
 }
+
+data class HybridSearchQuery(
+    val query: String,
+    val embedding: Embedding,
+    val embeddingModel: String,
+    val embeddingDimension: Int,
+    val embeddingVersion: String,
+    val distanceMetric: DistanceMetric,
+    val projectId: ProjectId? = null,
+    val iterationId: IterationId? = null,
+    val artifactType: ArtifactType? = null,
+    val sourcePath: String? = null,
+    val taskId: TaskId? = null,
+    val runId: RunId? = null,
+    val metadataFilters: Map<String, String> = emptyMap(),
+    val rrfK: Int = DEFAULT_RRF_K,
+    val candidateLimit: Int = DEFAULT_HYBRID_CANDIDATE_LIMIT,
+    val limit: Int = 20,
+    val cursor: String? = null,
+) {
+    init {
+        require(query.isNotBlank()) { "HybridSearchQuery query must not be blank" }
+        require(embedding.values.all { it.isFinite() }) { "HybridSearchQuery embedding values must be finite" }
+        require(embeddingModel.isNotBlank()) { "HybridSearchQuery embeddingModel must not be blank" }
+        require(embeddingDimension > 0) { "HybridSearchQuery embeddingDimension must be positive" }
+        require(embeddingVersion.isNotBlank()) { "HybridSearchQuery embeddingVersion must not be blank" }
+        require(metadataFilters.keys.all { it.isNotBlank() }) {
+            "HybridSearchQuery metadata filter keys must not be blank"
+        }
+        require(metadataFilters.values.all { it.isNotBlank() }) {
+            "HybridSearchQuery metadata filter values must not be blank"
+        }
+        require(rrfK > 0) { "HybridSearchQuery rrfK must be positive" }
+        require(candidateLimit > 0) { "HybridSearchQuery candidateLimit must be positive" }
+        require(limit > 0) { "HybridSearchQuery limit must be positive" }
+        require(candidateLimit >= limit) { "HybridSearchQuery candidateLimit must be greater than or equal to limit" }
+        require(cursor == null || cursor.isNotBlank()) { "HybridSearchQuery cursor must not be blank" }
+    }
+}
+
+const val DEFAULT_RRF_K = 60
+const val DEFAULT_HYBRID_CANDIDATE_LIMIT = 80

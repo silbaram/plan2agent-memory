@@ -1,7 +1,9 @@
 package com.github.silbaram.plan2agent.memory.application.port.`in`
 
 import com.github.silbaram.plan2agent.memory.application.usecase.FindArtifactsQuery
+import com.github.silbaram.plan2agent.memory.application.usecase.HybridSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.KeywordSearchQuery
+import com.github.silbaram.plan2agent.memory.application.usecase.PagedResult
 import com.github.silbaram.plan2agent.memory.application.usecase.RegisterIterationCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.RegisterProjectCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveDocumentChunksCommand
@@ -13,6 +15,7 @@ import com.github.silbaram.plan2agent.memory.application.usecase.VectorSearchQue
 import com.github.silbaram.plan2agent.memory.domain.ArtifactSummary
 import com.github.silbaram.plan2agent.memory.domain.DocumentChunk
 import com.github.silbaram.plan2agent.memory.domain.DocumentSnapshot
+import com.github.silbaram.plan2agent.memory.domain.HybridSearchMatch
 import com.github.silbaram.plan2agent.memory.domain.Iteration
 import com.github.silbaram.plan2agent.memory.domain.KeywordSearchMatch
 import com.github.silbaram.plan2agent.memory.domain.Project
@@ -50,13 +53,17 @@ interface SaveDocumentChunksUseCase {
 }
 
 interface FindArtifactsUseCase {
-    fun findArtifacts(query: FindArtifactsQuery): List<ArtifactSummary>
+    fun findArtifacts(query: FindArtifactsQuery): PagedResult<ArtifactSummary>
 }
 
 interface KeywordSearchUseCase {
-    fun keywordSearch(query: KeywordSearchQuery): List<KeywordSearchMatch>
+    fun keywordSearch(query: KeywordSearchQuery): PagedResult<KeywordSearchMatch>
 }
 
 interface VectorSearchUseCase {
-    fun vectorSearch(query: VectorSearchQuery): List<VectorSearchMatch>
+    fun vectorSearch(query: VectorSearchQuery): PagedResult<VectorSearchMatch>
+}
+
+interface HybridSearchUseCase {
+    fun hybridSearch(query: HybridSearchQuery): PagedResult<HybridSearchMatch>
 }

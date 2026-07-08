@@ -248,27 +248,28 @@ class WriteUseCaseService(
         val savedByInputId = savedChunks.associateBy { it.id }
         val savedByHash = savedChunks.associateBy { it.documentId to it.chunkHash }
 
-        writes.forEach { write ->
+        val chunkEmbeddings = writes.mapNotNull { write ->
             val embeddingSet = write.embeddingSet
             val embedding = write.embedding
             if (embeddingSet != null && embedding != null) {
                 val savedChunk = savedByInputId[write.chunk.id] ?: savedByHash[write.chunk.documentId to write.chunk.chunkHash]
                 requireNotNull(savedChunk) { "Saved chunk ${write.chunk.id.value} was not returned by the chunk store" }
                 val resolvedSet = resolveEmbeddingSet(document.projectId, embeddingSet, embedding.values.size)
-                chunkEmbeddingStore.saveAll(
-                    listOf(
-                        ChunkEmbedding(
-                            id = deterministicChunkEmbeddingId(savedChunk.id, resolvedSet.id),
-                            embeddingSetId = resolvedSet.id,
-                            chunkId = savedChunk.id,
-                            embedding = embedding,
-                            embeddingHash = write.embeddingHash,
-                            createdAt = savedChunk.createdAt,
-                            metadata = write.chunk.metadata,
-                        ),
-                    ),
+                ChunkEmbedding(
+                    id = deterministicChunkEmbeddingId(savedChunk.id, resolvedSet.id),
+                    embeddingSetId = resolvedSet.id,
+                    chunkId = savedChunk.id,
+                    embedding = embedding,
+                    embeddingHash = write.embeddingHash,
+                    createdAt = savedChunk.createdAt,
+                    metadata = write.chunk.metadata,
                 )
+            } else {
+                null
             }
+        }
+        if (chunkEmbeddings.isNotEmpty()) {
+            chunkEmbeddingStore.saveAll(chunkEmbeddings)
         }
 
         return savedChunks

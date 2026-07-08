@@ -47,13 +47,14 @@ P2A_LOCAL_TOKEN=local-dev-token \
 ./gradlew bootRun
 ```
 
-`P2A_LOCAL_TOKEN`이 비어 있으면 `/api/**`도 인증 없이 열립니다. 값이 있으면 `/api/health`와 `/actuator/health`를 제외한 `/api/**` 요청에 `X-P2A-Local-Token` header가 필요합니다. Header 이름은 `P2A_LOCAL_TOKEN_HEADER`로 바꿀 수 있습니다.
+`P2A_LOCAL_TOKEN`이 비어 있으면 `/api/**`도 인증 없이 열립니다. 값이 있으면 `/api/health`, `/actuator/health`, `/actuator/metrics`를 제외한 `/api/**` 요청에 `X-P2A-Local-Token` header가 필요합니다. Header 이름은 `P2A_LOCAL_TOKEN_HEADER`로 바꿀 수 있습니다.
 
 ### Health check
 
 ```bash
 curl http://localhost:8080/actuator/health
 curl http://localhost:8080/api/health
+curl http://localhost:8080/actuator/metrics
 ```
 
 정상 응답은 `status: "UP"`입니다.
@@ -66,6 +67,8 @@ curl http://localhost:8080/api/health
 ./gradlew test
 ./gradlew compileKotlin compileTestKotlin
 ```
+
+`RetrievalEvalIntegrationTest`는 고정 corpus로 keyword, vector, hybrid 검색의 `recall@k`와 `nDCG@k`를 검증합니다. 검색 ranking이나 ANN 저장 구조를 바꿀 때 이 테스트가 회귀 guardrail 역할을 합니다.
 
 Lima Docker socket을 쓰는 로컬 환경에서는 다음처럼 실행할 수 있습니다.
 
@@ -85,6 +88,8 @@ TESTCONTAINERS_RYUK_DISABLED=true \
 
 - `/api/health`
 - `/actuator/health`
+- `/actuator/metrics`
+- `/actuator/metrics/**`
 
 인증이 켜진 경우 요청 예:
 
@@ -121,8 +126,10 @@ Base URL은 기본 실행 기준 `http://localhost:8080`입니다. 인증이 켜
 | `GET` | `/api/artifacts` | 저장된 artifact를 filter 조건으로 조회합니다. | 필요 |
 | `GET` | `/api/search/keyword` | RAG/history lookup을 위한 keyword 검색을 수행합니다. | 필요 |
 | `POST` | `/api/search/vector` | 외부 query embedding으로 vector 검색을 수행합니다. | 필요 |
+| `POST` | `/api/search/hybrid` | keyword와 vector 후보를 RRF로 융합해 검색합니다. | 필요 |
 | `GET` | `/api/health` | 간단한 API health check입니다. | 불필요 |
 | `GET` | `/actuator/health` | Spring Actuator health check입니다. | 불필요 |
+| `GET` | `/actuator/metrics` | Micrometer metric 목록을 조회합니다. | 불필요 |
 
 ### 공통 데이터 규칙
 
@@ -342,10 +349,13 @@ Task 실행 기록을 저장합니다.
 | `sourceReferenceCanonicalServerId` | 선택 | Source reference canonical server ID filter입니다. |
 | `sourceReferenceUri` | 선택 | Source reference URI filter입니다. |
 | `limit` | 선택 | 최대 응답 개수입니다. |
+| `cursor` | 선택 | 이전 응답의 `nextCursor`입니다. 같은 filter와 함께 넘기면 다음 페이지를 keyset 방식으로 조회합니다. |
 
 | Response | 포함 정보 |
 | --- | --- |
-| `ArtifactLookupResponse[]` | 각 항목의 `lineage`, `sourceIds`, `sourceReference`, `contentHash`, `snapshotVersion` |
+| `PagedResponse<ArtifactLookupResponse>` | `items`, 다음 페이지가 있을 때만 채워지는 opaque `nextCursor` |
+
+Artifact lookup은 `sort_timestamp DESC, artifactType ASC, artifactId ASC` keyset cursor를 사용합니다. Cursor는 서버 opaque 값이므로 클라이언트에서 파싱하지 말고 그대로 전달해야 합니다.
 
 ### `GET /api/search/keyword`
 
@@ -361,22 +371,23 @@ RAG/history lookup을 위한 deterministic lexical retrieval입니다.
 | `taskId` | 선택 | Canonical task ID filter입니다. |
 | `runId` | 선택 | Canonical run ID filter입니다. |
 | `limit` | 선택 | 최대 응답 개수입니다. |
+| `cursor` | 선택 | 이전 응답의 `nextCursor`입니다. 같은 filter와 함께 넘기면 다음 페이지를 keyset 방식으로 조회합니다. |
 
 | 검색 동작 | 설명 |
 | --- | --- |
 | 검색 대상 | 주 대상은 `document_chunks.content`, 보조 대상은 `documents.content`, `sourcePath`, `artifactType`입니다. |
-| Matching | Case-insensitive matching입니다. |
+| Matching | PostgreSQL `to_tsvector('simple')`/`plainto_tsquery('simple')` 기반 full-text search입니다. 한국어/CJK 전용 analyzer는 후속 과제입니다. |
 | Filter semantics | 여러 filter는 AND semantics로 적용됩니다. |
 | Score | `score`는 backend-opaque 값이며 API 안정 계약으로 고정하지 않습니다. |
-| Tie-break | 동률은 snapshot/version/timestamp/chunkIndex 기준으로 정렬합니다. |
+| Tie-break | 동률은 snapshot/version/timestamp/chunkIndex/documentId/chunkId 기준으로 정렬합니다. |
 
 | Response | 포함 정보 |
 | --- | --- |
-| `KeywordSearchResponse[]` | `content`, `score`, `matchReason`, `lineage`, `sourceIds`, `metadata` |
+| `PagedResponse<KeywordSearchResponse>` | `items` 안의 `content`, `score`, `matchReason`, `lineage`, `sourceIds`, `sourceReference`, `citation`, `metadata`; 다음 페이지가 있을 때만 채워지는 opaque `nextCursor` |
 
 ### `POST /api/search/vector`
 
-외부에서 받은 query embedding으로 pgvector exact search를 수행합니다.
+외부에서 받은 query embedding으로 pgvector 검색을 수행합니다.
 
 | Request field | 필수 | 설명 |
 | --- | --- | --- |
@@ -393,23 +404,64 @@ RAG/history lookup을 위한 deterministic lexical retrieval입니다.
 | `runId` | 선택 | Canonical run ID filter입니다. |
 | `metadataFilters` | 선택 | Metadata key/value filter입니다. |
 | `limit` | 선택 | 최대 응답 개수입니다. |
+| `cursor` | 선택 | 이전 응답의 `nextCursor`입니다. 같은 filter와 함께 넘기면 다음 페이지를 keyset 방식으로 조회합니다. |
 
 | 검색 동작 | 설명 |
 | --- | --- |
 | Matching scope | 같은 `embeddingModel`, `embeddingDimension`, `embeddingVersion`, `distanceMetric` embedding set 안에서만 검색합니다. |
 | Dimension validation | 저장된 embedding set 차원과 요청 차원이 다르면 validation error입니다. |
-| Search mode | pgvector exact search를 사용합니다. |
+| Search mode | `embeddingDimension`이 2 또는 1536이면 고정 차원 보조 테이블(`chunk_embedding_vectors_2`, `chunk_embedding_vectors_1536`)과 HNSW 인덱스 대상 컬럼을 사용합니다. 그 외 차원은 기존 untyped vector 컬럼 경로를 사용합니다. |
 
 | Response | 포함 정보 |
 | --- | --- |
-| `VectorSearchResponse[]` | `score`, `distanceMetric`, `embeddingModel`, `embeddingVersion`, `lineage`, `sourceIds` |
+| `PagedResponse<VectorSearchResponse>` | `items` 안의 `score`, `distanceMetric`, `embeddingModel`, `embeddingVersion`, `lineage`, `sourceIds`, `sourceReference`, `citation`, `metadata`; 다음 페이지가 있을 때만 채워지는 opaque `nextCursor` |
 
-### Health endpoints
+### `POST /api/search/hybrid`
+
+Keyword 후보와 vector 후보를 각각 조회한 뒤 reciprocal rank fusion(RRF)으로 합쳐 반환합니다.
+
+| Request field | 필수 | 설명 |
+| --- | --- | --- |
+| `q` | 필수 | Keyword query입니다. |
+| `embedding` | 필수 | Query vector입니다. 비어 있으면 validation error입니다. |
+| `embeddingModel` | 필수 | 검색할 embedding model 이름입니다. |
+| `embeddingDimension` | 필수 | Vector 차원입니다. `embedding.size`와 같아야 합니다. |
+| `embeddingVersion` | 필수 | 검색할 embedding version입니다. |
+| `distanceMetric` | 선택 | 생략 시 `COSINE`입니다. |
+| `projectId`, `iterationId`, `artifactType`, `sourcePath`, `taskId`, `runId` | 선택 | Keyword/vector 양쪽 후보 조회에 동일하게 적용되는 filter입니다. |
+| `metadataFilters` | 선택 | Metadata key/value filter입니다. |
+| `rrfK` | 선택 | RRF 상수입니다. 기본값은 `60`입니다. |
+| `candidateLimit` | 선택 | 각 arm에서 가져올 후보 수입니다. 생략 시 `max(80, limit * 4)`입니다. |
+| `limit` | 선택 | 최종 응답 개수입니다. |
+| `cursor` | 선택 | 이전 응답의 `nextCursor`입니다. 같은 filter와 함께 넘기면 다음 fused 후보 페이지를 조회합니다. |
+
+| 검색 동작 | 설명 |
+| --- | --- |
+| Fusion | 같은 chunk는 하나의 hit로 병합하고, keyword/vector arm별 rank와 원 score를 `keyword`, `vector`에 노출합니다. |
+| Score | 최종 `score`는 RRF 점수입니다. Arm별 `score`는 각 검색 backend의 opaque 점수입니다. |
+| Cursor scope | Hybrid cursor는 현재 `candidateLimit` 안에서 만든 fused 후보 목록 기준입니다. 완전한 전역 pagination이 필요하면 `candidateLimit`을 충분히 크게 잡아야 합니다. |
+
+| Response | 포함 정보 |
+| --- | --- |
+| `PagedResponse<HybridSearchResponse>` | `items` 안의 `content`, RRF `score`, `matchReason`, `keyword`, `vector`, `lineage`, `sourceIds`, `sourceReference`, `citation`, `metadata`; 다음 페이지가 있을 때만 채워지는 opaque `nextCursor` |
+
+### Search citation
+
+Keyword, vector, hybrid hit는 모두 `lineage`, `sourceIds`, `sourceReference`를 top-level로 유지하면서 같은 정보를 `citation` object로도 제공합니다. 클라이언트는 `citation.sourceReference.path`, `citation.lineage.chunkId`, `citation.sourceIds.sourceDocumentId`를 함께 사용해 검색 결과를 원본 산출물 위치와 연결할 수 있습니다.
+
+### Observability endpoints
 
 | Method | Endpoint | 설명 | 인증 |
 | --- | --- | --- | --- |
 | `GET` | `/api/health` | 간단한 API health endpoint입니다. | 불필요 |
 | `GET` | `/actuator/health` | Spring Actuator health endpoint입니다. | 불필요 |
+| `GET` | `/actuator/metrics` | 노출된 Micrometer metric 목록입니다. | 불필요 |
+| `GET` | `/actuator/metrics/{metricName}` | 개별 metric 상세입니다. | 불필요 |
+
+주요 custom metric:
+
+- `p2a.memory.search.calls`, `p2a.memory.search.duration`
+- `p2a.memory.write.calls`, `p2a.memory.write.duration`
 
 ## Idempotency와 versioning
 
@@ -433,6 +485,8 @@ RAG/history lookup을 위한 deterministic lexical retrieval입니다.
 
 새 embedding model 또는 version으로 전환할 때는 새 `embedding_sets` row와 새 `chunk_embeddings` row를 추가해 점진 전환과 비교 평가가 가능하게 합니다.
 
+`embeddingDimension`이 2 또는 1536인 embedding은 legacy `chunk_embeddings.embedding`에 저장한 뒤 고정 차원 보조 테이블에도 복사됩니다. 이 보조 테이블에는 cosine, L2, inner-product용 HNSW 인덱스가 있으며, vector 검색 adapter는 해당 차원에서 보조 테이블을 우선 사용합니다. 다른 차원은 schema 확장 전까지 legacy untyped vector 경로를 유지합니다.
+
 ## Path 처리
 
 `sourcePath`는 저장 use case에서 정규화됩니다.
@@ -446,7 +500,7 @@ RAG/history lookup을 위한 deterministic lexical retrieval입니다.
 
 이 문서에서 `rawSourcePath`는 클라이언트가 보낸 원본 path를 의미합니다. REST payload에는 별도 top-level `rawSourcePath` field가 없고, `sourceReference.path`가 원본 path 역할을 합니다. 서버는 `sourceReference.path`를 DB 컬럼 `raw_source_path`에 보존합니다.
 
-문서와 chunk 응답의 `sourcePath`는 정규화된 path입니다. `/api/artifacts`, `/api/search/keyword`, `/api/search/vector`의 `sourcePath` filter도 `normalizedPath` 기준으로 비교됩니다. 클라이언트가 로컬 파일과 다시 매칭할 때는 `sourcePath`, `artifactType`, `contentHash`, `snapshotVersion`, `sourceReference`를 함께 사용해야 합니다.
+문서와 chunk 응답의 `sourcePath`는 정규화된 path입니다. `/api/artifacts`, `/api/search/keyword`, `/api/search/vector`, `/api/search/hybrid`의 `sourcePath` filter도 `normalizedPath` 기준으로 비교됩니다. 클라이언트가 로컬 파일과 다시 매칭할 때는 `sourcePath`, `artifactType`, `contentHash`, `snapshotVersion`, `sourceReference`를 함께 사용해야 합니다.
 
 ## Error semantics
 

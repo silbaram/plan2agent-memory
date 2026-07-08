@@ -1,6 +1,7 @@
 package com.github.silbaram.plan2agent.memory.adapter.`in`.rest
 
 import com.github.silbaram.plan2agent.memory.application.port.`in`.FindArtifactsUseCase
+import com.github.silbaram.plan2agent.memory.application.port.`in`.HybridSearchUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.KeywordSearchUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.VectorSearchUseCase
 import org.springframework.web.bind.annotation.GetMapping
@@ -16,6 +17,7 @@ class QueryRestController(
     private val findArtifactsUseCase: FindArtifactsUseCase,
     private val keywordSearchUseCase: KeywordSearchUseCase,
     private val vectorSearchUseCase: VectorSearchUseCase,
+    private val hybridSearchUseCase: HybridSearchUseCase,
 ) {
     @GetMapping("/artifacts")
     fun findArtifacts(
@@ -35,7 +37,8 @@ class QueryRestController(
         @RequestParam(required = false) sourceReferenceCanonicalServerId: String?,
         @RequestParam(required = false) sourceReferenceUri: String?,
         @RequestParam(required = false) limit: Int?,
-    ): List<ArtifactLookupResponse> =
+        @RequestParam(required = false) cursor: String?,
+    ): PagedResponse<ArtifactLookupResponse> =
         findArtifactsUseCase.findArtifacts(
             ArtifactLookupRequest(
                 projectId = projectId,
@@ -54,8 +57,9 @@ class QueryRestController(
                 sourceReferenceCanonicalServerId = sourceReferenceCanonicalServerId,
                 sourceReferenceUri = sourceReferenceUri,
                 limit = limit,
+                cursor = cursor,
             ).toQuery(),
-        ).map { it.toLookupResponse() }
+        ).toRestPage { it.toLookupResponse() }
 
     @GetMapping("/search/keyword")
     fun keywordSearch(
@@ -67,7 +71,8 @@ class QueryRestController(
         @RequestParam(required = false) taskId: String?,
         @RequestParam(required = false) runId: String?,
         @RequestParam(required = false) limit: Int?,
-    ): List<KeywordSearchResponse> =
+        @RequestParam(required = false) cursor: String?,
+    ): PagedResponse<KeywordSearchResponse> =
         keywordSearchUseCase.keywordSearch(
             KeywordSearchRequest(
                 q = q,
@@ -78,12 +83,17 @@ class QueryRestController(
                 taskId = taskId,
                 runId = runId,
                 limit = limit,
+                cursor = cursor,
             ).toQuery(),
-        ).map { it.toResponse() }
+        ).toRestPage { it.toResponse() }
 
     @PostMapping("/search/vector")
-    fun vectorSearch(@RequestBody request: VectorSearchRequest): List<VectorSearchResponse> =
-        vectorSearchUseCase.vectorSearch(request.toQuery()).map { it.toResponse() }
+    fun vectorSearch(@RequestBody request: VectorSearchRequest): PagedResponse<VectorSearchResponse> =
+        vectorSearchUseCase.vectorSearch(request.toQuery()).toRestPage { it.toResponse() }
+
+    @PostMapping("/search/hybrid")
+    fun hybridSearch(@RequestBody request: HybridSearchRequest): PagedResponse<HybridSearchResponse> =
+        hybridSearchUseCase.hybridSearch(request.toQuery()).toRestPage { it.toResponse() }
 }
 
 @RestController
