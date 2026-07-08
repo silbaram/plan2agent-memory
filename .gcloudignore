@@ -1,9 +1,9 @@
-.git/
-.gradle/
-build/
-out/
-target/
-dist/
+/.git/
+/.gradle/
+/build/
+/out/
+/target/
+/dist/
 
 .agents/
 .claude/
