@@ -1,6 +1,8 @@
 package com.github.silbaram.plan2agent.memory.adapter.`in`.rest
 
 import com.github.silbaram.plan2agent.memory.application.port.`in`.FindArtifactsUseCase
+import com.github.silbaram.plan2agent.memory.application.port.`in`.FindArtifactGraphNodesUseCase
+import com.github.silbaram.plan2agent.memory.application.port.`in`.TraceArtifactGraphUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.HybridSearchUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.KeywordSearchUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.VectorSearchUseCase
@@ -18,6 +20,8 @@ class QueryRestController(
     private val keywordSearchUseCase: KeywordSearchUseCase,
     private val vectorSearchUseCase: VectorSearchUseCase,
     private val hybridSearchUseCase: HybridSearchUseCase,
+    private val findArtifactGraphNodesUseCase: FindArtifactGraphNodesUseCase,
+    private val traceArtifactGraphUseCase: TraceArtifactGraphUseCase,
 ) {
     @GetMapping("/artifacts")
     fun findArtifacts(
@@ -86,6 +90,26 @@ class QueryRestController(
                 cursor = cursor,
             ).toQuery(),
         ).toRestPage { it.toResponse() }
+
+    @GetMapping("/graph/nodes")
+    fun findGraphNodes(
+        @RequestParam(required = false) projectId: String?,
+        @RequestParam(required = false) iterationId: String?,
+        @RequestParam(required = false) nodeKind: String?,
+        @RequestParam(required = false) query: String?,
+        @RequestParam(required = false) limit: Int?,
+    ): List<ArtifactGraphNodeResponse> =
+        findArtifactGraphNodesUseCase.findGraphNodes(graphNodeSearchQuery(projectId, iterationId, nodeKind, query, limit)).map { it.toResponse() }
+
+    @GetMapping("/graph/trace")
+    fun traceGraph(
+        @RequestParam(required = false) projectId: String?,
+        @RequestParam(required = false) naturalKey: String?,
+        @RequestParam(required = false) iterationId: String?,
+        @RequestParam(required = false) direction: String?,
+        @RequestParam(required = false) maxDepth: Int?,
+    ): ArtifactTraceResponse =
+        traceArtifactGraphUseCase.traceGraph(graphTraceQuery(projectId, naturalKey, iterationId, direction, maxDepth)).toResponse()
 
     @PostMapping("/search/vector")
     fun vectorSearch(@RequestBody request: VectorSearchRequest): PagedResponse<VectorSearchResponse> =

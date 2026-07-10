@@ -4,6 +4,9 @@ import com.github.silbaram.plan2agent.memory.application.usecase.FindArtifactsQu
 import com.github.silbaram.plan2agent.memory.application.usecase.DEFAULT_HYBRID_CANDIDATE_LIMIT
 import com.github.silbaram.plan2agent.memory.application.usecase.DEFAULT_RRF_K
 import com.github.silbaram.plan2agent.memory.application.usecase.HybridSearchQuery
+import com.github.silbaram.plan2agent.memory.application.usecase.GraphNodeSearchQuery
+import com.github.silbaram.plan2agent.memory.application.usecase.GraphTraceDirection
+import com.github.silbaram.plan2agent.memory.application.usecase.GraphTraceQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.KeywordSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.PagedResult
 import com.github.silbaram.plan2agent.memory.application.usecase.VectorSearchQuery
@@ -512,3 +515,45 @@ private fun sourceIdsFrom(metadata: Map<String, String>): SourceIdsResponse =
         sourceRunId = metadata["sourceRunId"],
         sourceChunkId = metadata["sourceChunkId"],
     )
+
+data class ArtifactGraphNodeResponse(
+    val nodeId: String,
+    val projectId: String,
+    val iterationId: String? = null,
+    val nodeKind: String,
+    val naturalKey: String,
+    val label: String,
+    val content: String? = null,
+    val documentId: String? = null,
+    val taskId: String? = null,
+    val runId: String? = null,
+    val metadata: Map<String, String> = emptyMap(),
+)
+
+data class ArtifactTraceNodeResponse(val node: ArtifactGraphNodeResponse, val depth: Int)
+data class ArtifactGraphEdgeResponse(val edgeId: String, val projectId: String, val fromNodeId: String, val toNodeId: String, val edgeType: String, val sourceReference: String? = null, val metadata: Map<String, String> = emptyMap())
+data class ArtifactTraceResponse(val root: ArtifactGraphNodeResponse, val nodes: List<ArtifactTraceNodeResponse>, val edges: List<ArtifactGraphEdgeResponse>, val truncated: Boolean)
+
+fun graphNodeSearchQuery(projectId: String?, iterationId: String?, nodeKind: String?, query: String?, limit: Int?): GraphNodeSearchQuery = GraphNodeSearchQuery(
+    projectId = ProjectId(requireText(projectId, "projectId")),
+    iterationId = iterationId.toOptionalId(::IterationId),
+    nodeKind = parseOptionalEnum<com.github.silbaram.plan2agent.memory.domain.ArtifactNodeKind>(nodeKind, "nodeKind"),
+    query = query?.trim()?.takeIf(String::isNotEmpty),
+    limit = limit ?: DEFAULT_SEARCH_LIMIT,
+)
+
+fun graphTraceQuery(projectId: String?, naturalKey: String?, iterationId: String?, direction: String?, maxDepth: Int?): GraphTraceQuery {
+    val resolvedMaxDepth = maxDepth ?: 10
+    require(resolvedMaxDepth <= 30) { "maxDepth must be less than or equal to 30" }
+    return GraphTraceQuery(
+        projectId = ProjectId(requireText(projectId, "projectId")),
+        naturalKey = requireText(naturalKey, "naturalKey"),
+        iterationId = iterationId.toOptionalId(::IterationId),
+        direction = parseOptionalEnum<GraphTraceDirection>(direction, "direction") ?: GraphTraceDirection.BOTH,
+        maxDepth = resolvedMaxDepth,
+    )
+}
+
+fun com.github.silbaram.plan2agent.memory.domain.ArtifactNode.toResponse(): ArtifactGraphNodeResponse = ArtifactGraphNodeResponse(id.value, projectId.value, iterationId?.value, kind.name, naturalKey, label, content, documentId?.value, taskId?.value, runId?.value, metadata)
+fun com.github.silbaram.plan2agent.memory.domain.ArtifactEdge.toResponse(): ArtifactGraphEdgeResponse = ArtifactGraphEdgeResponse(id.value, projectId.value, fromNodeId.value, toNodeId.value, type.name, sourceReference, metadata)
+fun com.github.silbaram.plan2agent.memory.domain.ArtifactTrace.toResponse(): ArtifactTraceResponse = ArtifactTraceResponse(root.toResponse(), nodes.map { ArtifactTraceNodeResponse(it.node.toResponse(), it.depth) }, edges.map { it.toResponse() }, truncated)
