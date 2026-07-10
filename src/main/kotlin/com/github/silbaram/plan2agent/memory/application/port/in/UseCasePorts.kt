@@ -7,12 +7,18 @@ import com.github.silbaram.plan2agent.memory.application.usecase.PagedResult
 import com.github.silbaram.plan2agent.memory.application.usecase.RegisterIterationCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.RegisterProjectCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveDocumentChunksCommand
+import com.github.silbaram.plan2agent.memory.application.usecase.SaveArtifactGraphSnapshotCommand
+import com.github.silbaram.plan2agent.memory.application.usecase.ArtifactGraphSnapshotResult
+import com.github.silbaram.plan2agent.memory.application.usecase.GraphNodeSearchQuery
+import com.github.silbaram.plan2agent.memory.application.usecase.GraphTraceQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveDocumentSnapshotCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveRunRecordCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveTaskGraphCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveTasksCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.VectorSearchQuery
 import com.github.silbaram.plan2agent.memory.domain.ArtifactSummary
+import com.github.silbaram.plan2agent.memory.domain.ArtifactNode
+import com.github.silbaram.plan2agent.memory.domain.ArtifactTrace
 import com.github.silbaram.plan2agent.memory.domain.DocumentChunk
 import com.github.silbaram.plan2agent.memory.domain.DocumentSnapshot
 import com.github.silbaram.plan2agent.memory.domain.HybridSearchMatch
@@ -66,4 +72,16 @@ interface VectorSearchUseCase {
 
 interface HybridSearchUseCase {
     fun hybridSearch(query: HybridSearchQuery): PagedResult<HybridSearchMatch>
+}
+
+interface SaveArtifactGraphSnapshotUseCase {
+    fun saveArtifactGraphSnapshot(command: SaveArtifactGraphSnapshotCommand): ArtifactGraphSnapshotResult
+}
+
+interface FindArtifactGraphNodesUseCase {
+    fun findGraphNodes(query: GraphNodeSearchQuery): List<ArtifactNode>
+}
+
+interface TraceArtifactGraphUseCase {
+    fun traceGraph(query: GraphTraceQuery): ArtifactTrace
 }

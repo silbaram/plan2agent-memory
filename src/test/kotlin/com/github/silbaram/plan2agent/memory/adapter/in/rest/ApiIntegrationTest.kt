@@ -51,6 +51,8 @@ class ApiIntegrationTest {
         jdbc.execute(
             """
             TRUNCATE TABLE
+                artifact_edges,
+                artifact_nodes,
                 chunk_embeddings,
                 embedding_sets,
                 document_chunks,
@@ -217,6 +219,84 @@ class ApiIntegrationTest {
         getWithoutToken("/actuator/metrics/p2a.memory.search.calls")
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.name").value("p2a.memory.search.calls"))
+    }
+
+
+    @Test
+    fun `graph snapshot endpoints replace stale edges and expose trace and node lookup`() {
+        val fixture = ApiFixture("graph-api")
+        saveSyncFixture(fixture)
+
+        val firstGraph = fixture.graphSnapshotBody(includeStaleEvidence = true)
+        val first = postJson("/api/graph/snapshots", firstGraph).expectCreatedJson()
+        assertThat(first["nodeCount"].asInt()).isEqualTo(4)
+        assertThat(first["edgeCount"].asInt()).isEqualTo(3)
+
+        val replacement = postJson("/api/graph/snapshots", fixture.graphSnapshotBody(includeStaleEvidence = false)).expectCreatedJson()
+        assertThat(replacement["nodeCount"].asInt()).isEqualTo(3)
+        assertThat(replacement["edgeCount"].asInt()).isEqualTo(2)
+        assertThat(rowCount("artifact_nodes")).isEqualTo(3)
+        assertThat(rowCount("artifact_edges")).isEqualTo(2)
+
+        val otherIterationId = uuid("graph-api-other-iteration")
+        postJson(
+            "/api/projects/${fixture.projectId}/iterations",
+            fixture.iterationBody().plus(
+                mapOf(
+                    "iterationId" to otherIterationId,
+                    "sourceIterationId" to "source-iteration-graph-api-other",
+                    "label" to "Other graph iteration",
+                ),
+            ),
+        ).andExpect(status().isCreated())
+        postJson(
+            "/api/graph/snapshots",
+            mapOf(
+                "projectId" to fixture.projectId,
+                "iterationId" to otherIterationId,
+                "nodes" to listOf(
+                    mapOf(
+                        "nodeId" to uuid("graph-api-other-task-node"),
+                        "nodeKind" to "task",
+                        "naturalKey" to "task:other",
+                        "label" to "Graph task from another iteration",
+                    ),
+                ),
+                "edges" to emptyList<Map<String, String>>(),
+            ),
+        ).andExpect(status().isCreated())
+
+        val nodes = getJson("/api/graph/nodes?projectId=${fixture.projectId}&iterationId=${fixture.iterationId}&nodeKind=task&query=Graph&limit=5")
+            .expectOkJson()
+        assertThat(nodes.single()["naturalKey"].asText()).isEqualTo("task:${fixture.sourceTaskId}")
+
+        val trace = getJson("/api/graph/trace?projectId=${fixture.projectId}&naturalKey=task:${fixture.sourceTaskId}&direction=upstream&maxDepth=2")
+            .expectOkJson()
+        assertThat(trace["root"]["naturalKey"].asText()).isEqualTo("task:${fixture.sourceTaskId}")
+        assertThat(trace["nodes"].map { it["node"]["naturalKey"].asText() })
+            .contains("task:${fixture.sourceTaskId}", "spec_section:implementation", "decision:ND-1")
+        assertThat(trace["edges"].size()).isEqualTo(2)
+        assertThat(trace["truncated"].asBoolean()).isFalse()
+
+        val shallowTrace = getJson("/api/graph/trace?projectId=${fixture.projectId}&naturalKey=task:${fixture.sourceTaskId}&direction=upstream&maxDepth=1")
+            .expectOkJson()
+        assertThat(shallowTrace["nodes"].map { it["node"]["naturalKey"].asText() })
+            .doesNotContain("decision:ND-1")
+        assertThat(shallowTrace["truncated"].asBoolean()).isTrue()
+
+        postJson(
+            "/api/graph/snapshots",
+            fixture.graphSnapshotBody(includeStaleEvidence = false).let { body ->
+                body + ("edges" to listOf(
+                    mapOf(
+                        "edgeId" to uuid("graph-api-invalid-edge"),
+                        "fromNodeId" to fixture.taskGraphNodeId,
+                        "toNodeId" to uuid("graph-api-missing-node"),
+                        "edgeType" to "DERIVED_FROM",
+                    ),
+                ))
+            },
+        ).andExpect(status().isBadRequest())
     }
 
     @Test
@@ -476,6 +556,10 @@ private data class ApiFixture(
     val embeddingHash: String = "embedding-hash-$scope"
     val embeddingModel: String = "text-embedding-api"
     val embeddingVersion: String = "v1"
+    val decisionNodeId: String = uuid("$scope-decision-node")
+    val specSectionNodeId: String = uuid("$scope-spec-section-node")
+    val taskGraphNodeId: String = uuid("$scope-task-node")
+    val staleEvidenceNodeId: String = uuid("$scope-stale-evidence-node")
 
     fun projectBody(): Map<String, Any?> =
         mapOf(
@@ -580,6 +664,75 @@ private data class ApiFixture(
             "createdAt" to NOW,
             "metadata" to mapOf("agent" to "codex"),
         )
+
+
+    fun graphSnapshotBody(includeStaleEvidence: Boolean): Map<String, Any?> {
+        val baseNodes = listOf(
+            mapOf(
+                "nodeId" to decisionNodeId,
+                "nodeKind" to "decision",
+                "naturalKey" to "decision:ND-1",
+                "label" to "Choose graph index",
+                "content" to "Use PostgreSQL recursive CTEs for graph traversal.",
+            ),
+            mapOf(
+                "nodeId" to specSectionNodeId,
+                "nodeKind" to "spec_section",
+                "naturalKey" to "spec_section:implementation",
+                "label" to "Implementation section",
+                "content" to "Graph implementation details",
+            ),
+            mapOf(
+                "nodeId" to taskGraphNodeId,
+                "nodeKind" to "task",
+                "naturalKey" to "task:$sourceTaskId",
+                "label" to "Graph task",
+                "taskId" to taskId,
+            ),
+        )
+        val nodes = if (includeStaleEvidence) {
+            baseNodes + mapOf(
+                "nodeId" to staleEvidenceNodeId,
+                "nodeKind" to "evidence",
+                "naturalKey" to "evidence:WEB-1",
+                "label" to "Stale evidence",
+            )
+        } else {
+            baseNodes
+        }
+        val baseEdges = listOf(
+            mapOf(
+                "edgeId" to uuid("$scope-task-spec-edge"),
+                "fromNodeId" to taskGraphNodeId,
+                "toNodeId" to specSectionNodeId,
+                "edgeType" to "DERIVED_FROM",
+                "sourceReference" to "implementation.tasks[0].sourceSpecRefs[0]",
+            ),
+            mapOf(
+                "edgeId" to uuid("$scope-spec-decision-edge"),
+                "fromNodeId" to specSectionNodeId,
+                "toNodeId" to decisionNodeId,
+                "edgeType" to "DERIVED_FROM",
+                "sourceReference" to "spec.decisions[0]",
+            ),
+        )
+        val edges = if (includeStaleEvidence) {
+            baseEdges + mapOf(
+                "edgeId" to uuid("$scope-stale-edge"),
+                "fromNodeId" to taskGraphNodeId,
+                "toNodeId" to staleEvidenceNodeId,
+                "edgeType" to "EVIDENCED_BY",
+            )
+        } else {
+            baseEdges
+        }
+        return mapOf(
+            "projectId" to projectId,
+            "iterationId" to iterationId,
+            "nodes" to nodes,
+            "edges" to edges,
+        )
+    }
 
     fun chunksBody(): Map<String, Any?> =
         mapOf(

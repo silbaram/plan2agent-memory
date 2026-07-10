@@ -125,3 +125,13 @@ value class Embedding(val values: List<Float>) {
         require(values.isNotEmpty()) { "Embedding must contain at least one dimension" }
     }
 }
+
+@JvmInline
+value class ArtifactNodeId(val value: String) {
+    init { require(value.isNotBlank()) { "ArtifactNodeId must not be blank" } }
+}
+
+@JvmInline
+value class ArtifactEdgeId(val value: String) {
+    init { require(value.isNotBlank()) { "ArtifactEdgeId must not be blank" } }
+}

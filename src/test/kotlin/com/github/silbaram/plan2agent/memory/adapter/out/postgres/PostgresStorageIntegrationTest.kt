@@ -2,6 +2,7 @@
 
 package com.github.silbaram.plan2agent.memory.adapter.out.postgres
 
+import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactGraphStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactQueryPort
 import com.github.silbaram.plan2agent.memory.application.port.out.ChunkEmbeddingStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.DocumentChunkStorePort
@@ -13,9 +14,19 @@ import com.github.silbaram.plan2agent.memory.application.port.out.TaskGraphStore
 import com.github.silbaram.plan2agent.memory.application.port.out.TaskStorePort
 import com.github.silbaram.plan2agent.memory.application.usecase.DocumentChunkWrite
 import com.github.silbaram.plan2agent.memory.application.usecase.FindArtifactsQuery
+import com.github.silbaram.plan2agent.memory.application.usecase.GraphTraceDirection
+import com.github.silbaram.plan2agent.memory.application.usecase.GraphNodeSearchQuery
+import com.github.silbaram.plan2agent.memory.application.usecase.GraphTraceQuery
+import com.github.silbaram.plan2agent.memory.application.usecase.SaveArtifactGraphSnapshotCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveDocumentChunksCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveDocumentSnapshotCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.WriteUseCaseService
+import com.github.silbaram.plan2agent.memory.domain.ArtifactEdge
+import com.github.silbaram.plan2agent.memory.domain.ArtifactEdgeId
+import com.github.silbaram.plan2agent.memory.domain.ArtifactEdgeType
+import com.github.silbaram.plan2agent.memory.domain.ArtifactNode
+import com.github.silbaram.plan2agent.memory.domain.ArtifactNodeId
+import com.github.silbaram.plan2agent.memory.domain.ArtifactNodeKind
 import com.github.silbaram.plan2agent.memory.domain.ArtifactRef
 import com.github.silbaram.plan2agent.memory.domain.ArtifactType
 import com.github.silbaram.plan2agent.memory.domain.CanonicalServerId
@@ -100,6 +111,9 @@ class PostgresStorageIntegrationTest {
     private lateinit var artifactQuery: ArtifactQueryPort
 
     @Autowired
+    private lateinit var artifactGraphStore: ArtifactGraphStorePort
+
+    @Autowired
     private lateinit var writeUseCase: WriteUseCaseService
 
     @BeforeEach
@@ -107,6 +121,8 @@ class PostgresStorageIntegrationTest {
         jdbc.execute(
             """
             TRUNCATE TABLE
+                artifact_edges,
+                artifact_nodes,
                 chunk_embeddings,
                 embedding_sets,
                 document_chunks,
@@ -141,6 +157,8 @@ class PostgresStorageIntegrationTest {
             "chunk_embeddings",
             "chunk_embedding_vectors_2",
             "chunk_embedding_vectors_1536",
+            "artifact_nodes",
+            "artifact_edges",
         )
         assertThat(columnNames("documents")).contains(
             "document_id",
@@ -169,7 +187,109 @@ class PostgresStorageIntegrationTest {
             "idx_chunk_embeddings_embedding_set_id",
             "idx_chunk_embedding_vectors_2_hnsw_cosine",
             "idx_chunk_embedding_vectors_1536_hnsw_cosine",
+            "uq_artifact_nodes_scope_natural_key",
+            "uq_artifact_edges_nodes_type",
+            "idx_artifact_edges_project_from",
+            "idx_artifact_edges_project_to",
         )
+    }
+
+    @Test
+    fun `artifact graph snapshots replace stale scope data and validate endpoints`() {
+        val fixture = saveProjectAndIteration("graph-snapshot")
+        val decision = graphNode("graph-snapshot-decision", fixture.project.id, fixture.iteration.id, "decision:ND-1", ArtifactNodeKind.DECISION)
+        val task = graphNode("graph-snapshot-task", fixture.project.id, fixture.iteration.id, "task:T-1", ArtifactNodeKind.TASK)
+        val staleEvidence = graphNode("graph-snapshot-stale", fixture.project.id, fixture.iteration.id, "evidence:WEB-1", ArtifactNodeKind.EVIDENCE)
+        val firstEdge = graphEdge("graph-snapshot-edge-1", fixture.project.id, task.id, decision.id, ArtifactEdgeType.DERIVED_FROM)
+        val staleEdge = graphEdge("graph-snapshot-edge-stale", fixture.project.id, task.id, staleEvidence.id, ArtifactEdgeType.EVIDENCED_BY)
+
+        val first = writeUseCase.saveArtifactGraphSnapshot(
+            SaveArtifactGraphSnapshotCommand(
+                projectId = fixture.project.id,
+                iterationId = fixture.iteration.id,
+                nodes = listOf(decision, task, staleEvidence),
+                edges = listOf(firstEdge, staleEdge),
+            ),
+        )
+        val replacement = writeUseCase.saveArtifactGraphSnapshot(
+            SaveArtifactGraphSnapshotCommand(
+                projectId = fixture.project.id,
+                iterationId = fixture.iteration.id,
+                nodes = listOf(decision, task),
+                edges = listOf(firstEdge),
+            ),
+        )
+
+        assertThat(first.nodeCount).isEqualTo(3)
+        assertThat(replacement.nodeCount).isEqualTo(2)
+        val otherIteration = iterationStore.save(iteration("graph-snapshot-other", fixture.project.id))
+        val otherTask = graphNode("graph-snapshot-other-task", fixture.project.id, otherIteration.id, "task:T-other", ArtifactNodeKind.TASK)
+        writeUseCase.saveArtifactGraphSnapshot(
+            SaveArtifactGraphSnapshotCommand(
+                projectId = fixture.project.id,
+                iterationId = otherIteration.id,
+                nodes = listOf(otherTask),
+                edges = emptyList(),
+            ),
+        )
+
+        assertThat(rowCount("artifact_nodes")).isEqualTo(3)
+        assertThat(rowCount("artifact_edges")).isEqualTo(1)
+        assertThat(artifactGraphStore.findNodes(GraphNodeSearchQuery(projectId = fixture.project.id, iterationId = fixture.iteration.id)).map { it.naturalKey })
+            .containsExactly("decision:ND-1", "task:T-1")
+        assertThat(artifactGraphStore.findNodes(GraphNodeSearchQuery(projectId = fixture.project.id)).map { it.naturalKey })
+            .contains("decision:ND-1", "task:T-1", "task:T-other")
+
+        assertThatThrownBy {
+            writeUseCase.saveArtifactGraphSnapshot(
+                SaveArtifactGraphSnapshotCommand(
+                    projectId = fixture.project.id,
+                    iterationId = fixture.iteration.id,
+                    nodes = listOf(task),
+                    edges = listOf(firstEdge),
+                ),
+            )
+        }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessageContaining("toNodeId")
+    }
+
+    @Test
+    fun `artifact graph trace respects direction depth cycle and truncation`() {
+        val fixture = saveProjectAndIteration("graph-trace")
+        val run = graphNode("graph-trace-run", fixture.project.id, fixture.iteration.id, "run:R-1", ArtifactNodeKind.RUN)
+        val task = graphNode("graph-trace-task", fixture.project.id, fixture.iteration.id, "task:T-1", ArtifactNodeKind.TASK)
+        val spec = graphNode("graph-trace-spec", fixture.project.id, fixture.iteration.id, "spec_section:impl", ArtifactNodeKind.SPEC_SECTION)
+        val decision = graphNode("graph-trace-decision", fixture.project.id, fixture.iteration.id, "decision:ND-1", ArtifactNodeKind.DECISION)
+        val cycle = graphNode("graph-trace-cycle", fixture.project.id, fixture.iteration.id, "assumption:A-1", ArtifactNodeKind.ASSUMPTION)
+        val edges = listOf(
+            graphEdge("graph-trace-run-task", fixture.project.id, run.id, task.id, ArtifactEdgeType.EXECUTED_FOR),
+            graphEdge("graph-trace-task-spec", fixture.project.id, task.id, spec.id, ArtifactEdgeType.DERIVED_FROM),
+            graphEdge("graph-trace-spec-decision", fixture.project.id, spec.id, decision.id, ArtifactEdgeType.DERIVED_FROM),
+            graphEdge("graph-trace-decision-cycle", fixture.project.id, decision.id, cycle.id, ArtifactEdgeType.DEPENDS_ON),
+            graphEdge("graph-trace-cycle-task", fixture.project.id, cycle.id, task.id, ArtifactEdgeType.BLOCKS),
+        )
+        writeUseCase.saveArtifactGraphSnapshot(
+            SaveArtifactGraphSnapshotCommand(
+                projectId = fixture.project.id,
+                iterationId = fixture.iteration.id,
+                nodes = listOf(run, task, spec, decision, cycle),
+                edges = edges,
+            ),
+        )
+
+        val upstream = artifactGraphStore.trace(GraphTraceQuery(fixture.project.id, "task:T-1", fixture.iteration.id, GraphTraceDirection.UPSTREAM, maxDepth = 2))
+        val shallowUpstream = artifactGraphStore.trace(GraphTraceQuery(fixture.project.id, "task:T-1", fixture.iteration.id, GraphTraceDirection.UPSTREAM, maxDepth = 1))
+        val projectWideUpstream = artifactGraphStore.trace(GraphTraceQuery(fixture.project.id, "task:T-1", direction = GraphTraceDirection.UPSTREAM, maxDepth = 2))
+        val downstream = artifactGraphStore.trace(GraphTraceQuery(fixture.project.id, "spec_section:impl", fixture.iteration.id, GraphTraceDirection.DOWNSTREAM, maxDepth = 2))
+
+        assertThat(upstream.nodes.map { it.node.naturalKey }).contains("task:T-1", "spec_section:impl", "decision:ND-1")
+        assertThat(upstream.nodes.map { it.node.naturalKey }).doesNotContain("assumption:A-1")
+        assertThat(upstream.truncated).isTrue()
+        assertThat(shallowUpstream.nodes.map { it.node.naturalKey }).doesNotContain("decision:ND-1")
+        assertThat(shallowUpstream.truncated).isTrue()
+        assertThat(projectWideUpstream.root.naturalKey).isEqualTo("task:T-1")
+        assertThat(downstream.nodes.map { it.node.naturalKey }).contains("spec_section:impl", "task:T-1", "run:R-1")
     }
 
     @Test
@@ -698,3 +818,32 @@ private fun stableUuid(seed: String): String =
     UUID.nameUUIDFromBytes(seed.toByteArray(StandardCharsets.UTF_8)).toString()
 
 private val now: Instant = Instant.parse("2026-06-29T00:00:00Z")
+
+private fun graphNode(
+    seed: String,
+    projectId: ProjectId,
+    iterationId: IterationId,
+    naturalKey: String,
+    kind: ArtifactNodeKind,
+): ArtifactNode = ArtifactNode(
+    id = ArtifactNodeId(stableUuid(seed)),
+    projectId = projectId,
+    iterationId = iterationId,
+    kind = kind,
+    naturalKey = naturalKey,
+    label = naturalKey,
+)
+
+private fun graphEdge(
+    seed: String,
+    projectId: ProjectId,
+    fromNodeId: ArtifactNodeId,
+    toNodeId: ArtifactNodeId,
+    type: ArtifactEdgeType,
+): ArtifactEdge = ArtifactEdge(
+    id = ArtifactEdgeId(stableUuid(seed)),
+    projectId = projectId,
+    fromNodeId = fromNodeId,
+    toNodeId = toNodeId,
+    type = type,
+)

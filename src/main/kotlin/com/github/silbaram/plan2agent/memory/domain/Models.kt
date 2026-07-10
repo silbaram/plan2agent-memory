@@ -332,3 +332,64 @@ data class HybridSearchMatch(
         require(chunkIndex == null || chunkIndex >= 0) { "HybridSearchMatch chunkIndex must not be negative" }
     }
 }
+
+enum class ArtifactNodeKind {
+    DECISION,
+    ASSUMPTION,
+    CLARIFYING_QUESTION,
+    EVIDENCE,
+    SPEC_SECTION,
+    DOCUMENT,
+    TASK,
+    RUN,
+    PROPOSAL,
+}
+
+enum class ArtifactEdgeType {
+    DERIVED_FROM,
+    DEPENDS_ON,
+    DISPOSES,
+    EVIDENCED_BY,
+    EXECUTED_FOR,
+    BLOCKS,
+}
+
+data class ArtifactNode(
+    val id: ArtifactNodeId,
+    val projectId: ProjectId,
+    val iterationId: IterationId?,
+    val kind: ArtifactNodeKind,
+    val naturalKey: String,
+    val label: String,
+    val content: String? = null,
+    val documentId: DocumentId? = null,
+    val taskId: TaskId? = null,
+    val runId: RunId? = null,
+    val metadata: Map<String, String> = emptyMap(),
+) {
+    init {
+        require(naturalKey.isNotBlank()) { "ArtifactNode naturalKey must not be blank" }
+        require(label.isNotBlank()) { "ArtifactNode label must not be blank" }
+    }
+}
+
+data class ArtifactEdge(
+    val id: ArtifactEdgeId,
+    val projectId: ProjectId,
+    val fromNodeId: ArtifactNodeId,
+    val toNodeId: ArtifactNodeId,
+    val type: ArtifactEdgeType,
+    val sourceReference: String? = null,
+    val metadata: Map<String, String> = emptyMap(),
+) {
+    init { require(sourceReference == null || sourceReference.isNotBlank()) { "ArtifactEdge sourceReference must not be blank" } }
+}
+
+data class ArtifactTraceNode(val node: ArtifactNode, val depth: Int)
+
+data class ArtifactTrace(
+    val root: ArtifactNode,
+    val nodes: List<ArtifactTraceNode>,
+    val edges: List<ArtifactEdge>,
+    val truncated: Boolean,
+)

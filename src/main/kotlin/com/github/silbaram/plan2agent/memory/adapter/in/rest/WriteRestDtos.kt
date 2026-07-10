@@ -6,6 +6,8 @@ import com.github.silbaram.plan2agent.memory.application.usecase.RegisterProject
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveDocumentChunksCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveDocumentSnapshotCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveRunRecordCommand
+import com.github.silbaram.plan2agent.memory.application.usecase.SaveArtifactGraphSnapshotCommand
+import com.github.silbaram.plan2agent.memory.application.usecase.ArtifactGraphSnapshotResult
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveTaskGraphCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveTasksCommand
 import com.github.silbaram.plan2agent.memory.domain.ArtifactRef
@@ -702,3 +704,65 @@ private inline fun <reified T : Enum<T>> parseRequiredEnum(value: String?, field
     } catch (_: IllegalArgumentException) {
         throw IllegalArgumentException("$field has invalid value")
     }
+
+data class ArtifactGraphSnapshotWriteRequest(
+    val projectId: String? = null,
+    val iterationId: String? = null,
+    val nodes: List<ArtifactNodeWriteRequest> = emptyList(),
+    val edges: List<ArtifactEdgeWriteRequest> = emptyList(),
+)
+
+data class ArtifactNodeWriteRequest(
+    val nodeId: String? = null,
+    val nodeKind: String? = null,
+    val naturalKey: String? = null,
+    val label: String? = null,
+    val content: String? = null,
+    val documentId: String? = null,
+    val taskId: String? = null,
+    val runId: String? = null,
+    val metadata: Map<String, String> = emptyMap(),
+)
+
+data class ArtifactEdgeWriteRequest(
+    val edgeId: String? = null,
+    val fromNodeId: String? = null,
+    val toNodeId: String? = null,
+    val edgeType: String? = null,
+    val sourceReference: String? = null,
+    val metadata: Map<String, String> = emptyMap(),
+)
+
+data class ArtifactGraphSnapshotResponse(val nodeCount: Int, val edgeCount: Int)
+
+fun ArtifactGraphSnapshotWriteRequest.toCommand(): SaveArtifactGraphSnapshotCommand {
+    val pid = ProjectId(requireText(projectId, "projectId"))
+    val iid = iterationId?.trim()?.takeIf(String::isNotEmpty)?.let(::IterationId)
+    return SaveArtifactGraphSnapshotCommand(pid, iid, nodes.map { it.toDomain(pid, iid) }, edges.map { it.toDomain(pid) })
+}
+
+private fun ArtifactNodeWriteRequest.toDomain(projectId: ProjectId, iterationId: IterationId?) = com.github.silbaram.plan2agent.memory.domain.ArtifactNode(
+    id = com.github.silbaram.plan2agent.memory.domain.ArtifactNodeId(requireText(nodeId, "nodeId")),
+    projectId = projectId,
+    iterationId = iterationId,
+    kind = parseRequiredEnum(nodeKind, "nodeKind"),
+    naturalKey = requireText(naturalKey, "naturalKey"),
+    label = requireText(label, "label"),
+    content = content,
+    documentId = documentId?.trim()?.takeIf(String::isNotEmpty)?.let(::DocumentId),
+    taskId = taskId?.trim()?.takeIf(String::isNotEmpty)?.let(::TaskId),
+    runId = runId?.trim()?.takeIf(String::isNotEmpty)?.let(::RunId),
+    metadata = metadata,
+)
+
+private fun ArtifactEdgeWriteRequest.toDomain(projectId: ProjectId) = com.github.silbaram.plan2agent.memory.domain.ArtifactEdge(
+    id = com.github.silbaram.plan2agent.memory.domain.ArtifactEdgeId(requireText(edgeId, "edgeId")),
+    projectId = projectId,
+    fromNodeId = com.github.silbaram.plan2agent.memory.domain.ArtifactNodeId(requireText(fromNodeId, "fromNodeId")),
+    toNodeId = com.github.silbaram.plan2agent.memory.domain.ArtifactNodeId(requireText(toNodeId, "toNodeId")),
+    type = parseRequiredEnum(edgeType, "edgeType"),
+    sourceReference = sourceReference?.trim()?.takeIf(String::isNotEmpty),
+    metadata = metadata,
+)
+
+fun ArtifactGraphSnapshotResult.toResponse(): ArtifactGraphSnapshotResponse = ArtifactGraphSnapshotResponse(nodeCount, edgeCount)

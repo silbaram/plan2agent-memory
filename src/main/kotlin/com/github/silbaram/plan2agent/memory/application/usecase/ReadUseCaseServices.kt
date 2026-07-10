@@ -1,13 +1,18 @@
 package com.github.silbaram.plan2agent.memory.application.usecase
 
 import com.github.silbaram.plan2agent.memory.application.port.`in`.FindArtifactsUseCase
+import com.github.silbaram.plan2agent.memory.application.port.`in`.FindArtifactGraphNodesUseCase
+import com.github.silbaram.plan2agent.memory.application.port.`in`.TraceArtifactGraphUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.HybridSearchUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.KeywordSearchUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.VectorSearchUseCase
 import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactQueryPort
+import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactGraphStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.KeywordSearchPort
 import com.github.silbaram.plan2agent.memory.application.port.out.VectorSearchPort
 import com.github.silbaram.plan2agent.memory.domain.ArtifactSummary
+import com.github.silbaram.plan2agent.memory.domain.ArtifactNode
+import com.github.silbaram.plan2agent.memory.domain.ArtifactTrace
 import com.github.silbaram.plan2agent.memory.domain.HybridSearchArm
 import com.github.silbaram.plan2agent.memory.domain.HybridSearchMatch
 import com.github.silbaram.plan2agent.memory.domain.KeywordSearchMatch
@@ -22,10 +27,23 @@ class ReadUseCaseService(
     private val artifactQueryPort: ArtifactQueryPort,
     private val keywordSearchPort: KeywordSearchPort,
     private val vectorSearchPort: VectorSearchPort,
+    private val artifactGraphStore: ArtifactGraphStorePort,
 ) : FindArtifactsUseCase,
     KeywordSearchUseCase,
     VectorSearchUseCase,
-    HybridSearchUseCase {
+    HybridSearchUseCase,
+    FindArtifactGraphNodesUseCase,
+    TraceArtifactGraphUseCase {
+
+
+    @Transactional(readOnly = true)
+    override fun findGraphNodes(query: GraphNodeSearchQuery): List<ArtifactNode> {
+        validateLimit(query.limit, "GraphNodeSearchQuery")
+        return artifactGraphStore.findNodes(query)
+    }
+
+    @Transactional(readOnly = true)
+    override fun traceGraph(query: GraphTraceQuery): ArtifactTrace = artifactGraphStore.trace(query)
 
     @Transactional(readOnly = true)
     override fun findArtifacts(query: FindArtifactsQuery): PagedResult<ArtifactSummary> {
