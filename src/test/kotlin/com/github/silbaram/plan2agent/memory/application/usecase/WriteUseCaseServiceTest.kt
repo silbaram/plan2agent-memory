@@ -1,5 +1,6 @@
 package com.github.silbaram.plan2agent.memory.application.usecase
 
+import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactGraphStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.ChunkEmbeddingStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.DocumentChunkStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.DocumentSnapshotStorePort
@@ -9,7 +10,14 @@ import com.github.silbaram.plan2agent.memory.application.port.out.ProjectStorePo
 import com.github.silbaram.plan2agent.memory.application.port.out.RunRecordStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.TaskGraphStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.TaskStorePort
+import com.github.silbaram.plan2agent.memory.domain.ArtifactEdge
+import com.github.silbaram.plan2agent.memory.domain.ArtifactEdgeId
+import com.github.silbaram.plan2agent.memory.domain.ArtifactEdgeType
+import com.github.silbaram.plan2agent.memory.domain.ArtifactNode
+import com.github.silbaram.plan2agent.memory.domain.ArtifactNodeId
+import com.github.silbaram.plan2agent.memory.domain.ArtifactNodeKind
 import com.github.silbaram.plan2agent.memory.domain.ArtifactRef
+import com.github.silbaram.plan2agent.memory.domain.ArtifactTrace
 import com.github.silbaram.plan2agent.memory.domain.ArtifactType
 import com.github.silbaram.plan2agent.memory.domain.CanonicalServerId
 import com.github.silbaram.plan2agent.memory.domain.ChunkEmbedding
@@ -226,6 +234,62 @@ class WriteUseCaseServiceTest {
         }
             .isInstanceOf(IllegalArgumentException::class.java)
             .hasMessageContaining("duplicate sourceTaskIds")
+    }
+
+
+    @Test
+    fun `artifact graph snapshot validates duplicates and edge endpoints before replacing scope`() {
+        val decision = artifactNode(51, ids.projectId, ids.iterationId, "decision:ND-1", ArtifactNodeKind.DECISION)
+        val task = artifactNode(52, ids.projectId, ids.iterationId, "task:T-1", ArtifactNodeKind.TASK)
+        val edge = ArtifactEdge(
+            id = ArtifactEdgeId(uuid(53)),
+            projectId = ids.projectId,
+            fromNodeId = task.id,
+            toNodeId = decision.id,
+            type = ArtifactEdgeType.DERIVED_FROM,
+        )
+
+        val result = service.saveArtifactGraphSnapshot(
+            SaveArtifactGraphSnapshotCommand(
+                projectId = ids.projectId,
+                iterationId = ids.iterationId,
+                nodes = listOf(decision, task),
+                edges = listOf(edge),
+            ),
+        )
+
+        assertThat(result.nodeCount).isEqualTo(2)
+        assertThat(result.edgeCount).isEqualTo(1)
+        assertThat(stores.artifactGraph.receivedProjectId).isEqualTo(ids.projectId)
+        assertThat(stores.artifactGraph.receivedIterationId).isEqualTo(ids.iterationId)
+        assertThat(stores.artifactGraph.receivedEdges).containsExactly(edge)
+
+        assertThatThrownBy {
+            service.saveArtifactGraphSnapshot(
+                SaveArtifactGraphSnapshotCommand(
+                    projectId = ids.projectId,
+                    iterationId = ids.iterationId,
+                    nodes = listOf(decision, decision.copy(id = ArtifactNodeId(uuid(54)))),
+                    edges = emptyList(),
+                ),
+            )
+        }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessageContaining("duplicate naturalKey")
+
+        assertThatThrownBy {
+            service.saveArtifactGraphSnapshot(
+                SaveArtifactGraphSnapshotCommand(
+                    projectId = ids.projectId,
+                    iterationId = ids.iterationId,
+                    nodes = listOf(task),
+                    edges = listOf(edge),
+                ),
+            )
+        }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessageContaining("toNodeId")
+            .hasMessageContaining("not present in snapshot nodes")
     }
 
     @Test
@@ -474,6 +538,7 @@ private class TestStores(ids: TestIds) {
     val documentChunks = FakeDocumentChunkStore(ids.existingChunk)
     val embeddingSets = FakeEmbeddingSetStore()
     val chunkEmbeddings = FakeChunkEmbeddingStore()
+    val artifactGraph = FakeArtifactGraphStore()
 
     fun service(): WriteUseCaseService =
         WriteUseCaseService(
@@ -486,7 +551,31 @@ private class TestStores(ids: TestIds) {
             documentChunkStore = documentChunks,
             embeddingSetStore = embeddingSets,
             chunkEmbeddingStore = chunkEmbeddings,
+            artifactGraphStore = artifactGraph,
         )
+}
+
+private class FakeArtifactGraphStore : ArtifactGraphStorePort {
+    var receivedProjectId: ProjectId? = null
+    var receivedIterationId: IterationId? = null
+    var receivedNodes: List<ArtifactNode> = emptyList()
+    var receivedEdges: List<ArtifactEdge> = emptyList()
+
+    override fun replaceSnapshot(
+        projectId: ProjectId,
+        iterationId: IterationId?,
+        nodes: List<ArtifactNode>,
+        edges: List<ArtifactEdge>,
+    ): ArtifactGraphSnapshotResult {
+        receivedProjectId = projectId
+        receivedIterationId = iterationId
+        receivedNodes = nodes
+        receivedEdges = edges
+        return ArtifactGraphSnapshotResult(nodes.size, edges.size)
+    }
+
+    override fun findNodes(query: GraphNodeSearchQuery): List<ArtifactNode> = emptyList()
+    override fun trace(query: GraphTraceQuery): ArtifactTrace = error("not used")
 }
 
 private class FakeProjectStore(private val project: Project) : ProjectStorePort {
@@ -676,3 +765,18 @@ private val now: Instant = Instant.parse("2026-06-29T00:00:00Z")
 
 private fun uuid(index: Int): String =
     "00000000-0000-0000-0000-${index.toString().padStart(12, '0')}"
+
+private fun artifactNode(
+    index: Int,
+    projectId: ProjectId,
+    iterationId: IterationId,
+    naturalKey: String,
+    kind: ArtifactNodeKind,
+): ArtifactNode = ArtifactNode(
+    id = ArtifactNodeId(uuid(index)),
+    projectId = projectId,
+    iterationId = iterationId,
+    kind = kind,
+    naturalKey = naturalKey,
+    label = naturalKey,
+)

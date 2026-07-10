@@ -3,6 +3,7 @@ package com.github.silbaram.plan2agent.memory.adapter.`in`.rest
 import com.github.silbaram.plan2agent.memory.application.port.`in`.RegisterIterationUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.RegisterProjectUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.SaveDocumentChunksUseCase
+import com.github.silbaram.plan2agent.memory.application.port.`in`.SaveArtifactGraphSnapshotUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.SaveDocumentSnapshotUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.SaveRunRecordUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.SaveTaskGraphUseCase
@@ -25,6 +26,7 @@ class WriteRestController(
     private val saveTasksUseCase: SaveTasksUseCase,
     private val saveRunRecordUseCase: SaveRunRecordUseCase,
     private val saveDocumentChunksUseCase: SaveDocumentChunksUseCase,
+    private val saveArtifactGraphSnapshotUseCase: SaveArtifactGraphSnapshotUseCase,
 ) {
     @PostMapping("/projects")
     @ResponseStatus(HttpStatus.CREATED)
@@ -58,6 +60,11 @@ class WriteRestController(
     @ResponseStatus(HttpStatus.CREATED)
     fun saveRun(@RequestBody request: RunRecordWriteRequest): RunRecordResponse =
         saveRunRecordUseCase.saveRunRecord(request.toCommand()).toResponse()
+
+    @PostMapping("/graph/snapshots")
+    @ResponseStatus(HttpStatus.CREATED)
+    fun saveArtifactGraphSnapshot(@RequestBody request: ArtifactGraphSnapshotWriteRequest): ArtifactGraphSnapshotResponse =
+        saveArtifactGraphSnapshotUseCase.saveArtifactGraphSnapshot(request.toCommand()).toResponse()
 
     @PostMapping("/document-chunks/bulk")
     @ResponseStatus(HttpStatus.CREATED)

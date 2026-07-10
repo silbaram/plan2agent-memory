@@ -253,3 +253,41 @@ data class HybridSearchQuery(
 
 const val DEFAULT_RRF_K = 60
 const val DEFAULT_HYBRID_CANDIDATE_LIMIT = 80
+
+data class SaveArtifactGraphSnapshotCommand(
+    val projectId: ProjectId,
+    val iterationId: IterationId?,
+    val nodes: List<com.github.silbaram.plan2agent.memory.domain.ArtifactNode>,
+    val edges: List<com.github.silbaram.plan2agent.memory.domain.ArtifactEdge>,
+)
+
+data class ArtifactGraphSnapshotResult(val nodeCount: Int, val edgeCount: Int)
+
+enum class GraphTraceDirection { UPSTREAM, DOWNSTREAM, BOTH }
+
+data class GraphTraceQuery(
+    val projectId: ProjectId,
+    val naturalKey: String,
+    val iterationId: IterationId? = null,
+    val direction: GraphTraceDirection = GraphTraceDirection.BOTH,
+    val maxDepth: Int = 10,
+) {
+    init {
+        require(naturalKey.isNotBlank()) { "GraphTraceQuery naturalKey must not be blank" }
+        require(maxDepth in 1..30) { "GraphTraceQuery maxDepth must be between 1 and 30" }
+    }
+}
+
+data class GraphNodeSearchQuery(
+    val projectId: ProjectId? = null,
+    val iterationId: IterationId? = null,
+    val nodeKind: com.github.silbaram.plan2agent.memory.domain.ArtifactNodeKind? = null,
+    val query: String? = null,
+    val limit: Int = 20,
+) {
+    init {
+        require(query == null || query.isNotBlank()) { "GraphNodeSearchQuery query must not be blank" }
+        require(projectId != null || iterationId == null) { "GraphNodeSearchQuery iterationId requires projectId" }
+        require(limit > 0) { "GraphNodeSearchQuery limit must be positive" }
+    }
+}

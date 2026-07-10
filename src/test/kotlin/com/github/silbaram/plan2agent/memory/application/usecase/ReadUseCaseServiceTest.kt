@@ -1,9 +1,16 @@
 package com.github.silbaram.plan2agent.memory.application.usecase
 
+import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactGraphStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactQueryPort
 import com.github.silbaram.plan2agent.memory.application.port.out.KeywordSearchPort
 import com.github.silbaram.plan2agent.memory.application.port.out.VectorSearchPort
+import com.github.silbaram.plan2agent.memory.domain.ArtifactEdge
+import com.github.silbaram.plan2agent.memory.domain.ArtifactNode
+import com.github.silbaram.plan2agent.memory.domain.ArtifactNodeId
+import com.github.silbaram.plan2agent.memory.domain.ArtifactNodeKind
 import com.github.silbaram.plan2agent.memory.domain.ArtifactSummary
+import com.github.silbaram.plan2agent.memory.domain.ArtifactTrace
+import com.github.silbaram.plan2agent.memory.domain.ArtifactTraceNode
 import com.github.silbaram.plan2agent.memory.domain.ArtifactType
 import com.github.silbaram.plan2agent.memory.domain.CanonicalServerId
 import com.github.silbaram.plan2agent.memory.domain.ContentHash
@@ -32,7 +39,39 @@ class ReadUseCaseServiceTest {
     private val artifactQuery = FakeArtifactQueryPort()
     private val keywordSearch = FakeKeywordSearchPort()
     private val vectorSearch = FakeVectorSearchPort()
-    private val service = ReadUseCaseService(artifactQuery, keywordSearch, vectorSearch)
+    private val artifactGraph = FakeReadArtifactGraphStore()
+    private val service = ReadUseCaseService(artifactQuery, keywordSearch, vectorSearch, artifactGraph)
+
+
+    @Test
+    fun `graph node search and trace delegate through graph store`() {
+        val nodeQuery = GraphNodeSearchQuery(
+            projectId = ReadTestIds.projectId,
+            iterationId = ReadTestIds.iterationId,
+            nodeKind = ArtifactNodeKind.TASK,
+            query = "task",
+            limit = 5,
+        )
+
+        val nodes = service.findGraphNodes(nodeQuery)
+
+        assertThat(artifactGraph.receivedNodeQuery).isEqualTo(nodeQuery)
+        assertThat(nodes).containsExactly(artifactGraph.node)
+
+        val traceQuery = GraphTraceQuery(
+            projectId = ReadTestIds.projectId,
+            iterationId = ReadTestIds.iterationId,
+            naturalKey = artifactGraph.node.naturalKey,
+            direction = GraphTraceDirection.UPSTREAM,
+            maxDepth = 3,
+        )
+
+        val trace = service.traceGraph(traceQuery)
+
+        assertThat(artifactGraph.receivedTraceQuery).isEqualTo(traceQuery)
+        assertThat(trace.root).isEqualTo(artifactGraph.node)
+        assertThat(trace.nodes.single().depth).isZero()
+    }
 
     @Test
     fun `artifact lookup forwards canonical source and relation filters through query port`() {
@@ -356,6 +395,36 @@ private fun keywordMatch(
         score = score,
         matchReason = "chunk.content",
     )
+
+private class FakeReadArtifactGraphStore : ArtifactGraphStorePort {
+    val node = ArtifactNode(
+        id = ArtifactNodeId(uuid(20)),
+        projectId = ReadTestIds.projectId,
+        iterationId = ReadTestIds.iterationId,
+        kind = ArtifactNodeKind.TASK,
+        naturalKey = "task:T-1",
+        label = "Task T-1",
+    )
+    var receivedNodeQuery: GraphNodeSearchQuery? = null
+    var receivedTraceQuery: GraphTraceQuery? = null
+
+    override fun replaceSnapshot(
+        projectId: ProjectId,
+        iterationId: IterationId?,
+        nodes: List<ArtifactNode>,
+        edges: List<ArtifactEdge>,
+    ): ArtifactGraphSnapshotResult = error("not used")
+
+    override fun findNodes(query: GraphNodeSearchQuery): List<ArtifactNode> {
+        receivedNodeQuery = query
+        return listOf(node)
+    }
+
+    override fun trace(query: GraphTraceQuery): ArtifactTrace {
+        receivedTraceQuery = query
+        return ArtifactTrace(node, listOf(ArtifactTraceNode(node, 0)), emptyList(), truncated = false)
+    }
+}
 
 private class FakeArtifactQueryPort : ArtifactQueryPort {
     var received: FindArtifactsQuery? = null

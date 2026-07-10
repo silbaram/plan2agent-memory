@@ -1,15 +1,21 @@
 package com.github.silbaram.plan2agent.memory.adapter.`in`.rest
 
 import com.github.silbaram.plan2agent.memory.application.port.`in`.FindArtifactsUseCase
+import com.github.silbaram.plan2agent.memory.application.port.`in`.FindArtifactGraphNodesUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.HybridSearchUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.KeywordSearchUseCase
+import com.github.silbaram.plan2agent.memory.application.port.`in`.TraceArtifactGraphUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.VectorSearchUseCase
 import com.github.silbaram.plan2agent.memory.application.usecase.FindArtifactsQuery
+import com.github.silbaram.plan2agent.memory.application.usecase.GraphNodeSearchQuery
+import com.github.silbaram.plan2agent.memory.application.usecase.GraphTraceQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.HybridSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.KeywordSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.PagedResult
 import com.github.silbaram.plan2agent.memory.application.usecase.VectorSearchQuery
 import com.github.silbaram.plan2agent.memory.domain.ArtifactSummary
+import com.github.silbaram.plan2agent.memory.domain.ArtifactNode
+import com.github.silbaram.plan2agent.memory.domain.ArtifactTrace
 import com.github.silbaram.plan2agent.memory.domain.ArtifactType
 import com.github.silbaram.plan2agent.memory.domain.CanonicalServerId
 import com.github.silbaram.plan2agent.memory.domain.ContentHash
@@ -42,7 +48,16 @@ class QueryRestControllerTest {
     private val keywordSearch = FakeKeywordSearchUseCase()
     private val vectorSearch = FakeVectorSearchUseCase()
     private val hybridSearch = FakeHybridSearchUseCase()
-    private val controller = QueryRestController(findArtifacts, keywordSearch, vectorSearch, hybridSearch)
+    private val findGraphNodes = FakeFindArtifactGraphNodesUseCase()
+    private val traceGraph = FakeTraceArtifactGraphUseCase()
+    private val controller = QueryRestController(
+        findArtifactsUseCase = findArtifacts,
+        keywordSearchUseCase = keywordSearch,
+        vectorSearchUseCase = vectorSearch,
+        hybridSearchUseCase = hybridSearch,
+        findArtifactGraphNodesUseCase = findGraphNodes,
+        traceArtifactGraphUseCase = traceGraph,
+    )
 
     @Test
     fun `artifact lookup maps query params to use case and returns canonical source metadata`() {
@@ -443,6 +458,14 @@ private class FakeHybridSearchUseCase : HybridSearchUseCase {
         received = query
         return result
     }
+}
+
+private class FakeFindArtifactGraphNodesUseCase : FindArtifactGraphNodesUseCase {
+    override fun findGraphNodes(query: GraphNodeSearchQuery): List<ArtifactNode> = emptyList()
+}
+
+private class FakeTraceArtifactGraphUseCase : TraceArtifactGraphUseCase {
+    override fun traceGraph(query: GraphTraceQuery): ArtifactTrace = error("not used")
 }
 
 private data object RestTestIds {

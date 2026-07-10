@@ -3,10 +3,12 @@ package com.github.silbaram.plan2agent.memory.application.usecase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.RegisterIterationUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.RegisterProjectUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.SaveDocumentChunksUseCase
+import com.github.silbaram.plan2agent.memory.application.port.`in`.SaveArtifactGraphSnapshotUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.SaveDocumentSnapshotUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.SaveRunRecordUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.SaveTaskGraphUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.SaveTasksUseCase
+import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactGraphStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.ChunkEmbeddingStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.DocumentChunkStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.DocumentSnapshotStorePort
@@ -48,13 +50,15 @@ class WriteUseCaseService(
     private val documentChunkStore: DocumentChunkStorePort,
     private val embeddingSetStore: EmbeddingSetStorePort,
     private val chunkEmbeddingStore: ChunkEmbeddingStorePort,
+    private val artifactGraphStore: ArtifactGraphStorePort,
 ) : RegisterProjectUseCase,
     RegisterIterationUseCase,
     SaveDocumentSnapshotUseCase,
     SaveTaskGraphUseCase,
     SaveTasksUseCase,
     SaveRunRecordUseCase,
-    SaveDocumentChunksUseCase {
+    SaveDocumentChunksUseCase,
+    SaveArtifactGraphSnapshotUseCase {
 
     @Transactional
     override fun registerProject(command: RegisterProjectCommand): Project =
@@ -208,6 +212,39 @@ class WriteUseCaseService(
         )
     }
 
+
+    @Transactional
+    override fun saveArtifactGraphSnapshot(command: SaveArtifactGraphSnapshotCommand): ArtifactGraphSnapshotResult {
+        requireProjectExists(command.projectId)
+        command.iterationId?.let { requireIterationBelongsToProject(it, command.projectId) }
+        require(command.nodes.map { it.naturalKey }.toSet().size == command.nodes.size) {
+            "Artifact graph snapshot contains duplicate naturalKey values"
+        }
+        require(command.nodes.map { it.id }.toSet().size == command.nodes.size) {
+            "Artifact graph snapshot contains duplicate node ids"
+        }
+        require(command.edges.map { Triple(it.fromNodeId, it.toNodeId, it.type) }.toSet().size == command.edges.size) {
+            "Artifact graph snapshot contains duplicate edges"
+        }
+        command.nodes.forEach { node ->
+            require(node.projectId == command.projectId) { "Artifact node ${node.id.value} projectId must match snapshot" }
+            require(node.iterationId == command.iterationId) { "Artifact node ${node.id.value} iterationId must match snapshot" }
+            validateArtifactNodeRelations(node)
+        }
+        val payloadNodeIds = command.nodes.map { it.id }.toSet()
+        command.edges.forEach { edge ->
+            require(edge.projectId == command.projectId) { "Artifact edge ${edge.id.value} projectId must match snapshot" }
+            require(edge.fromNodeId != edge.toNodeId) { "Artifact edge ${edge.id.value} must not be a self-loop" }
+            require(edge.fromNodeId in payloadNodeIds) {
+                "Artifact edge ${edge.id.value} fromNodeId ${edge.fromNodeId.value} is not present in snapshot nodes"
+            }
+            require(edge.toNodeId in payloadNodeIds) {
+                "Artifact edge ${edge.id.value} toNodeId ${edge.toNodeId.value} is not present in snapshot nodes"
+            }
+        }
+        return artifactGraphStore.replaceSnapshot(command.projectId, command.iterationId, command.nodes, command.edges)
+    }
+
     @Transactional
     override fun saveDocumentChunks(command: SaveDocumentChunksCommand): List<DocumentChunk> {
         val document = requireDocumentExists(command.documentId)
@@ -310,6 +347,12 @@ class WriteUseCaseService(
                     it.graphHash == taskGraph.graphHash)
         }
 
+    private fun validateArtifactNodeRelations(node: com.github.silbaram.plan2agent.memory.domain.ArtifactNode) {
+        node.documentId?.let { requireDocumentExists(it) }
+        node.taskId?.let { requireTaskBelongsToIteration(it, node.projectId, requireNotNull(node.iterationId)) }
+        node.runId?.let { requireRunBelongsToSnapshot(it, node.projectId, node.iterationId, node.taskId) }
+    }
+
     private fun validateChunkRelations(chunk: DocumentChunk, document: DocumentSnapshot) {
         require(chunk.projectId == document.projectId) { "Chunk ${chunk.id.value} projectId must match document" }
         require(chunk.iterationId == document.iterationId) { "Chunk ${chunk.id.value} iterationId must match document" }
@@ -368,6 +411,21 @@ class WriteUseCaseService(
 
     private fun requireRunBelongsToTask(runId: com.github.silbaram.plan2agent.memory.domain.RunId, taskId: TaskId?) {
         val run = requireNotNull(runRecordStore.findById(runId)) { "Run ${runId.value} was not found" }
+        if (taskId != null) {
+            require(run.taskId == taskId) { "Run ${runId.value} does not belong to task ${taskId.value}" }
+        }
+    }
+
+    private fun requireRunBelongsToSnapshot(
+        runId: com.github.silbaram.plan2agent.memory.domain.RunId,
+        projectId: ProjectId,
+        iterationId: IterationId?,
+        taskId: TaskId?,
+    ) {
+        val run = requireNotNull(runRecordStore.findById(runId)) { "Run ${runId.value} was not found" }
+        require(run.projectId == projectId && run.iterationId == iterationId) {
+            "Run ${runId.value} does not belong to project ${projectId.value} iteration ${iterationId?.value}"
+        }
         if (taskId != null) {
             require(run.taskId == taskId) { "Run ${runId.value} does not belong to task ${taskId.value}" }
         }
