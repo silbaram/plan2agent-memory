@@ -39,7 +39,7 @@ class ReadUseCaseServiceTest {
     private val artifactQuery = FakeArtifactQueryPort()
     private val keywordSearch = FakeKeywordSearchPort()
     private val vectorSearch = FakeVectorSearchPort()
-    private val artifactGraph = FakeArtifactGraphStore()
+    private val artifactGraph = FakeReadArtifactGraphStore()
     private val service = ReadUseCaseService(artifactQuery, keywordSearch, vectorSearch, artifactGraph)
 
 
@@ -396,7 +396,7 @@ private fun keywordMatch(
         matchReason = "chunk.content",
     )
 
-private class FakeArtifactGraphStore : ArtifactGraphStorePort {
+private class FakeReadArtifactGraphStore : ArtifactGraphStorePort {
     val node = ArtifactNode(
         id = ArtifactNodeId(uuid(20)),
         projectId = ReadTestIds.projectId,
