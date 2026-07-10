@@ -545,7 +545,8 @@ Schema additions:
 Endpoints:
 
 - `POST /api/graph/snapshots` replaces the graph snapshot for one `(projectId, iterationId)` scope in a single transaction and returns `{ "nodeCount": n, "edgeCount": m }`. Because the scope is fully replaced, every edge endpoint must be included in the same payload's `nodes` array.
-- `GET /api/graph/trace?projectId=...&naturalKey=...&direction=both&maxDepth=10` returns the reachable subgraph using recursive traversal. `upstream` follows edge direction, while `downstream` traverses impact in reverse. If `iterationId` is omitted, the root is resolved project-wide and duplicate `naturalKey` matches are rejected as ambiguous.
-- `GET /api/graph/nodes?projectId=...&nodeKind=task&query=...&limit=20` searches graph nodes by kind and label/content text so callers can find a trace entry `naturalKey`; supplying `iterationId` narrows results to that iteration.
+- `GET /api/graph/nodes?nodeKind=task&query=...&limit=20` searches graph nodes by kind and label/content text so callers can find a trace entry `naturalKey`. `projectId` is optional: omit it to search across all projects for precedent discovery, then use each returned node's `projectId` when tracing. Supplying `iterationId` still requires `projectId` because iterations are project-scoped. Literal `%`, `_`, and `\` characters in `query` are escaped before `ILIKE` matching.
+- `GET /api/graph/trace?projectId=...&naturalKey=...&direction=both&maxDepth=10` returns the reachable subgraph using recursive traversal. `projectId` remains required because natural keys such as `decision:ND-1` can collide across projects. `upstream` follows edge direction, while `downstream` traverses impact in reverse. If `iterationId` is omitted, the root is resolved project-wide and duplicate `naturalKey` matches are rejected as ambiguous.
+- `POST /api/graph/snapshots` validates referenced `documentId`, `taskId`, and `runId` values before storage and rejects self-loop edges, so bad graph payloads return `400` instead of surfacing database constraint errors.
 
 Write endpoints continue to require the local token header configured for `X-P2A-Local-Token`.

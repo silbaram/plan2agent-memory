@@ -49,12 +49,14 @@ class PostgresArtifactGraphAdapter(
     }
 
     override fun findNodes(query: GraphNodeSearchQuery): List<ArtifactNode> {
-        val where = mutableListOf("project_id = :projectId")
+        val where = mutableListOf<String>()
         val p = params(query.projectId, query.iterationId).addValue("limit", query.limit)
+        query.projectId?.let { where += "project_id = :projectId" }
         query.iterationId?.let { where += "iteration_id = :iterationId" }
         query.nodeKind?.let { where += "node_kind = :nodeKind"; p.addValue("nodeKind", it.db()) }
-        query.query?.let { where += "(label ILIKE :q OR content ILIKE :q)"; p.addValue("q", "%$it%") }
-        return jdbc.query("SELECT * FROM artifact_nodes WHERE ${where.joinToString(" AND ")} ORDER BY natural_key LIMIT :limit", p, nodeMapper(json))
+        query.query?.let { where += "(label ILIKE :q ESCAPE '\\' OR content ILIKE :q ESCAPE '\\')"; p.addValue("q", "%${it.escapeLikePattern()}%") }
+        val whereSql = where.takeIf { it.isNotEmpty() }?.joinToString(" AND ")?.let { " WHERE $it" }.orEmpty()
+        return jdbc.query("SELECT * FROM artifact_nodes$whereSql ORDER BY project_id, natural_key LIMIT :limit", p, nodeMapper(json))
     }
 
     override fun trace(query: GraphTraceQuery): ArtifactTrace {
@@ -102,11 +104,12 @@ class PostgresArtifactGraphAdapter(
         return roots.single()
     }
 
-    private fun params(projectId: ProjectId, iterationId: IterationId?) = MapSqlParameterSource().addValue("projectId", uuid(projectId.value)).addValue("iterationId", iterationId?.value?.let(::uuid))
+    private fun params(projectId: ProjectId?, iterationId: IterationId?) = MapSqlParameterSource().addValue("projectId", projectId?.value?.let(::uuid)).addValue("iterationId", iterationId?.value?.let(::uuid))
     private fun nodeParams(n: ArtifactNode) = params(n.projectId, n.iterationId).addValue("id", uuid(n.id.value)).addValue("kind", n.kind.db()).addValue("naturalKey", n.naturalKey).addValue("label", n.label).addValue("content", n.content).addValue("documentId", n.documentId?.value?.let(::uuid)).addValue("taskId", n.taskId?.value?.let(::uuid)).addValue("runId", n.runId?.value?.let(::uuid)).addValue("metadata", json.metadataToJson(n.metadata))
     private fun edgeParams(e: ArtifactEdge) = MapSqlParameterSource().addValue("id", uuid(e.id.value)).addValue("projectId", uuid(e.projectId.value)).addValue("fromNodeId", uuid(e.fromNodeId.value)).addValue("toNodeId", uuid(e.toNodeId.value)).addValue("type", e.type.name).addValue("sourceReference", e.sourceReference).addValue("metadata", json.metadataToJson(e.metadata))
 }
 
+private fun String.escapeLikePattern(): String = replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 private fun ArtifactNodeKind.db(): String = name.lowercase()
 private fun nodeKind(value: String): ArtifactNodeKind = ArtifactNodeKind.valueOf(value.uppercase())
 private fun nodeMapper(json: PostgresJsonSupport): RowMapper<ArtifactNode> = RowMapper { rs, _ -> ArtifactNode(ArtifactNodeId(rs.getString("node_id")), ProjectId(rs.getString("project_id")), rs.getString("iteration_id")?.let(::IterationId), nodeKind(rs.getString("node_kind")), rs.getString("natural_key"), rs.getString("label"), rs.getString("content"), rs.getString("document_id")?.let(::DocumentId), rs.getString("task_id")?.let(::TaskId), rs.getString("run_id")?.let(::RunId), json.metadataFromJson(rs.getString("metadata"))) }

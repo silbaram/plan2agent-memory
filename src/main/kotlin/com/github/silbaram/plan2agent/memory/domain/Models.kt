@@ -382,7 +382,10 @@ data class ArtifactEdge(
     val sourceReference: String? = null,
     val metadata: Map<String, String> = emptyMap(),
 ) {
-    init { require(sourceReference == null || sourceReference.isNotBlank()) { "ArtifactEdge sourceReference must not be blank" } }
+    init {
+        require(fromNodeId != toNodeId) { "ArtifactEdge must not be a self-loop" }
+        require(sourceReference == null || sourceReference.isNotBlank()) { "ArtifactEdge sourceReference must not be blank" }
+    }
 }
 
 data class ArtifactTraceNode(val node: ArtifactNode, val depth: Int)

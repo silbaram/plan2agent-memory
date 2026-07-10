@@ -279,7 +279,7 @@ data class GraphTraceQuery(
 }
 
 data class GraphNodeSearchQuery(
-    val projectId: ProjectId,
+    val projectId: ProjectId? = null,
     val iterationId: IterationId? = null,
     val nodeKind: com.github.silbaram.plan2agent.memory.domain.ArtifactNodeKind? = null,
     val query: String? = null,
@@ -287,6 +287,7 @@ data class GraphNodeSearchQuery(
 ) {
     init {
         require(query == null || query.isNotBlank()) { "GraphNodeSearchQuery query must not be blank" }
+        require(projectId != null || iterationId == null) { "GraphNodeSearchQuery iterationId requires projectId" }
         require(limit > 0) { "GraphNodeSearchQuery limit must be positive" }
     }
 }

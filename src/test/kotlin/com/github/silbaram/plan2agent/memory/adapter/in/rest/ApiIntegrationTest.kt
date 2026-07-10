@@ -270,6 +270,26 @@ class ApiIntegrationTest {
             .expectOkJson()
         assertThat(nodes.single()["naturalKey"].asText()).isEqualTo("task:${fixture.sourceTaskId}")
 
+        val otherProject = ApiFixture("graph-api-other-project")
+        saveSyncFixture(otherProject)
+        postJson("/api/graph/snapshots", otherProject.graphSnapshotBody(includeStaleEvidence = false))
+            .andExpect(status().isCreated())
+
+        val crossProjectNodes = getJson("/api/graph/nodes?nodeKind=task&query=Graph&limit=10")
+            .expectOkJson()
+        assertThat(crossProjectNodes.map { it["projectId"].asText() })
+            .contains(fixture.projectId, otherProject.projectId)
+
+        getJson("/api/graph/nodes?iterationId=${fixture.iterationId}&nodeKind=task")
+            .andExpect(status().isBadRequest())
+
+        getJson("/api/graph/trace?naturalKey=task:${fixture.sourceTaskId}")
+            .andExpect(status().isBadRequest())
+
+        val literalNodes = getJson("/api/graph/nodes?projectId=${fixture.projectId}&query=%25&limit=10")
+            .expectOkJson()
+        assertThat(literalNodes).isEmpty()
+
         val trace = getJson("/api/graph/trace?projectId=${fixture.projectId}&naturalKey=task:${fixture.sourceTaskId}&direction=upstream&maxDepth=2")
             .expectOkJson()
         assertThat(trace["root"]["naturalKey"].asText()).isEqualTo("task:${fixture.sourceTaskId}")
@@ -292,6 +312,35 @@ class ApiIntegrationTest {
                         "edgeId" to uuid("graph-api-invalid-edge"),
                         "fromNodeId" to fixture.taskGraphNodeId,
                         "toNodeId" to uuid("graph-api-missing-node"),
+                        "edgeType" to "DERIVED_FROM",
+                    ),
+                ))
+            },
+        ).andExpect(status().isBadRequest())
+
+        postJson(
+            "/api/graph/snapshots",
+            fixture.graphSnapshotBody(includeStaleEvidence = false).let { body ->
+                body + ("nodes" to listOf(
+                    mapOf(
+                        "nodeId" to uuid("graph-api-invalid-document-node"),
+                        "nodeKind" to "document",
+                        "naturalKey" to "document:missing",
+                        "label" to "Missing document",
+                        "documentId" to uuid("graph-api-missing-document"),
+                    ),
+                ))
+            },
+        ).andExpect(status().isBadRequest())
+
+        postJson(
+            "/api/graph/snapshots",
+            fixture.graphSnapshotBody(includeStaleEvidence = false).let { body ->
+                body + ("edges" to listOf(
+                    mapOf(
+                        "edgeId" to uuid("graph-api-self-loop-edge"),
+                        "fromNodeId" to fixture.taskGraphNodeId,
+                        "toNodeId" to fixture.taskGraphNodeId,
                         "edgeType" to "DERIVED_FROM",
                     ),
                 ))
