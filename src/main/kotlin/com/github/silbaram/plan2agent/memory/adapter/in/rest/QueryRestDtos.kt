@@ -535,7 +535,7 @@ data class ArtifactGraphEdgeResponse(val edgeId: String, val projectId: String, 
 data class ArtifactTraceResponse(val root: ArtifactGraphNodeResponse, val nodes: List<ArtifactTraceNodeResponse>, val edges: List<ArtifactGraphEdgeResponse>, val truncated: Boolean)
 
 fun graphNodeSearchQuery(projectId: String?, iterationId: String?, nodeKind: String?, query: String?, limit: Int?): GraphNodeSearchQuery = GraphNodeSearchQuery(
-    projectId = ProjectId(requireText(projectId, "projectId")),
+    projectId = projectId?.trim()?.takeIf(String::isNotEmpty)?.let(::ProjectId),
     iterationId = iterationId.toOptionalId(::IterationId),
     nodeKind = parseOptionalEnum<com.github.silbaram.plan2agent.memory.domain.ArtifactNodeKind>(nodeKind, "nodeKind"),
     query = query?.trim()?.takeIf(String::isNotEmpty),

@@ -229,10 +229,12 @@ class WriteUseCaseService(
         command.nodes.forEach { node ->
             require(node.projectId == command.projectId) { "Artifact node ${node.id.value} projectId must match snapshot" }
             require(node.iterationId == command.iterationId) { "Artifact node ${node.id.value} iterationId must match snapshot" }
+            validateArtifactNodeRelations(node)
         }
         val payloadNodeIds = command.nodes.map { it.id }.toSet()
         command.edges.forEach { edge ->
             require(edge.projectId == command.projectId) { "Artifact edge ${edge.id.value} projectId must match snapshot" }
+            require(edge.fromNodeId != edge.toNodeId) { "Artifact edge ${edge.id.value} must not be a self-loop" }
             require(edge.fromNodeId in payloadNodeIds) {
                 "Artifact edge ${edge.id.value} fromNodeId ${edge.fromNodeId.value} is not present in snapshot nodes"
             }
@@ -345,6 +347,12 @@ class WriteUseCaseService(
                     it.graphHash == taskGraph.graphHash)
         }
 
+    private fun validateArtifactNodeRelations(node: com.github.silbaram.plan2agent.memory.domain.ArtifactNode) {
+        node.documentId?.let { requireDocumentExists(it) }
+        node.taskId?.let { requireTaskBelongsToIteration(it, node.projectId, requireNotNull(node.iterationId)) }
+        node.runId?.let { requireRunBelongsToSnapshot(it, node.projectId, node.iterationId, node.taskId) }
+    }
+
     private fun validateChunkRelations(chunk: DocumentChunk, document: DocumentSnapshot) {
         require(chunk.projectId == document.projectId) { "Chunk ${chunk.id.value} projectId must match document" }
         require(chunk.iterationId == document.iterationId) { "Chunk ${chunk.id.value} iterationId must match document" }
@@ -403,6 +411,21 @@ class WriteUseCaseService(
 
     private fun requireRunBelongsToTask(runId: com.github.silbaram.plan2agent.memory.domain.RunId, taskId: TaskId?) {
         val run = requireNotNull(runRecordStore.findById(runId)) { "Run ${runId.value} was not found" }
+        if (taskId != null) {
+            require(run.taskId == taskId) { "Run ${runId.value} does not belong to task ${taskId.value}" }
+        }
+    }
+
+    private fun requireRunBelongsToSnapshot(
+        runId: com.github.silbaram.plan2agent.memory.domain.RunId,
+        projectId: ProjectId,
+        iterationId: IterationId?,
+        taskId: TaskId?,
+    ) {
+        val run = requireNotNull(runRecordStore.findById(runId)) { "Run ${runId.value} was not found" }
+        require(run.projectId == projectId && run.iterationId == iterationId) {
+            "Run ${runId.value} does not belong to project ${projectId.value} iteration ${iterationId?.value}"
+        }
         if (taskId != null) {
             require(run.taskId == taskId) { "Run ${runId.value} does not belong to task ${taskId.value}" }
         }
