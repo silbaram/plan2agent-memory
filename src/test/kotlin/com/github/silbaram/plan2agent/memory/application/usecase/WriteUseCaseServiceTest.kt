@@ -293,6 +293,32 @@ class WriteUseCaseServiceTest {
     }
 
     @Test
+    fun `artifact graph snapshot rejects a document from another iteration`() {
+        stores.documentSnapshots.documents[0] = ids.document.copy(iterationId = IterationId(uuid(55)))
+        val documentNode = artifactNode(
+            56,
+            ids.projectId,
+            ids.iterationId,
+            "document:closed-milestone",
+            ArtifactNodeKind.DOCUMENT,
+        ).copy(documentId = ids.documentId)
+
+        assertThatThrownBy {
+            service.saveArtifactGraphSnapshot(
+                SaveArtifactGraphSnapshotCommand(
+                    projectId = ids.projectId,
+                    iterationId = ids.iterationId,
+                    nodes = listOf(documentNode),
+                    edges = emptyList(),
+                ),
+            )
+        }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessageContaining("does not belong to project")
+            .hasMessageContaining("iteration ${ids.iterationId.value}")
+    }
+
+    @Test
     fun `document chunk save writes only new chunks and coordinates supplied embeddings`() {
         val existingChunk = stores.documentChunks.chunks.first()
         val newChunk = DocumentChunk(
