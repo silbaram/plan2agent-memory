@@ -348,7 +348,7 @@ class WriteUseCaseService(
         }
 
     private fun validateArtifactNodeRelations(node: com.github.silbaram.plan2agent.memory.domain.ArtifactNode) {
-        node.documentId?.let { requireDocumentExists(it) }
+        node.documentId?.let { requireDocumentBelongsToSnapshot(it, node.projectId, node.iterationId) }
         node.taskId?.let { requireTaskBelongsToIteration(it, node.projectId, requireNotNull(node.iterationId)) }
         node.runId?.let { requireRunBelongsToSnapshot(it, node.projectId, node.iterationId, node.taskId) }
     }
@@ -390,6 +390,18 @@ class WriteUseCaseService(
 
     private fun requireDocumentExists(documentId: com.github.silbaram.plan2agent.memory.domain.DocumentId): DocumentSnapshot =
         requireNotNull(documentSnapshotStore.findById(documentId)) { "Document ${documentId.value} was not found" }
+
+    private fun requireDocumentBelongsToSnapshot(
+        documentId: com.github.silbaram.plan2agent.memory.domain.DocumentId,
+        projectId: ProjectId,
+        iterationId: IterationId?,
+    ): DocumentSnapshot {
+        val document = requireDocumentExists(documentId)
+        require(document.projectId == projectId && document.iterationId == iterationId) {
+            "Document ${documentId.value} does not belong to project ${projectId.value} iteration ${iterationId?.value}"
+        }
+        return document
+    }
 
     private fun requireDocumentSourceExists(iterationId: IterationId, sourceDocumentId: String) {
         val exists = documentSnapshotStore.findByIterationId(iterationId).any {
