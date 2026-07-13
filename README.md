@@ -29,6 +29,47 @@ docker compose up -d postgres
 - Port: `5432`
 - JDBC URL: `jdbc:postgresql://localhost:5432/p2a_artifact_store`
 
+DB schema의 유일한 변경 경로는 `src/main/resources/db/migration/V*.sql` Flyway migration입니다. 현재 스키마는 빈 DB에서 시작하는 단일 V1 baseline이며, 이전 V1~V7 history가 있는 DB와 호환되지 않으므로 이 버전을 처음 배포할 때 DB를 완전히 초기화해야 합니다. JPA/Hibernate DDL 생성과 Spring `schema.sql` 초기화는 비활성화되어 있으며, 환경변수나 profile이 `create`, `update`, `create-drop`, 표준 JPA schema generation 또는 `spring.sql.init.mode`를 활성화하면 애플리케이션은 persistence bean 초기화 전에 기동을 중단합니다. 이후 테이블의 `CREATE`, `ALTER`, `DROP`은 새 versioned SQL migration으로만 반영합니다.
+
+### 단일 V1 baseline 전환을 위한 전체 초기화
+
+이 절차는 Memory DB의 테이블, Flyway history, 검색 인덱스와 저장 데이터를 모두 삭제합니다. 기존 서버와 쓰기 요청을 먼저 중지하고, 필요한 데이터는 백업한 뒤 실행합니다. 초기화 후에는 이 repository의 최신 서버만 시작해야 합니다.
+
+로컬 Docker Compose 환경은 named volume을 제거하면 됩니다.
+
+```bash
+docker compose down -v
+docker compose up -d postgres
+./gradlew bootRun
+```
+
+Cloud SQL처럼 PostgreSQL을 별도 운영하는 환경에서는 `postgres` 관리 계정으로 다음 SQL을 실행합니다.
+
+```sql
+DROP SCHEMA public CASCADE;
+CREATE SCHEMA public AUTHORIZATION p2a;
+
+CREATE EXTENSION IF NOT EXISTS vector;
+
+GRANT CONNECT, CREATE
+ON DATABASE p2a_artifact_store
+TO p2a;
+
+GRANT USAGE, CREATE
+ON SCHEMA public
+TO p2a;
+```
+
+최신 서버가 정상 기동한 뒤 Flyway 적용 이력이 V1 한 건인지 확인합니다.
+
+```sql
+SELECT installed_rank, version, description, success
+FROM flyway_schema_history
+ORDER BY installed_rank;
+```
+
+결과에는 성공한 version `1` migration 한 건만 있어야 합니다.
+
 ### 애플리케이션 실행
 
 기본값으로 실행:
@@ -222,7 +263,7 @@ Iteration을 프로젝트에 연결해 등록 또는 upsert합니다.
 
 Task graph JSON과 graph metadata를 저장합니다.
 
-`projectId`/`iterationId`/`sourceTaskGraphId`가 같은 graph는 하나의 logical graph로 취급합니다. 같은 source identity와 `graphHash`를 다시 보내면 기존 응답을 그대로 반환하고, hash가 달라지면 canonical `taskGraphId`는 유지한 채 최신 graph JSON과 metadata를 갱신합니다. source identity가 다르면 hash가 같아도 별도 graph로 저장합니다. 이미 다른 source identity에 연결된 canonical ID를 보내면 `409 conflict`로 거부합니다. 클라이언트는 이후 `/api/tasks/bulk`의 `graphId`와 `tasks[].taskGraphId`에 응답의 canonical ID를 사용해야 합니다. V7 migration은 legacy null source identity를 `metadata.sourceTaskGraphId`에서 backfill한 뒤 DB `NOT NULL` 계약을 적용하며, 복구할 source가 없는 row가 있으면 데이터가 조용히 잘못 합쳐지지 않도록 migration을 중단합니다.
+`projectId`/`iterationId`/`sourceTaskGraphId`가 같은 graph는 하나의 logical graph로 취급합니다. 같은 source identity와 `graphHash`를 다시 보내면 기존 응답을 그대로 반환하고, hash가 달라지면 canonical `taskGraphId`는 유지한 채 최신 graph JSON과 metadata를 갱신합니다. source identity가 다르면 hash가 같아도 별도 graph로 저장합니다. 이미 다른 source identity에 연결된 canonical ID를 보내면 `409 conflict`로 거부합니다. 클라이언트는 이후 `/api/tasks/bulk`의 `graphId`와 `tasks[].taskGraphId`에 응답의 canonical ID를 사용해야 합니다. 단일 V1 baseline은 `sourceTaskGraphId`를 처음부터 필수 source identity로 생성합니다.
 
 | Request field | 필수 | 설명 |
 | --- | --- | --- |
