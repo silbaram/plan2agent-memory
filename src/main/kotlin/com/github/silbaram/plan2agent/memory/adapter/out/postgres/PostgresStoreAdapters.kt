@@ -27,12 +27,14 @@ import com.github.silbaram.plan2agent.memory.domain.TaskGraph
 import com.github.silbaram.plan2agent.memory.domain.TaskGraphId
 import com.github.silbaram.plan2agent.memory.domain.TaskId
 import com.github.silbaram.plan2agent.memory.domain.TaskStatus
+import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.dao.EmptyResultDataAccessException
 import org.springframework.jdbc.core.RowMapper
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
 import org.springframework.stereotype.Repository
 import java.sql.ResultSet
+import java.sql.SQLException
 import java.sql.Timestamp
 import java.time.Instant
 import java.util.UUID
@@ -279,14 +281,32 @@ class PostgresTaskGraphStoreAdapter(
     private val json = PostgresJsonSupport(objectMapper)
 
     override fun save(taskGraph: TaskGraph): TaskGraph = metrics.recordWrite("task_graph.save") {
-        val existingTaskGraph = findById(taskGraph.id)
-            ?: findByProjectIterationAndSourceTaskGraphId(
-                taskGraph.projectId,
-                taskGraph.iterationId,
-                taskGraph.sourceTaskGraphId,
+        val existingById = findById(taskGraph.id)
+        val existingBySource = findByProjectIterationAndSourceTaskGraphId(
+            taskGraph.projectId,
+            taskGraph.iterationId,
+            taskGraph.sourceTaskGraphId,
+        )
+        if (existingById != null && !existingById.hasSameLogicalIdentity(taskGraph)) {
+            throw taskGraphIdentityConflict(taskGraph, existingById)
+        }
+        if (existingById != null && existingBySource != null && existingById.id != existingBySource.id) {
+            throw IllegalStateException(
+                "Task graph identity conflict: id ${taskGraph.id.value} and source task graph " +
+                    "${taskGraph.sourceTaskGraphId.value} map to different canonical task graphs",
             )
-            ?: findByProjectIterationAndGraphHash(taskGraph.projectId, taskGraph.iterationId, taskGraph.graphHash)
-        val taskGraphToSave = existingTaskGraph?.let { taskGraph.copy(id = it.id) } ?: taskGraph
+        }
+        val existingTaskGraph = existingBySource ?: existingById
+        val taskGraphToSave = existingTaskGraph?.let {
+            taskGraph.copy(
+                id = it.id,
+                sourceReference = taskGraph.sourceReference?.copy(
+                    canonicalServerId = CanonicalServerId(it.id.value),
+                ),
+                createdAt = it.createdAt,
+                updatedAt = taskGraph.updatedAt ?: Instant.now(),
+            )
+        } ?: taskGraph
         val metadata = json.withSourceReference(
             taskGraphToSave.metadata + mapOf(
                 PostgresJsonSupport.TASK_GRAPH_TASK_IDS to json.stringsToJson(taskGraphToSave.taskIds.map { it.value }),
@@ -302,9 +322,9 @@ class PostgresTaskGraphStoreAdapter(
             taskGraphToSave.sourceReference,
         )
         val documentId = resolveDocumentId(taskGraphToSave)
-
-        jdbc.queryForObject(
-            """
+        try {
+            jdbc.queryForObject(
+                """
             INSERT INTO task_graphs (
                 task_graph_id, source_task_graph_id, project_id, iteration_id, document_id,
                 source_document_id, graph_hash, graph_json, metadata, created_at, updated_at
@@ -313,7 +333,8 @@ class PostgresTaskGraphStoreAdapter(
                 :sourceDocumentId, :graphHash, CAST(:graphJson AS jsonb), CAST(:metadata AS jsonb),
                 :createdAt, :updatedAt
             )
-            ON CONFLICT (task_graph_id) DO UPDATE SET
+            ON CONFLICT (project_id, iteration_id, source_task_graph_id)
+            WHERE source_task_graph_id IS NOT NULL DO UPDATE SET
                 source_task_graph_id = EXCLUDED.source_task_graph_id,
                 project_id = EXCLUDED.project_id,
                 iteration_id = EXCLUDED.iteration_id,
@@ -321,24 +342,41 @@ class PostgresTaskGraphStoreAdapter(
                 source_document_id = EXCLUDED.source_document_id,
                 graph_hash = EXCLUDED.graph_hash,
                 graph_json = EXCLUDED.graph_json,
-                metadata = EXCLUDED.metadata,
-                updated_at = EXCLUDED.updated_at
+                metadata = CASE
+                    WHEN jsonb_exists(EXCLUDED.metadata, 'p2a.sourceReference.uri')
+                    THEN jsonb_set(
+                        EXCLUDED.metadata,
+                        ARRAY['p2a.sourceReference.canonicalServerId'],
+                        to_jsonb(task_graphs.task_graph_id::text),
+                        true
+                    )
+                    ELSE EXCLUDED.metadata
+                END,
+                updated_at = COALESCE(EXCLUDED.updated_at, CURRENT_TIMESTAMP)
             RETURNING *
             """.trimIndent(),
-            MapSqlParameterSource()
-                .addValue("taskGraphId", uuid(taskGraphToSave.id.value))
-                .addValue("sourceTaskGraphId", taskGraphToSave.sourceTaskGraphId.value)
-                .addValue("projectId", uuid(taskGraphToSave.projectId.value))
-                .addValue("iterationId", uuid(taskGraphToSave.iterationId.value))
-                .addValue("documentId", documentId?.let(::uuid))
-                .addValue("sourceDocumentId", taskGraphToSave.sourceDocumentId?.value)
-                .addValue("graphHash", taskGraphToSave.graphHash.value)
-                .addValue("graphJson", taskGraphToSave.graphJson)
-                .addValue("metadata", json.metadataToJson(metadata))
-                .addValue("createdAt", Timestamp.from(taskGraphToSave.createdAt))
-                .addValue("updatedAt", taskGraphToSave.updatedAt?.let(Timestamp::from)),
-            taskGraphMapper(json),
-        )!!
+                MapSqlParameterSource()
+                    .addValue("taskGraphId", uuid(taskGraphToSave.id.value))
+                    .addValue("sourceTaskGraphId", taskGraphToSave.sourceTaskGraphId.value)
+                    .addValue("projectId", uuid(taskGraphToSave.projectId.value))
+                    .addValue("iterationId", uuid(taskGraphToSave.iterationId.value))
+                    .addValue("documentId", documentId?.let(::uuid))
+                    .addValue("sourceDocumentId", taskGraphToSave.sourceDocumentId?.value)
+                    .addValue("graphHash", taskGraphToSave.graphHash.value)
+                    .addValue("graphJson", taskGraphToSave.graphJson)
+                    .addValue("metadata", json.metadataToJson(metadata))
+                    .addValue("createdAt", Timestamp.from(taskGraphToSave.createdAt))
+                    .addValue("updatedAt", taskGraphToSave.updatedAt?.let(Timestamp::from)),
+                taskGraphMapper(json),
+            )!!
+        } catch (exception: DataIntegrityViolationException) {
+            if (!exception.hasSqlState("23505")) throw exception
+            throw IllegalStateException(
+                "Task graph identity conflict for id ${taskGraph.id.value}, source task graph " +
+                    "${taskGraph.sourceTaskGraphId.value}",
+                exception,
+            )
+        }
     }
 
     override fun findById(id: TaskGraphId): TaskGraph? =
@@ -355,7 +393,7 @@ class PostgresTaskGraphStoreAdapter(
             taskGraphMapper(json),
         )
 
-    private fun findByProjectIterationAndSourceTaskGraphId(
+    override fun findByProjectIterationAndSourceTaskGraphId(
         projectId: ProjectId,
         iterationId: IterationId,
         sourceTaskGraphId: SourceTaskGraphId,
@@ -372,26 +410,6 @@ class PostgresTaskGraphStoreAdapter(
                 .addValue("projectId", uuid(projectId.value))
                 .addValue("iterationId", uuid(iterationId.value))
                 .addValue("sourceTaskGraphId", sourceTaskGraphId.value),
-            taskGraphMapper(json),
-        )
-
-    private fun findByProjectIterationAndGraphHash(
-        projectId: ProjectId,
-        iterationId: IterationId,
-        graphHash: ContentHash,
-    ): TaskGraph? =
-        jdbc.queryOne(
-            """
-            SELECT *
-            FROM task_graphs
-            WHERE project_id = :projectId
-              AND iteration_id = :iterationId
-              AND graph_hash = :graphHash
-            """.trimIndent(),
-            MapSqlParameterSource()
-                .addValue("projectId", uuid(projectId.value))
-                .addValue("iterationId", uuid(iterationId.value))
-                .addValue("graphHash", graphHash.value),
             taskGraphMapper(json),
         )
 
@@ -549,6 +567,22 @@ class PostgresTaskStoreAdapter(
 
 private fun uuid(value: String): UUID =
     UUID.fromString(value)
+
+private fun TaskGraph.hasSameLogicalIdentity(other: TaskGraph): Boolean =
+    projectId == other.projectId &&
+        iterationId == other.iterationId &&
+        sourceTaskGraphId == other.sourceTaskGraphId
+
+private fun taskGraphIdentityConflict(requested: TaskGraph, existing: TaskGraph): IllegalStateException =
+    IllegalStateException(
+        "Task graph id ${requested.id.value} already maps to project ${existing.projectId.value}, " +
+            "iteration ${existing.iterationId.value}, source task graph ${existing.sourceTaskGraphId.value}",
+    )
+
+private fun Throwable.hasSqlState(expected: String): Boolean =
+    generateSequence<Throwable>(this) { it.cause }
+        .filterIsInstance<SQLException>()
+        .any { it.sqlState == expected }
 
 private fun projectMapper(json: PostgresJsonSupport): RowMapper<Project> =
     RowMapper { rs, _ ->

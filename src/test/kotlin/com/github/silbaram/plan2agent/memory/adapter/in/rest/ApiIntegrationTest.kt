@@ -27,6 +27,9 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Path
 import java.sql.DriverManager
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 @SpringBootTest(
     properties = [
@@ -102,6 +105,21 @@ class ApiIntegrationTest {
         postJson("/api/task-graphs", taskGraphBody).expectCreatedJson()
         assertThat(taskGraph["metadata"]["sourceTaskGraphId"].asText()).isEqualTo(fixture.sourceTaskGraphId)
         assertThat(taskGraph["lineage"]["contentHash"].asText()).isEqualTo(fixture.graphHash)
+
+        val changedTaskGraphId = uuid("api-sync-task-graph-changed")
+        val changedGraphHash = "${fixture.graphHash}-changed"
+        val changedTaskGraph = postJson(
+            "/api/task-graphs",
+            taskGraphBody + mapOf(
+                "taskGraphId" to changedTaskGraphId,
+                "graphHash" to changedGraphHash,
+                "graphJson" to """{"tasks":["${fixture.taskId}"],"changed":true}""",
+                "sourceReference" to sourceReference(changedTaskGraphId, "task-graphs/${fixture.scope}.json"),
+            ),
+        ).expectCreatedJson()
+        assertThat(changedTaskGraph["taskGraphId"].asText()).isEqualTo(fixture.taskGraphId)
+        assertThat(changedTaskGraph["graphHash"].asText()).isEqualTo(changedGraphHash)
+        assertThat(changedTaskGraph["sourceReference"]["canonicalServerId"].asText()).isEqualTo(fixture.taskGraphId)
 
         val tasks = postJson("/api/tasks/bulk", tasksBody).expectCreatedJson()
         postJson("/api/tasks/bulk", tasksBody).expectCreatedJson()
@@ -221,6 +239,108 @@ class ApiIntegrationTest {
             .andExpect(jsonPath("$.name").value("p2a.memory.search.calls"))
     }
 
+
+    @Test
+    fun `task graph source identities remain distinct for equal content and reject canonical id conflicts`() {
+        val fixture = ApiFixture("task-graph-source-identity")
+        postJson("/api/projects", fixture.projectBody()).andExpect(status().isCreated())
+        postJson("/api/projects/${fixture.projectId}/iterations", fixture.iterationBody()).andExpect(status().isCreated())
+        postJson("/api/documents/snapshots", fixture.documentBody()).andExpect(status().isCreated())
+
+        val first = postJson("/api/task-graphs", fixture.taskGraphBody()).expectCreatedJson()
+        val secondId = uuid("task-graph-source-identity-second")
+        val secondSourceId = "${fixture.sourceTaskGraphId}-second"
+        val second = postJson(
+            "/api/task-graphs",
+            fixture.taskGraphBody() + mapOf(
+                "taskGraphId" to secondId,
+                "sourceTaskGraphId" to secondSourceId,
+                "sourceReference" to sourceReference(secondId, "task-graphs/${fixture.scope}-second.json"),
+            ),
+        ).expectCreatedJson()
+
+        assertThat(first["taskGraphId"].asText()).isEqualTo(fixture.taskGraphId)
+        assertThat(second["taskGraphId"].asText()).isEqualTo(secondId)
+        assertThat(second["sourceTaskGraphId"].asText()).isEqualTo(secondSourceId)
+        assertThat(second["graphHash"].asText()).isEqualTo(fixture.graphHash)
+        assertThat(rowCount("task_graphs")).isEqualTo(2)
+
+        postJson(
+            "/api/task-graphs",
+            fixture.taskGraphBody() + mapOf(
+                "sourceTaskGraphId" to "${fixture.sourceTaskGraphId}-conflict",
+                "graphHash" to "${fixture.graphHash}-conflict",
+            ),
+        ).andExpect(status().isConflict())
+            .andExpect(jsonPath("$.error").value("conflict"))
+            .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("already maps")))
+        assertThat(rowCount("task_graphs")).isEqualTo(2)
+    }
+
+    @Test
+    fun `concurrent task graph upserts keep one canonical id for a source identity`() {
+        val fixture = ApiFixture("task-graph-concurrent-source-upsert")
+        postJson("/api/projects", fixture.projectBody()).andExpect(status().isCreated())
+        postJson("/api/projects/${fixture.projectId}/iterations", fixture.iterationBody()).andExpect(status().isCreated())
+        postJson("/api/documents/snapshots", fixture.documentBody()).andExpect(status().isCreated())
+
+        val workerCount = 8
+        val ready = CountDownLatch(workerCount)
+        val start = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(workerCount)
+        val requests = (0 until workerCount).map { index ->
+            val requestedId = uuid("${fixture.scope}-request-$index")
+            val graphHash = "${fixture.graphHash}-$index"
+            Triple(
+                requestedId,
+                graphHash,
+                fixture.taskGraphBody() + mapOf(
+                    "taskGraphId" to requestedId,
+                    "graphHash" to graphHash,
+                    "graphJson" to """{"request":$index}""",
+                    "sourceReference" to sourceReference(requestedId, "task-graphs/${fixture.scope}.json"),
+                ),
+            )
+        }
+
+        try {
+            val futures = requests.map { (_, graphHash, body) ->
+                executor.submit<Pair<String, JsonNode>> {
+                    ready.countDown()
+                    check(start.await(10, TimeUnit.SECONDS)) { "concurrent task graph start timed out" }
+                    graphHash to postJson("/api/task-graphs", body).expectCreatedJson()
+                }
+            }
+            assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue()
+            start.countDown()
+
+            val responses = futures.map { it.get(20, TimeUnit.SECONDS) }
+            val canonicalIds = responses.map { it.second["taskGraphId"].asText() }.toSet()
+            assertThat(canonicalIds).hasSize(1)
+            assertThat(canonicalIds.single()).isIn(requests.map { it.first })
+            responses.forEach { (expectedHash, response) ->
+                assertThat(response["graphHash"].asText()).isEqualTo(expectedHash)
+                assertThat(response["sourceTaskGraphId"].asText()).isEqualTo(fixture.sourceTaskGraphId)
+                assertThat(response["sourceReference"]["canonicalServerId"].asText()).isEqualTo(canonicalIds.single())
+            }
+
+            assertThat(rowCount("task_graphs")).isEqualTo(1)
+            val stored = jdbc.queryForMap(
+                """
+                SELECT task_graph_id::text AS task_graph_id,
+                       graph_hash,
+                       metadata ->> 'p2a.sourceReference.canonicalServerId' AS source_reference_id
+                FROM task_graphs
+                """.trimIndent(),
+            )
+            assertThat(stored["task_graph_id"]).isEqualTo(canonicalIds.single())
+            assertThat(stored["graph_hash"]).isIn(requests.map { it.second })
+            assertThat(stored["source_reference_id"]).isEqualTo(canonicalIds.single())
+        } finally {
+            start.countDown()
+            executor.shutdownNow()
+        }
+    }
 
     @Test
     fun `graph snapshot endpoints replace stale edges and expose trace and node lookup`() {

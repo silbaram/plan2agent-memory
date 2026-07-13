@@ -162,7 +162,7 @@ class WriteUseCaseServiceTest {
     }
 
     @Test
-    fun `task graph save returns existing graph hash before store save`() {
+    fun `task graph save returns the existing canonical graph for the same source and hash`() {
         val existing = stores.taskGraphs.graphs.first()
 
         val saved = service.saveTaskGraph(
@@ -170,7 +170,30 @@ class WriteUseCaseServiceTest {
                 id = TaskGraphId(uuid(31)),
                 projectId = ids.projectId,
                 iterationId = ids.iterationId,
-                sourceTaskGraphId = SourceTaskGraphId("new-source-graph"),
+                sourceTaskGraphId = existing.sourceTaskGraphId,
+                sourceDocumentId = existing.sourceDocumentId,
+                graphHash = existing.graphHash,
+                graphJson = existing.graphJson,
+                createdAt = now,
+            ),
+        )
+
+        assertThat(saved).isEqualTo(existing)
+        assertThat(stores.taskGraphs.saveCalls).isZero()
+    }
+
+    @Test
+    fun `task graph save keeps distinct source identities even when graph hashes match`() {
+        val existing = stores.taskGraphs.graphs.first()
+        val requestedId = TaskGraphId(uuid(31))
+        val requestedSourceId = SourceTaskGraphId("new-source-graph")
+
+        val saved = service.saveTaskGraph(
+            SaveTaskGraphCommand(
+                id = requestedId,
+                projectId = ids.projectId,
+                iterationId = ids.iterationId,
+                sourceTaskGraphId = requestedSourceId,
                 sourceDocumentId = existing.sourceDocumentId,
                 graphHash = existing.graphHash,
                 graphJson = """{"same":true}""",
@@ -178,8 +201,65 @@ class WriteUseCaseServiceTest {
             ),
         )
 
-        assertThat(saved).isEqualTo(existing)
+        assertThat(saved.id).isEqualTo(requestedId)
+        assertThat(saved.sourceTaskGraphId).isEqualTo(requestedSourceId)
+        assertThat(saved.graphHash).isEqualTo(existing.graphHash)
+        assertThat(stores.taskGraphs.saveCalls).isEqualTo(1)
+    }
+
+    @Test
+    fun `task graph save rejects a canonical id that belongs to another source identity`() {
+        val existing = stores.taskGraphs.graphs.first()
+
+        assertThatThrownBy {
+            service.saveTaskGraph(
+                SaveTaskGraphCommand(
+                    id = existing.id,
+                    projectId = ids.projectId,
+                    iterationId = ids.iterationId,
+                    sourceTaskGraphId = SourceTaskGraphId("conflicting-source-graph"),
+                    sourceDocumentId = existing.sourceDocumentId,
+                    graphHash = ContentHash("conflicting-task-graph-hash"),
+                    graphJson = """{"conflict":true}""",
+                    createdAt = now,
+                ),
+            )
+        }
+            .isInstanceOf(IllegalStateException::class.java)
+            .hasMessageContaining(existing.id.value)
+            .hasMessageContaining(existing.sourceTaskGraphId.value)
+
         assertThat(stores.taskGraphs.saveCalls).isZero()
+    }
+
+    @Test
+    fun `task graph save updates changed content under the existing canonical id`() {
+        val existing = stores.taskGraphs.graphs.first()
+        val requestedId = TaskGraphId(uuid(32))
+        val changedHash = ContentHash("changed-task-graph-hash")
+
+        val saved = service.saveTaskGraph(
+            SaveTaskGraphCommand(
+                id = requestedId,
+                projectId = ids.projectId,
+                iterationId = ids.iterationId,
+                sourceTaskGraphId = existing.sourceTaskGraphId,
+                sourceDocumentId = existing.sourceDocumentId,
+                graphHash = changedHash,
+                graphJson = """{"changed":true}""",
+                sourceReference = SourceReference(
+                    canonicalServerId = CanonicalServerId(requestedId.value),
+                    uri = "file:///repo/task-graph.json",
+                ),
+                createdAt = now,
+            ),
+        )
+
+        assertThat(saved.id).isEqualTo(existing.id)
+        assertThat(saved.graphHash).isEqualTo(changedHash)
+        assertThat(saved.sourceReference?.canonicalServerId).isEqualTo(CanonicalServerId(existing.id.value))
+        assertThat(saved.updatedAt).isNotNull()
+        assertThat(stores.taskGraphs.saveCalls).isEqualTo(1)
     }
 
     @Test
@@ -642,6 +722,15 @@ private class FakeTaskGraphStore(taskGraph: TaskGraph) : TaskGraphStorePort {
     }
 
     override fun findById(id: TaskGraphId): TaskGraph? = graphs.firstOrNull { it.id == id }
+    override fun findByProjectIterationAndSourceTaskGraphId(
+        projectId: ProjectId,
+        iterationId: IterationId,
+        sourceTaskGraphId: SourceTaskGraphId,
+    ): TaskGraph? = graphs.firstOrNull {
+        it.projectId == projectId &&
+            it.iterationId == iterationId &&
+            it.sourceTaskGraphId == sourceTaskGraphId
+    }
     override fun findByIterationId(iterationId: IterationId): List<TaskGraph> =
         graphs.filter { it.iterationId == iterationId }
 }
