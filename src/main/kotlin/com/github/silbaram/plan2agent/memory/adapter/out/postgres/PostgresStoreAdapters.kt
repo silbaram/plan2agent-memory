@@ -333,8 +333,7 @@ class PostgresTaskGraphStoreAdapter(
                 :sourceDocumentId, :graphHash, CAST(:graphJson AS jsonb), CAST(:metadata AS jsonb),
                 :createdAt, :updatedAt
             )
-            ON CONFLICT (project_id, iteration_id, source_task_graph_id)
-            WHERE source_task_graph_id IS NOT NULL DO UPDATE SET
+            ON CONFLICT ON CONSTRAINT uq_task_graphs_project_iteration_source_task_graph_id DO UPDATE SET
                 source_task_graph_id = EXCLUDED.source_task_graph_id,
                 project_id = EXCLUDED.project_id,
                 iteration_id = EXCLUDED.iteration_id,

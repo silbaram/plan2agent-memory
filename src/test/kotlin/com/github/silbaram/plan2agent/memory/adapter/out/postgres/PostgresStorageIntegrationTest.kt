@@ -61,8 +61,6 @@ import com.github.silbaram.plan2agent.memory.domain.TaskGraph
 import com.github.silbaram.plan2agent.memory.domain.TaskGraphId
 import com.github.silbaram.plan2agent.memory.domain.TaskId
 import com.github.silbaram.plan2agent.memory.domain.TaskStatus
-import org.flywaydb.core.Flyway
-import org.flywaydb.core.api.MigrationVersion
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.AfterAll
@@ -192,6 +190,7 @@ class PostgresStorageIntegrationTest {
             "idx_chunk_embedding_vectors_1536_hnsw_cosine",
             "uq_artifact_nodes_scope_natural_key",
             "uq_artifact_edges_nodes_type",
+            "ck_artifact_edges_no_self_loop",
             "idx_artifact_edges_project_from",
             "idx_artifact_edges_project_to",
         )
@@ -209,106 +208,17 @@ class PostgresStorageIntegrationTest {
                 String::class.java,
             ),
         ).isEqualTo("NO")
-    }
-
-    @Test
-    fun `v7 backfills legacy task graph source identity before enforcing not null`() {
-        val schema = "legacy_task_graph_${UUID.randomUUID().toString().replace("-", "")}"
-        val legacySourceId = "legacy-source-task-graph"
-
-        try {
-            migrateLegacySchema(schema, MigrationVersion.fromVersion("6"))
-            insertLegacyTaskGraph(schema, """{"sourceTaskGraphId":"$legacySourceId"}""")
-            migrateLegacySchema(schema)
-
-            DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
-                connection.createStatement().use { statement ->
-                    statement.executeQuery(
-                        "SELECT source_task_graph_id FROM \"$schema\".task_graphs",
-                    ).use { result ->
-                        assertThat(result.next()).isTrue()
-                        assertThat(result.getString("source_task_graph_id")).isEqualTo(legacySourceId)
-                    }
-                    statement.executeQuery(
-                        """
-                        SELECT is_nullable
-                        FROM information_schema.columns
-                        WHERE table_schema = '$schema'
-                          AND table_name = 'task_graphs'
-                          AND column_name = 'source_task_graph_id'
-                        """.trimIndent(),
-                    ).use { result ->
-                        assertThat(result.next()).isTrue()
-                        assertThat(result.getString("is_nullable")).isEqualTo("NO")
-                    }
-                    statement.executeQuery(
-                        "SELECT to_regclass('$schema.uq_task_graphs_project_iteration_graph_hash')",
-                    ).use { result ->
-                        assertThat(result.next()).isTrue()
-                        assertThat(result.getString(1)).isNull()
-                    }
-                }
-            }
-        } finally {
-            dropLegacySchema(schema)
-        }
-    }
-
-    @Test
-    fun `v7 rejects an unrecoverable legacy source identity and preserves the v6 schema`() {
-        val schema = "unrecoverable_task_graph_${UUID.randomUUID().toString().replace("-", "")}"
-
-        try {
-            migrateLegacySchema(schema, MigrationVersion.fromVersion("6"))
-            insertLegacyTaskGraph(schema, "{}")
-
-            assertThatThrownBy { migrateLegacySchema(schema) }
-                .hasStackTraceContaining(
-                    "Cannot make task graph source identity canonical: " +
-                        "legacy task_graphs rows still have null source_task_graph_id",
-                )
-
-            DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
-                connection.createStatement().use { statement ->
-                    statement.executeQuery(
-                        "SELECT source_task_graph_id FROM \"$schema\".task_graphs",
-                    ).use { result ->
-                        assertThat(result.next()).isTrue()
-                        assertThat(result.getString("source_task_graph_id")).isNull()
-                    }
-                    statement.executeQuery(
-                        """
-                        SELECT is_nullable
-                        FROM information_schema.columns
-                        WHERE table_schema = '$schema'
-                          AND table_name = 'task_graphs'
-                          AND column_name = 'source_task_graph_id'
-                        """.trimIndent(),
-                    ).use { result ->
-                        assertThat(result.next()).isTrue()
-                        assertThat(result.getString("is_nullable")).isEqualTo("YES")
-                    }
-                    statement.executeQuery(
-                        "SELECT to_regclass('$schema.uq_task_graphs_project_iteration_graph_hash')",
-                    ).use { result ->
-                        assertThat(result.next()).isTrue()
-                        assertThat(result.getString(1)).isNotNull()
-                    }
-                    statement.executeQuery(
-                        """
-                        SELECT max(version)
-                        FROM "$schema".flyway_schema_history
-                        WHERE success
-                        """.trimIndent(),
-                    ).use { result ->
-                        assertThat(result.next()).isTrue()
-                        assertThat(result.getString(1)).isEqualTo("6")
-                    }
-                }
-            }
-        } finally {
-            dropLegacySchema(schema)
-        }
+        assertThat(
+            strings(
+                """
+                SELECT version
+                FROM flyway_schema_history
+                WHERE success
+                  AND version IS NOT NULL
+                ORDER BY installed_rank
+                """.trimIndent(),
+            ),
+        ).containsExactly("1")
     }
 
     @Test
@@ -621,74 +531,6 @@ class PostgresStorageIntegrationTest {
         val project = projectStore.save(project(scope))
         val iteration = iterationStore.save(iteration(scope, project.id))
         return ProjectIterationFixture(project, iteration)
-    }
-
-    private fun migrateLegacySchema(schema: String, target: MigrationVersion? = null) {
-        val configuration = Flyway.configure()
-            .dataSource(postgres.jdbcUrl, postgres.username, postgres.password)
-            .schemas(schema)
-            .defaultSchema(schema)
-            .locations("classpath:db/migration")
-        if (target != null) configuration.target(target)
-        configuration.load().migrate()
-    }
-
-    private fun insertLegacyTaskGraph(schema: String, metadataJson: String) {
-        val projectId = UUID.randomUUID()
-        val iterationId = UUID.randomUUID()
-        val taskGraphId = UUID.randomUUID()
-        DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
-            connection.prepareStatement(
-                """
-                INSERT INTO "$schema".projects (
-                    project_id, source_project_id, name, root_path, metadata
-                ) VALUES (?, ?, ?, ?, '{}'::jsonb)
-                """.trimIndent(),
-            ).use { statement ->
-                statement.setObject(1, projectId)
-                statement.setString(2, "legacy-project-$projectId")
-                statement.setString(3, "Legacy project")
-                statement.setString(4, "/legacy/project")
-                statement.executeUpdate()
-            }
-            connection.prepareStatement(
-                """
-                INSERT INTO "$schema".iterations (
-                    iteration_id, source_iteration_id, project_id, label, status, metadata
-                ) VALUES (?, ?, ?, ?, ?, '{}'::jsonb)
-                """.trimIndent(),
-            ).use { statement ->
-                statement.setObject(1, iterationId)
-                statement.setString(2, "legacy-iteration-$iterationId")
-                statement.setObject(3, projectId)
-                statement.setString(4, "Legacy iteration")
-                statement.setString(5, "ACTIVE")
-                statement.executeUpdate()
-            }
-            connection.prepareStatement(
-                """
-                INSERT INTO "$schema".task_graphs (
-                    task_graph_id, source_task_graph_id, project_id, iteration_id,
-                    graph_hash, graph_json, metadata
-                ) VALUES (?, NULL, ?, ?, ?, '{}'::jsonb, CAST(? AS jsonb))
-                """.trimIndent(),
-            ).use { statement ->
-                statement.setObject(1, taskGraphId)
-                statement.setObject(2, projectId)
-                statement.setObject(3, iterationId)
-                statement.setString(4, "legacy-graph-hash-$taskGraphId")
-                statement.setString(5, metadataJson)
-                statement.executeUpdate()
-            }
-        }
-    }
-
-    private fun dropLegacySchema(schema: String) {
-        DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
-            connection.createStatement().use { statement ->
-                statement.execute("DROP SCHEMA IF EXISTS \"$schema\" CASCADE")
-            }
-        }
     }
 
     private fun tableNames(): Set<String> =

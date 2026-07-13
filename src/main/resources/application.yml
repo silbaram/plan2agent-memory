@@ -7,6 +7,13 @@ spring:
     password: ${P2A_DB_PASSWORD:p2a_local_password}
   flyway:
     enabled: true
+  jpa:
+    generate-ddl: false
+    hibernate:
+      ddl-auto: none
+  sql:
+    init:
+      mode: never
 
 management:
   endpoints:

@@ -95,8 +95,14 @@ CREATE TABLE documents (
         )
 );
 
-CREATE UNIQUE INDEX uq_documents_project_source_document_id
-    ON documents (project_id, source_document_id)
+CREATE UNIQUE INDEX uq_documents_project_iteration_source_document_hash
+    ON documents (
+        project_id,
+        iteration_id,
+        source_document_id,
+        content_hash
+    )
+    NULLS NOT DISTINCT
     WHERE source_document_id IS NOT NULL;
 CREATE INDEX idx_documents_artifact_filters
     ON documents (project_id, iteration_id, artifact_type, source_path);
@@ -111,7 +117,7 @@ CREATE INDEX idx_documents_content_fts
 
 CREATE TABLE task_graphs (
     task_graph_id uuid PRIMARY KEY,
-    source_task_graph_id text,
+    source_task_graph_id text NOT NULL,
     project_id uuid NOT NULL REFERENCES projects (project_id) ON DELETE CASCADE,
     iteration_id uuid NOT NULL REFERENCES iterations (iteration_id) ON DELETE CASCADE,
     document_id uuid REFERENCES documents (document_id) ON DELETE SET NULL,
@@ -122,7 +128,7 @@ CREATE TABLE task_graphs (
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz,
     CONSTRAINT ck_task_graphs_source_task_graph_id_not_blank
-        CHECK (source_task_graph_id IS NULL OR btrim(source_task_graph_id) <> ''),
+        CHECK (btrim(source_task_graph_id) <> ''),
     CONSTRAINT ck_task_graphs_source_document_id_not_blank
         CHECK (source_document_id IS NULL OR btrim(source_document_id) <> ''),
     CONSTRAINT ck_task_graphs_graph_hash_not_blank
@@ -130,14 +136,11 @@ CREATE TABLE task_graphs (
     CONSTRAINT ck_task_graphs_graph_json_object
         CHECK (jsonb_typeof(graph_json) = 'object'),
     CONSTRAINT ck_task_graphs_metadata_object
-        CHECK (jsonb_typeof(metadata) = 'object')
+        CHECK (jsonb_typeof(metadata) = 'object'),
+    CONSTRAINT uq_task_graphs_project_iteration_source_task_graph_id
+        UNIQUE (project_id, iteration_id, source_task_graph_id)
 );
 
-CREATE UNIQUE INDEX uq_task_graphs_project_iteration_source_task_graph_id
-    ON task_graphs (project_id, iteration_id, source_task_graph_id)
-    WHERE source_task_graph_id IS NOT NULL;
-CREATE UNIQUE INDEX uq_task_graphs_project_iteration_graph_hash
-    ON task_graphs (project_id, iteration_id, graph_hash);
 CREATE INDEX idx_task_graphs_project_iteration
     ON task_graphs (project_id, iteration_id);
 
@@ -337,3 +340,87 @@ CREATE INDEX idx_chunk_embeddings_embedding_set_id
     ON chunk_embeddings (embedding_set_id);
 CREATE INDEX idx_chunk_embeddings_chunk_id
     ON chunk_embeddings (chunk_id);
+
+CREATE TABLE chunk_embedding_vectors_2 (
+    chunk_embedding_id uuid PRIMARY KEY REFERENCES chunk_embeddings (chunk_embedding_id) ON DELETE CASCADE,
+    embedding vector(2) NOT NULL
+);
+
+CREATE TABLE chunk_embedding_vectors_1536 (
+    chunk_embedding_id uuid PRIMARY KEY REFERENCES chunk_embeddings (chunk_embedding_id) ON DELETE CASCADE,
+    embedding vector(1536) NOT NULL
+);
+
+CREATE INDEX idx_chunk_embedding_vectors_2_hnsw_cosine
+    ON chunk_embedding_vectors_2 USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX idx_chunk_embedding_vectors_2_hnsw_l2
+    ON chunk_embedding_vectors_2 USING hnsw (embedding vector_l2_ops);
+CREATE INDEX idx_chunk_embedding_vectors_2_hnsw_ip
+    ON chunk_embedding_vectors_2 USING hnsw (embedding vector_ip_ops);
+
+CREATE INDEX idx_chunk_embedding_vectors_1536_hnsw_cosine
+    ON chunk_embedding_vectors_1536 USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX idx_chunk_embedding_vectors_1536_hnsw_l2
+    ON chunk_embedding_vectors_1536 USING hnsw (embedding vector_l2_ops);
+CREATE INDEX idx_chunk_embedding_vectors_1536_hnsw_ip
+    ON chunk_embedding_vectors_1536 USING hnsw (embedding vector_ip_ops);
+
+CREATE TABLE artifact_nodes (
+    node_id uuid PRIMARY KEY,
+    project_id uuid NOT NULL REFERENCES projects (project_id) ON DELETE CASCADE,
+    iteration_id uuid REFERENCES iterations (iteration_id) ON DELETE CASCADE,
+    node_kind text NOT NULL,
+    natural_key text NOT NULL,
+    label text NOT NULL,
+    content text,
+    document_id uuid REFERENCES documents (document_id) ON DELETE CASCADE,
+    task_id uuid REFERENCES tasks (task_id) ON DELETE CASCADE,
+    run_id uuid REFERENCES runs (run_id) ON DELETE CASCADE,
+    metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz,
+    CONSTRAINT ck_artifact_nodes_kind
+        CHECK (node_kind IN ('decision','assumption','clarifying_question','evidence','spec_section','document','task','run','proposal')),
+    CONSTRAINT ck_artifact_nodes_natural_key_not_blank
+        CHECK (btrim(natural_key) <> ''),
+    CONSTRAINT ck_artifact_nodes_label_not_blank
+        CHECK (btrim(label) <> ''),
+    CONSTRAINT ck_artifact_nodes_metadata_object
+        CHECK (jsonb_typeof(metadata) = 'object'),
+    CONSTRAINT uq_artifact_nodes_scope_natural_key
+        UNIQUE NULLS NOT DISTINCT (project_id, iteration_id, natural_key)
+);
+
+CREATE INDEX idx_artifact_nodes_project_kind
+    ON artifact_nodes (project_id, node_kind);
+CREATE INDEX idx_artifact_nodes_project_natural_key
+    ON artifact_nodes (project_id, natural_key);
+CREATE INDEX idx_artifact_nodes_project_iteration
+    ON artifact_nodes (project_id, iteration_id);
+
+CREATE TABLE artifact_edges (
+    edge_id uuid PRIMARY KEY,
+    project_id uuid NOT NULL REFERENCES projects (project_id) ON DELETE CASCADE,
+    from_node_id uuid NOT NULL REFERENCES artifact_nodes (node_id) ON DELETE CASCADE,
+    to_node_id uuid NOT NULL REFERENCES artifact_nodes (node_id) ON DELETE CASCADE,
+    edge_type text NOT NULL,
+    source_reference text,
+    metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz,
+    CONSTRAINT ck_artifact_edges_type
+        CHECK (edge_type IN ('DERIVED_FROM','DEPENDS_ON','DISPOSES','EVIDENCED_BY','EXECUTED_FOR','BLOCKS')),
+    CONSTRAINT ck_artifact_edges_source_reference_not_blank
+        CHECK (source_reference IS NULL OR btrim(source_reference) <> ''),
+    CONSTRAINT ck_artifact_edges_metadata_object
+        CHECK (jsonb_typeof(metadata) = 'object'),
+    CONSTRAINT ck_artifact_edges_no_self_loop
+        CHECK (from_node_id <> to_node_id),
+    CONSTRAINT uq_artifact_edges_nodes_type
+        UNIQUE (from_node_id, to_node_id, edge_type)
+);
+
+CREATE INDEX idx_artifact_edges_project_from
+    ON artifact_edges (project_id, from_node_id);
+CREATE INDEX idx_artifact_edges_project_to
+    ON artifact_edges (project_id, to_node_id);
