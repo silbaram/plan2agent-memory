@@ -20,6 +20,7 @@ import com.github.silbaram.plan2agent.memory.application.port.out.TaskGraphStore
 import com.github.silbaram.plan2agent.memory.application.port.out.TaskStorePort
 import com.github.silbaram.plan2agent.memory.domain.ChunkEmbedding
 import com.github.silbaram.plan2agent.memory.domain.ChunkEmbeddingId
+import com.github.silbaram.plan2agent.memory.domain.CanonicalServerId
 import com.github.silbaram.plan2agent.memory.domain.ContentHash
 import com.github.silbaram.plan2agent.memory.domain.DocumentChunk
 import com.github.silbaram.plan2agent.memory.domain.DocumentChunkId
@@ -37,6 +38,7 @@ import com.github.silbaram.plan2agent.memory.domain.TaskId
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.nio.charset.StandardCharsets
+import java.time.Instant
 import java.util.UUID
 
 @Service
@@ -150,8 +152,21 @@ class WriteUseCaseService(
             updatedAt = command.updatedAt,
             metadata = command.metadata,
         )
-        findExistingTaskGraph(requested)?.let { return it }
-        return taskGraphStore.save(requested)
+        val existing = resolveExistingTaskGraph(requested)
+        if (existing?.graphHash == requested.graphHash) return existing
+
+        val prepared = existing?.let {
+            requested.copy(
+                id = it.id,
+                sourceReference = requested.sourceReference?.copy(
+                    canonicalServerId = CanonicalServerId(it.id.value),
+                ),
+                createdAt = it.createdAt,
+                updatedAt = command.updatedAt ?: Instant.now(),
+            )
+        } ?: requested
+        prepared.sourceReference.requireCanonicalServerId(prepared.id.value, "task graph")
+        return taskGraphStore.save(prepared)
     }
 
     @Transactional
@@ -339,13 +354,27 @@ class WriteUseCaseService(
         return document.copy(snapshotVersion = nextVersion.coerceAtLeast(document.snapshotVersion))
     }
 
-    private fun findExistingTaskGraph(taskGraph: TaskGraph): TaskGraph? =
-        taskGraphStore.findByIterationId(taskGraph.iterationId).firstOrNull {
-            it.projectId == taskGraph.projectId &&
-                (it.id == taskGraph.id ||
-                    it.sourceTaskGraphId == taskGraph.sourceTaskGraphId ||
-                    it.graphHash == taskGraph.graphHash)
+    private fun resolveExistingTaskGraph(taskGraph: TaskGraph): TaskGraph? {
+        val existingById = taskGraphStore.findById(taskGraph.id)
+        val existingBySource = taskGraphStore.findByProjectIterationAndSourceTaskGraphId(
+            taskGraph.projectId,
+            taskGraph.iterationId,
+            taskGraph.sourceTaskGraphId,
+        )
+        if (existingById != null && !existingById.hasSameLogicalIdentity(taskGraph)) {
+            throw IllegalStateException(
+                "Task graph id ${taskGraph.id.value} already maps to project ${existingById.projectId.value}, " +
+                    "iteration ${existingById.iterationId.value}, source task graph ${existingById.sourceTaskGraphId.value}",
+            )
         }
+        if (existingById != null && existingBySource != null && existingById.id != existingBySource.id) {
+            throw IllegalStateException(
+                "Task graph identity conflict: id ${taskGraph.id.value} and source task graph " +
+                    "${taskGraph.sourceTaskGraphId.value} map to different canonical task graphs",
+            )
+        }
+        return existingBySource ?: existingById
+    }
 
     private fun validateArtifactNodeRelations(node: com.github.silbaram.plan2agent.memory.domain.ArtifactNode) {
         node.documentId?.let { requireDocumentBelongsToSnapshot(it, node.projectId, node.iterationId) }
@@ -463,6 +492,11 @@ private fun com.github.silbaram.plan2agent.memory.domain.SourceReference?.requir
         "$label sourceReference canonicalServerId must match canonical id $canonicalId"
     }
 }
+
+private fun TaskGraph.hasSameLogicalIdentity(other: TaskGraph): Boolean =
+    projectId == other.projectId &&
+        iterationId == other.iterationId &&
+        sourceTaskGraphId == other.sourceTaskGraphId
 
 private fun String.normalizedSourcePath(): String =
     trim()

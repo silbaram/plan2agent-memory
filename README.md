@@ -222,6 +222,8 @@ Iteration을 프로젝트에 연결해 등록 또는 upsert합니다.
 
 Task graph JSON과 graph metadata를 저장합니다.
 
+`projectId`/`iterationId`/`sourceTaskGraphId`가 같은 graph는 하나의 logical graph로 취급합니다. 같은 source identity와 `graphHash`를 다시 보내면 기존 응답을 그대로 반환하고, hash가 달라지면 canonical `taskGraphId`는 유지한 채 최신 graph JSON과 metadata를 갱신합니다. source identity가 다르면 hash가 같아도 별도 graph로 저장합니다. 이미 다른 source identity에 연결된 canonical ID를 보내면 `409 conflict`로 거부합니다. 클라이언트는 이후 `/api/tasks/bulk`의 `graphId`와 `tasks[].taskGraphId`에 응답의 canonical ID를 사용해야 합니다. V7 migration은 legacy null source identity를 `metadata.sourceTaskGraphId`에서 backfill한 뒤 DB `NOT NULL` 계약을 적용하며, 복구할 source가 없는 row가 있으면 데이터가 조용히 잘못 합쳐지지 않도록 migration을 중단합니다.
+
 | Request field | 필수 | 설명 |
 | --- | --- | --- |
 | `taskGraphId` | 선택 | Canonical task graph ID입니다. |
