@@ -1,6 +1,8 @@
 package com.github.silbaram.plan2agent.memory.config
 
+import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingProfileResolver
 import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingProviderState
+import com.github.silbaram.plan2agent.memory.domain.EmbeddingSetId
 import com.github.silbaram.plan2agent.memory.domain.V2EmbeddingProfile
 import org.springframework.ai.transformers.TransformersEmbeddingModel
 import org.springframework.boot.context.event.ApplicationReadyEvent
@@ -28,14 +30,20 @@ class TransformersEmbeddingProviderLifecycle(
     private val embeddingProperties: EmbeddingProperties,
     private val artifactVerifier: TransformersArtifactVerifier,
     private val modelFactory: TransformersEmbeddingModelFactory,
+    private val activeEmbeddingProfileResolver: ActiveEmbeddingProfileResolver,
     private val initializationExecutor: ExecutorService = newInitializationExecutor(),
 ) : ApplicationListener<ApplicationReadyEvent>, DisposableBean {
     private val state = AtomicReference(EmbeddingProviderState.INITIALIZING)
     private val initializationScheduled = AtomicBoolean(false)
     private val initializedModel = AtomicReference<TransformersEmbeddingModelSession?>(null)
+    private val resolvedEmbeddingSetId = AtomicReference<EmbeddingSetId?>(null)
 
     val providerState: EmbeddingProviderState
         get() = state.get()
+
+    /** The verified active V2 set, available only while this provider is ready. */
+    val activeEmbeddingSetId: EmbeddingSetId?
+        get() = resolvedEmbeddingSetId.get()
 
     override fun onApplicationEvent(event: ApplicationReadyEvent) {
         scheduleInitialization()
@@ -59,11 +67,13 @@ class TransformersEmbeddingProviderLifecycle(
 
     override fun destroy() {
         initializedModel.set(null)
+        resolvedEmbeddingSetId.set(null)
         initializationExecutor.shutdownNow()
     }
 
     private fun initialize() {
         try {
+            val activeEmbeddingSetId = activeEmbeddingProfileResolver.resolveActiveV2EmbeddingSetId()
             val artifacts = artifactVerifier.verify(embeddingProperties, V2EmbeddingProfile.fixed)
             val model = modelFactory.create(artifacts)
             val dimension = model.warmUp(V2EmbeddingProfile.fixed.documentInput(WARM_UP_DOCUMENT))
@@ -71,6 +81,7 @@ class TransformersEmbeddingProviderLifecycle(
                 "Transformers warm-up returned dimension $dimension, expected ${V2EmbeddingProfile.fixed.dimension}"
             }
             initializedModel.set(model)
+            resolvedEmbeddingSetId.set(activeEmbeddingSetId)
             state.set(EmbeddingProviderState.READY)
         } catch (failure: Throwable) {
             if (failure is VirtualMachineError) {
@@ -81,6 +92,8 @@ class TransformersEmbeddingProviderLifecycle(
     }
 
     private fun transitionToUnavailable(@Suppress("UNUSED_PARAMETER") failure: Throwable) {
+        initializedModel.set(null)
+        resolvedEmbeddingSetId.set(null)
         state.set(EmbeddingProviderState.UNAVAILABLE)
     }
 

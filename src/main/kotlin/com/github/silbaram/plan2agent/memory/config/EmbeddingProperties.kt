@@ -1,6 +1,7 @@
 package com.github.silbaram.plan2agent.memory.config
 
 import com.github.silbaram.plan2agent.memory.adapter.out.embedding.NoConfiguredEmbeddingProvider
+import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingProfileResolver
 import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingPort
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
@@ -64,6 +65,12 @@ class EmbeddingProviderConfiguration {
         embeddingProperties: EmbeddingProperties,
         artifactVerifier: TransformersArtifactVerifier,
         modelFactory: TransformersEmbeddingModelFactory,
+        activeEmbeddingProfileResolver: ActiveEmbeddingProfileResolver,
     ): TransformersEmbeddingProviderLifecycle =
-        TransformersEmbeddingProviderLifecycle(embeddingProperties, artifactVerifier, modelFactory)
+        TransformersEmbeddingProviderLifecycle(
+            embeddingProperties,
+            artifactVerifier,
+            modelFactory,
+            activeEmbeddingProfileResolver,
+        )
 }
