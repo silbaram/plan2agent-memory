@@ -482,6 +482,60 @@ class PostgresSearchIntegrationTest {
     }
 
     @Test
+    fun `vector search uses the 384 dimensional typed mirror`() {
+        val fixture = saveProjectAndIteration("vector-typed-384")
+        val document = saveDocument(
+            scope = "vector-typed-384",
+            fixture = fixture,
+            sourcePath = "docs/vector-typed-384.md",
+            content = "Vector typed 384 fixture.",
+        )
+        val embeddingSet = embeddingSet("vector-typed-384", fixture.project.id, dimension = 384)
+        val nearestVector = List(384) { index -> if (index == 0) 1.0f else 0.0f }
+        val farthestVector = List(384) { index -> if (index == 1) 1.0f else 0.0f }
+        val typedNearest = saveChunk(
+            scope = "vector-typed-384-nearest",
+            document = document,
+            content = "typed 384 nearest vector",
+            embeddingSet = embeddingSet,
+            embedding = Embedding(nearestVector),
+        )
+        val typedFarthest = saveChunk(
+            scope = "vector-typed-384-farthest",
+            document = document,
+            chunkIndex = 1,
+            content = "typed 384 farthest vector",
+            embeddingSet = embeddingSet,
+            embedding = Embedding(farthestVector),
+        )
+
+        jdbc.update(
+            "UPDATE chunk_embeddings SET embedding = CAST(? AS vector) WHERE chunk_id = ?",
+            farthestVector.toPgVectorLiteral(),
+            UUID.fromString(typedNearest.id.value),
+        )
+        jdbc.update(
+            "UPDATE chunk_embeddings SET embedding = CAST(? AS vector) WHERE chunk_id = ?",
+            nearestVector.toPgVectorLiteral(),
+            UUID.fromString(typedFarthest.id.value),
+        )
+
+        val matches = vectorSearch.search(
+            VectorSearchQuery(
+                embedding = Embedding(nearestVector),
+                embeddingModel = embeddingSet.embeddingModel,
+                embeddingDimension = 384,
+                embeddingVersion = embeddingSet.embeddingVersion,
+                distanceMetric = DistanceMetric.COSINE,
+                projectId = fixture.project.id,
+                limit = 2,
+            ),
+        ).items
+
+        assertThat(matches.map { it.chunkId }).containsExactly(typedNearest.id, typedFarthest.id)
+    }
+
+    @Test
     fun `vector search paginates exact ranking with opaque keyset cursor`() {
         val fixture = saveProjectAndIteration("vector-page")
         val document = saveDocument(
@@ -848,6 +902,9 @@ private fun sourceReference(canonicalId: String, path: String): SourceReference 
 
 private fun stableUuid(seed: String): String =
     UUID.nameUUIDFromBytes(seed.toByteArray(StandardCharsets.UTF_8)).toString()
+
+private fun List<Float>.toPgVectorLiteral(): String =
+    joinToString(separator = ",", prefix = "[", postfix = "]") { it.toString() }
 
 private fun entry(key: String, value: String): Map.Entry<String, String> =
     java.util.AbstractMap.SimpleImmutableEntry(key, value)

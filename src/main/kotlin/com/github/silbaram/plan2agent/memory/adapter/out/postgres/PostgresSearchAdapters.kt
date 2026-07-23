@@ -1096,6 +1096,7 @@ private data class TypedVectorSource(
 private fun typedVectorSource(embeddingDimension: Int): TypedVectorSource? =
     when (embeddingDimension) {
         2 -> TypedVectorSource(tableName = "chunk_embedding_vectors_2", vectorType = "vector(2)")
+        384 -> TypedVectorSource(tableName = "chunk_embedding_vectors_384", vectorType = "vector(384)")
         1536 -> TypedVectorSource(tableName = "chunk_embedding_vectors_1536", vectorType = "vector(1536)")
         else -> null
     }

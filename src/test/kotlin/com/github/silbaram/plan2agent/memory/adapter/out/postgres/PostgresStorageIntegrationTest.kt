@@ -7,6 +7,7 @@ import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactQueryP
 import com.github.silbaram.plan2agent.memory.application.port.out.ChunkEmbeddingStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.DocumentChunkStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.DocumentSnapshotStorePort
+import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingSetStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.IterationStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.ProjectStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.RunRecordStorePort
@@ -39,6 +40,7 @@ import com.github.silbaram.plan2agent.memory.domain.DocumentSnapshot
 import com.github.silbaram.plan2agent.memory.domain.Embedding
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingSet
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingSetId
+import com.github.silbaram.plan2agent.memory.domain.EmbeddingSetScope
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingStorageType
 import com.github.silbaram.plan2agent.memory.domain.Iteration
 import com.github.silbaram.plan2agent.memory.domain.IterationId
@@ -63,6 +65,7 @@ import com.github.silbaram.plan2agent.memory.domain.TaskId
 import com.github.silbaram.plan2agent.memory.domain.TaskStatus
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
+import org.flywaydb.core.Flyway
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -108,6 +111,9 @@ class PostgresStorageIntegrationTest {
     private lateinit var chunkEmbeddingStore: ChunkEmbeddingStorePort
 
     @Autowired
+    private lateinit var embeddingSetStore: EmbeddingSetStorePort
+
+    @Autowired
     private lateinit var artifactQuery: ArtifactQueryPort
 
     @Autowired
@@ -123,8 +129,10 @@ class PostgresStorageIntegrationTest {
             TRUNCATE TABLE
                 artifact_edges,
                 artifact_nodes,
+                embedding_active_profiles,
                 chunk_embeddings,
-                embedding_sets,
+            embedding_active_profiles,
+            embedding_sets,
                 document_chunks,
                 runs,
                 tasks,
@@ -168,6 +176,7 @@ class PostgresStorageIntegrationTest {
             "embedding_sets",
             "chunk_embeddings",
             "chunk_embedding_vectors_2",
+            "chunk_embedding_vectors_384",
             "chunk_embedding_vectors_1536",
             "artifact_nodes",
             "artifact_edges",
@@ -188,6 +197,11 @@ class PostgresStorageIntegrationTest {
             "raw_source_path",
             "chunk_hash",
         )
+        assertThat(columnNames("embedding_sets")).contains(
+            "scope",
+            "profile_fingerprint",
+            "profile_manifest",
+        )
         assertThat(indexAndConstraintNames()).contains(
             "uq_documents_logical_snapshot_hash",
             "uq_documents_logical_snapshot_version",
@@ -199,7 +213,10 @@ class PostgresStorageIntegrationTest {
             "idx_document_chunks_artifact_filters",
             "idx_chunk_embeddings_embedding_set_id",
             "idx_chunk_embedding_vectors_2_hnsw_cosine",
+            "idx_chunk_embedding_vectors_384_hnsw_cosine",
             "idx_chunk_embedding_vectors_1536_hnsw_cosine",
+            "uq_embedding_sets_legacy_model_dimension_version_metric",
+            "uq_embedding_sets_server_global_profile_fingerprint",
             "uq_artifact_nodes_scope_natural_key",
             "uq_artifact_edges_nodes_type",
             "ck_artifact_edges_no_self_loop",
@@ -230,7 +247,202 @@ class PostgresStorageIntegrationTest {
                 ORDER BY installed_rank
                 """.trimIndent(),
             ),
-        ).containsExactly("1")
+        ).containsExactly("1", "2")
+    }
+
+    @Test
+    fun `server-global profiles coexist and pointer rollback preserves the exact active set`() {
+        val fixture = saveProjectAndIteration("server-global-profile")
+        val document = writeUseCase.saveDocumentSnapshot(documentCommand(
+            scope = "server-global-profile-document",
+            projectId = fixture.project.id,
+            iterationId = fixture.iteration.id,
+            sourcePath = "docs/server-global-profile.md",
+            contentHash = "server-global-profile-document-hash",
+        ))
+        val storedChunk = writeUseCase.saveDocumentChunks(
+            SaveDocumentChunksCommand(
+                documentId = document.id,
+                chunks = listOf(DocumentChunkWrite(chunk("server-global-profile-chunk", document, chunkHash = "server-global-profile-chunk-hash"))),
+            ),
+        ).single()
+        val firstSetId = UUID.fromString(stableUuid("server-global-profile-first-set"))
+        val secondSetId = UUID.fromString(stableUuid("server-global-profile-second-set"))
+        val firstEmbeddingId = UUID.fromString(stableUuid("server-global-profile-first-embedding"))
+        val secondEmbeddingId = UUID.fromString(stableUuid("server-global-profile-second-embedding"))
+        val vector = List(384) { index -> if (index == 0) 1f else 0f }.toPgVectorLiteral()
+
+        insertServerGlobalEmbeddingSet(firstSetId, "sha256:profile-one")
+        insertServerGlobalEmbeddingSet(secondSetId, "sha256:profile-two")
+        assertThat(embeddingSetStore.findById(EmbeddingSetId(firstSetId.toString())))
+            .extracting(
+                { it!!.projectId },
+                { it!!.scope },
+                { it!!.profileFingerprint },
+            )
+            .containsExactly(null, EmbeddingSetScope.SERVER_GLOBAL, "sha256:profile-one")
+        jdbc.update(
+            """
+            INSERT INTO chunk_embeddings (
+                chunk_embedding_id, chunk_id, embedding_set_id, embedding, metadata, created_at
+            ) VALUES (?, ?, ?, CAST(? AS vector), '{}'::jsonb, ?)
+            """.trimIndent(),
+            firstEmbeddingId,
+            UUID.fromString(storedChunk.id.value),
+            firstSetId,
+            vector,
+            java.sql.Timestamp.from(now),
+        )
+        jdbc.update(
+            """
+            INSERT INTO chunk_embeddings (
+                chunk_embedding_id, chunk_id, embedding_set_id, embedding, metadata, created_at
+            ) VALUES (?, ?, ?, CAST(? AS vector), '{}'::jsonb, ?)
+            """.trimIndent(),
+            secondEmbeddingId,
+            UUID.fromString(storedChunk.id.value),
+            secondSetId,
+            vector,
+            java.sql.Timestamp.from(now),
+        )
+        jdbc.update(
+            "INSERT INTO chunk_embedding_vectors_384 (chunk_embedding_id, embedding) VALUES (?, CAST(? AS vector(384)))",
+            firstEmbeddingId,
+            vector,
+        )
+        jdbc.update(
+            "INSERT INTO chunk_embedding_vectors_384 (chunk_embedding_id, embedding) VALUES (?, CAST(? AS vector(384)))",
+            secondEmbeddingId,
+            vector,
+        )
+        jdbc.update(
+            "INSERT INTO embedding_active_profiles (scope, active_embedding_set_id) VALUES ('server_global', ?)",
+            firstSetId,
+        )
+        val legacySet = embeddingSet(
+            scope = "server-global-profile-legacy-set",
+            projectId = fixture.project.id,
+            model = "legacy-profile-test",
+            version = "v1",
+        )
+        embeddingSetStore.resolveOrCreate(legacySet)
+        assertThatThrownBy {
+            jdbc.update(
+                "UPDATE embedding_active_profiles SET active_embedding_set_id = ? WHERE scope = 'server_global'",
+                UUID.fromString(legacySet.id.value),
+            )
+        }.isInstanceOf(Exception::class.java)
+
+        jdbc.dataSource!!.connection.use { connection ->
+            connection.autoCommit = false
+            connection.prepareStatement(
+                "UPDATE embedding_active_profiles SET active_embedding_set_id = ? WHERE scope = 'server_global'",
+            ).use { statement ->
+                statement.setObject(1, secondSetId)
+                statement.executeUpdate()
+            }
+            connection.rollback()
+        }
+
+        assertThat(
+            jdbc.queryForObject(
+                "SELECT active_embedding_set_id::text FROM embedding_active_profiles WHERE scope = 'server_global'",
+                String::class.java,
+            ),
+        ).isEqualTo(firstSetId.toString())
+        assertThat(
+            jdbc.queryForObject(
+                """
+                SELECT count(*)
+                FROM chunk_embedding_vectors_384 typed_vector
+                JOIN chunk_embeddings chunk_embedding
+                    ON chunk_embedding.chunk_embedding_id = typed_vector.chunk_embedding_id
+                WHERE chunk_embedding.embedding_set_id IN (?, ?)
+                """.trimIndent(),
+                Long::class.java,
+                firstSetId,
+                secondSetId,
+            ),
+        ).isEqualTo(2L)
+        assertThatThrownBy {
+            jdbc.update("DELETE FROM embedding_sets WHERE embedding_set_id = ?", firstSetId)
+        }.isInstanceOf(Exception::class.java)
+        assertThatThrownBy {
+            jdbc.update(
+                "UPDATE embedding_sets SET profile_fingerprint = 'sha256:mutated' WHERE embedding_set_id = ?",
+                firstSetId,
+            )
+        }.isInstanceOf(Exception::class.java)
+        assertThatThrownBy {
+            insertServerGlobalEmbeddingSet(UUID.fromString(stableUuid("server-global-profile-duplicate")), "sha256:profile-one")
+        }.isInstanceOf(Exception::class.java)
+    }
+
+    @Test
+    fun `V2 migration copies V1 legacy 384 vectors without changing V1 typed rows`() {
+        val databaseName = "p2a_legacy_${UUID.randomUUID().toString().replace('-', '_')}"
+        val jdbcUrl = postgres.jdbcUrl.substringBeforeLast('/') + "/$databaseName"
+
+        DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
+            connection.createStatement().use { statement ->
+                statement.execute("CREATE DATABASE $databaseName")
+            }
+        }
+        try {
+            Flyway.configure()
+                .dataSource(jdbcUrl, postgres.username, postgres.password)
+                .locations("classpath:db/migration")
+                .target("1")
+                .load()
+                .migrate()
+            seedV1EmbeddingFixture(jdbcUrl)
+
+            Flyway.configure()
+                .dataSource(jdbcUrl, postgres.username, postgres.password)
+                .locations("classpath:db/migration")
+                .load()
+                .migrate()
+
+            DriverManager.getConnection(jdbcUrl, postgres.username, postgres.password).use { connection ->
+                connection.createStatement().use { statement ->
+                    statement.executeQuery(
+                        """
+                        SELECT embedding_set.scope, count(*)
+                        FROM chunk_embedding_vectors_384 typed_vector
+                        JOIN chunk_embeddings chunk_embedding
+                            ON chunk_embedding.chunk_embedding_id = typed_vector.chunk_embedding_id
+                        JOIN embedding_sets embedding_set
+                            ON embedding_set.embedding_set_id = chunk_embedding.embedding_set_id
+                        GROUP BY embedding_set.scope
+                        """.trimIndent(),
+                    ).use { result ->
+                        assertThat(result.next()).isTrue()
+                        assertThat(result.getString("scope")).isEqualTo("LEGACY")
+                        assertThat(result.getLong("count")).isEqualTo(1L)
+                    }
+                    statement.executeQuery("SELECT count(*) FROM chunk_embedding_vectors_2").use { result ->
+                        assertThat(result.next()).isTrue()
+                        assertThat(result.getLong(1)).isEqualTo(1L)
+                    }
+                    statement.executeQuery(
+                        """
+                        SELECT profile_fingerprint IS NULL AND profile_manifest IS NULL
+                        FROM embedding_sets
+                        WHERE scope = 'LEGACY'
+                        """.trimIndent(),
+                    ).use { result ->
+                        assertThat(result.next()).isTrue()
+                        assertThat(result.getBoolean(1)).isTrue()
+                    }
+                }
+            }
+        } finally {
+            DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
+                connection.createStatement().use { statement ->
+                    statement.execute("DROP DATABASE IF EXISTS $databaseName")
+                }
+            }
+        }
     }
 
     @Test
@@ -491,6 +703,40 @@ class PostgresStorageIntegrationTest {
     }
 
     @Test
+    fun `384 dimensional embeddings are persisted through the typed vector mirror`() {
+        val fixture = saveProjectAndIteration("typed-384")
+        val document = writeUseCase.saveDocumentSnapshot(documentCommand(
+            scope = "typed-384-document",
+            projectId = fixture.project.id,
+            iterationId = fixture.iteration.id,
+            sourcePath = "docs/typed-384.md",
+            contentHash = "typed-384-document-hash",
+        ))
+        val embeddingSet = embeddingSet(
+            scope = "typed-384-set",
+            projectId = fixture.project.id,
+            model = "legacy-384",
+            version = "v1",
+            dimension = 384,
+        )
+
+        writeUseCase.saveDocumentChunks(
+            SaveDocumentChunksCommand(
+                documentId = document.id,
+                chunks = listOf(
+                    DocumentChunkWrite(
+                        chunk = chunk("typed-384-chunk", document, chunkHash = "typed-384-chunk-hash"),
+                        embeddingSet = embeddingSet,
+                        embedding = Embedding(List(384) { index -> if (index == 0) 1f else 0f }),
+                    ),
+                ),
+            ),
+        )
+
+        assertThat(rowCount("chunk_embedding_vectors_384")).isEqualTo(1)
+    }
+
+    @Test
     fun `write use case normalizes source paths while preserving raw paths`() {
         val fixture = saveProjectAndIteration("path-normalization")
         val rawPath = """iterations\v1\gate-b-spec\spec.json"""
@@ -597,6 +843,25 @@ class PostgresStorageIntegrationTest {
             String::class.java,
             UUID.fromString(taskGraphId.value),
         )
+
+    private fun insertServerGlobalEmbeddingSet(id: UUID, fingerprint: String) {
+        jdbc.update(
+            """
+            INSERT INTO embedding_sets (
+                embedding_set_id, project_id, scope, embedding_model, embedding_dimension,
+                embedding_version, distance_metric, storage_type, profile_fingerprint,
+                profile_manifest, metadata, created_at
+            ) VALUES (
+                ?, NULL, 'SERVER_GLOBAL', 'intfloat/multilingual-e5-small', 384,
+                'v2', 'cosine', 'vector', ?, CAST(? AS jsonb), '{}'::jsonb, ?
+            )
+            """.trimIndent(),
+            id,
+            fingerprint,
+            """{"schemaVersion":"p2a.embedding-profile.v1"}""",
+            java.sql.Timestamp.from(now),
+        )
+    }
 
     companion object {
         private val pgvectorImage = DockerImageName.parse("pgvector/pgvector:0.8.5-pg17-bookworm@sha256:d2ef61f42ef767baa5a1475393303cc235bcd92febd9d7014eddb48b41f3bad0")
@@ -834,12 +1099,13 @@ private fun embeddingSet(
     projectId: ProjectId,
     model: String,
     version: String,
+    dimension: Int = 2,
 ): EmbeddingSet =
     EmbeddingSet(
         id = EmbeddingSetId(stableUuid("$scope-embedding-set")),
         projectId = projectId,
         embeddingModel = model,
-        embeddingDimension = 2,
+        embeddingDimension = dimension,
         embeddingVersion = version,
         distanceMetric = DistanceMetric.COSINE,
         storageType = EmbeddingStorageType.VECTOR_INDEX,
@@ -855,6 +1121,115 @@ private fun sourceReference(canonicalId: String, path: String): SourceReference 
 
 private fun stableUuid(seed: String): String =
     UUID.nameUUIDFromBytes(seed.toByteArray(StandardCharsets.UTF_8)).toString()
+
+private fun List<Float>.toPgVectorLiteral(): String =
+    joinToString(separator = ",", prefix = "[", postfix = "]") { it.toString() }
+
+private fun seedV1EmbeddingFixture(jdbcUrl: String) {
+    val projectId = UUID.fromString(stableUuid("v1-fixture-project"))
+    val documentId = UUID.fromString(stableUuid("v1-fixture-document"))
+    val chunkId = UUID.fromString(stableUuid("v1-fixture-chunk"))
+    val legacy384SetId = UUID.fromString(stableUuid("v1-fixture-384-set"))
+    val legacy2SetId = UUID.fromString(stableUuid("v1-fixture-2-set"))
+    val legacy384EmbeddingId = UUID.fromString(stableUuid("v1-fixture-384-embedding"))
+    val legacy2EmbeddingId = UUID.fromString(stableUuid("v1-fixture-2-embedding"))
+    val vector384 = List(384) { index -> if (index == 0) 1f else 0f }.toPgVectorLiteral()
+
+    DriverManager.getConnection(jdbcUrl, PostgresStorageIntegrationTest.postgres.username, PostgresStorageIntegrationTest.postgres.password).use { connection ->
+        connection.prepareStatement(
+            "INSERT INTO projects (project_id, source_project_id, name, root_path) VALUES (?, ?, ?, ?)",
+        ).use { statement ->
+            statement.setObject(1, projectId)
+            statement.setString(2, "v1-fixture-project")
+            statement.setString(3, "V1 fixture project")
+            statement.setString(4, "/v1-fixture")
+            statement.executeUpdate()
+        }
+        connection.prepareStatement(
+            """
+            INSERT INTO documents (
+                document_id, source_document_id, project_id, artifact_type, source_path,
+                content_hash, snapshot_version, content
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setObject(1, documentId)
+            statement.setString(2, "v1-fixture-document")
+            statement.setObject(3, projectId)
+            statement.setString(4, "DOCUMENT_SNAPSHOT")
+            statement.setString(5, "docs/v1-fixture.md")
+            statement.setString(6, "v1-fixture-document-hash")
+            statement.setInt(7, 1)
+            statement.setString(8, "V1 fixture content")
+            statement.executeUpdate()
+        }
+        connection.prepareStatement(
+            """
+            INSERT INTO document_chunks (
+                chunk_id, source_chunk_id, document_id, project_id, artifact_type, source_path,
+                chunk_index, chunk_hash, content
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setObject(1, chunkId)
+            statement.setString(2, "v1-fixture-chunk")
+            statement.setObject(3, documentId)
+            statement.setObject(4, projectId)
+            statement.setString(5, "DOCUMENT_SNAPSHOT")
+            statement.setString(6, "docs/v1-fixture.md")
+            statement.setInt(7, 0)
+            statement.setString(8, "v1-fixture-chunk-hash")
+            statement.setString(9, "V1 fixture chunk")
+            statement.executeUpdate()
+        }
+        connection.prepareStatement(
+            """
+            INSERT INTO embedding_sets (
+                embedding_set_id, project_id, embedding_model, embedding_dimension,
+                embedding_version, distance_metric, storage_type
+            ) VALUES (?, ?, ?, ?, ?, 'cosine', 'vector')
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setObject(1, legacy384SetId)
+            statement.setObject(2, projectId)
+            statement.setString(3, "legacy-384")
+            statement.setInt(4, 384)
+            statement.setString(5, "v1")
+            statement.executeUpdate()
+            statement.setObject(1, legacy2SetId)
+            statement.setObject(2, projectId)
+            statement.setString(3, "legacy-2")
+            statement.setInt(4, 2)
+            statement.setString(5, "v1")
+            statement.executeUpdate()
+        }
+        connection.prepareStatement(
+            """
+            INSERT INTO chunk_embeddings (
+                chunk_embedding_id, chunk_id, embedding_set_id, embedding
+            ) VALUES (?, ?, ?, CAST(? AS vector))
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setObject(1, legacy384EmbeddingId)
+            statement.setObject(2, chunkId)
+            statement.setObject(3, legacy384SetId)
+            statement.setString(4, vector384)
+            statement.executeUpdate()
+            statement.setObject(1, legacy2EmbeddingId)
+            statement.setObject(2, chunkId)
+            statement.setObject(3, legacy2SetId)
+            statement.setString(4, "[0.0,1.0]")
+            statement.executeUpdate()
+        }
+        connection.prepareStatement(
+            "INSERT INTO chunk_embedding_vectors_2 (chunk_embedding_id, embedding) VALUES (?, CAST(? AS vector(2)))",
+        ).use { statement ->
+            statement.setObject(1, legacy2EmbeddingId)
+            statement.setString(2, "[0.0,1.0]")
+            statement.executeUpdate()
+        }
+    }
+}
 
 private val now: Instant = Instant.parse("2026-06-29T00:00:00Z")
 

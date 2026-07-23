@@ -192,20 +192,39 @@ data class DocumentChunk(
 
 data class EmbeddingSet(
     val id: EmbeddingSetId,
-    val projectId: ProjectId,
+    val projectId: ProjectId?,
     val embeddingModel: String,
     val embeddingDimension: Int,
     val embeddingVersion: String,
     val distanceMetric: DistanceMetric,
     val storageType: EmbeddingStorageType,
     val createdAt: Instant,
+    val scope: EmbeddingSetScope = EmbeddingSetScope.LEGACY,
+    val profileFingerprint: String? = null,
+    val profileManifest: String? = null,
     val metadata: Map<String, String> = emptyMap(),
 ) {
     init {
         require(embeddingModel.isNotBlank()) { "EmbeddingSet embeddingModel must not be blank" }
         require(embeddingDimension > 0) { "EmbeddingSet embeddingDimension must be positive" }
         require(embeddingVersion.isNotBlank()) { "EmbeddingSet embeddingVersion must not be blank" }
+        when (scope) {
+            EmbeddingSetScope.LEGACY -> {
+                require(profileFingerprint == null) { "Legacy EmbeddingSet must not have a profileFingerprint" }
+                require(profileManifest == null) { "Legacy EmbeddingSet must not have a profileManifest" }
+            }
+            EmbeddingSetScope.SERVER_GLOBAL -> {
+                require(projectId == null) { "Server-global EmbeddingSet must not have a projectId" }
+                require(!profileFingerprint.isNullOrBlank()) { "Server-global EmbeddingSet must have a profileFingerprint" }
+                require(!profileManifest.isNullOrBlank()) { "Server-global EmbeddingSet must have a profileManifest" }
+            }
+        }
     }
+}
+
+enum class EmbeddingSetScope {
+    LEGACY,
+    SERVER_GLOBAL,
 }
 
 data class ChunkEmbedding(
