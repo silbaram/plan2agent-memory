@@ -1,5 +1,6 @@
 package com.github.silbaram.plan2agent.memory.adapter.out.postgres
 
+import com.github.silbaram.plan2agent.memory.application.port.out.ActiveVectorSearchQuery
 import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactQueryPort
 import com.github.silbaram.plan2agent.memory.application.port.out.KeywordSearchPort
 import com.github.silbaram.plan2agent.memory.application.port.out.VectorSearchPort
@@ -48,6 +49,7 @@ import com.github.silbaram.plan2agent.memory.domain.TaskGraph
 import com.github.silbaram.plan2agent.memory.domain.TaskGraphId
 import com.github.silbaram.plan2agent.memory.domain.TaskId
 import com.github.silbaram.plan2agent.memory.domain.TaskStatus
+import com.github.silbaram.plan2agent.memory.domain.V2EmbeddingProfile
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.AfterAll
@@ -98,6 +100,8 @@ class PostgresSearchIntegrationTest {
             RESTART IDENTITY CASCADE
             """.trimIndent(),
         )
+        jdbc.execute("RESET hnsw.ef_search")
+        jdbc.execute("RESET hnsw.max_scan_tuples")
     }
 
     @Test
@@ -593,6 +597,247 @@ class PostgresSearchIntegrationTest {
     }
 
     @Test
+    fun `active vector search isolates the exact set and preserves stable filtered pagination`() {
+        val fixture = saveProjectAndIteration("active-vector-isolation")
+        val document = saveDocument(
+            scope = "active-vector-isolation",
+            fixture = fixture,
+            sourcePath = "docs/active-vector.md",
+            content = "Active vector fixture.",
+        )
+        val taskRun = saveTaskAndRun("active-vector-isolation", fixture, document)
+        val activeSet = embeddingSet(
+            scope = "active-vector-set",
+            projectId = fixture.project.id,
+            model = V2EmbeddingProfile.fixed.model,
+            version = V2EmbeddingProfile.fixed.revision,
+            dimension = 384,
+        )
+        val inactiveSet = embeddingSet(
+            scope = "inactive-vector-set",
+            projectId = fixture.project.id,
+            model = "inactive-${V2EmbeddingProfile.fixed.model}",
+            version = V2EmbeddingProfile.fixed.revision,
+            dimension = 384,
+        )
+        val first = saveChunk(
+            scope = "active-vector-first",
+            document = document,
+            content = "active first",
+            taskRun = taskRun,
+            metadata = mapOf("phase" to "ann"),
+            embeddingSet = activeSet,
+            embedding = indexedVector(1.0f, 0.0f),
+        )
+        val second = saveChunk(
+            scope = "active-vector-second",
+            document = document,
+            content = "active second",
+            chunkIndex = 1,
+            taskRun = taskRun,
+            metadata = mapOf("phase" to "ann"),
+            embeddingSet = activeSet,
+            embedding = indexedVector(1.0f, 0.0f),
+        )
+        saveChunk(
+            scope = "active-vector-other-set",
+            document = document,
+            content = "inactive perfect match",
+            chunkIndex = 2,
+            taskRun = taskRun,
+            metadata = mapOf("phase" to "ann"),
+            embeddingSet = inactiveSet,
+            embedding = indexedVector(1.0f, 0.0f),
+        )
+        saveChunk(
+            scope = "active-vector-other-metadata",
+            document = document,
+            content = "wrong metadata",
+            chunkIndex = 3,
+            taskRun = taskRun,
+            metadata = mapOf("phase" to "other"),
+            embeddingSet = activeSet,
+            embedding = indexedVector(1.0f, 0.0f),
+        )
+        val otherTaskRun = saveTaskAndRun("active-vector-other-task", fixture, document)
+        saveChunk(
+            scope = "active-vector-other-task",
+            document = document,
+            content = "wrong task and run",
+            chunkIndex = 4,
+            taskRun = otherTaskRun,
+            metadata = mapOf("phase" to "ann"),
+            embeddingSet = activeSet,
+            embedding = indexedVector(1.0f, 0.0f),
+        )
+        val otherPathDocument = saveDocument(
+            scope = "active-vector-other-path",
+            fixture = fixture,
+            sourcePath = "docs/other-active-vector.md",
+            content = "Other active vector path.",
+        )
+        saveChunk(
+            scope = "active-vector-other-path",
+            document = otherPathDocument,
+            content = "wrong source path",
+            metadata = mapOf("phase" to "ann"),
+            embeddingSet = activeSet,
+            embedding = indexedVector(1.0f, 0.0f),
+        )
+        val otherFixture = saveProjectAndIteration("active-vector-other-project")
+        val otherProjectDocument = saveDocument(
+            scope = "active-vector-other-project",
+            fixture = otherFixture,
+            sourcePath = document.sourcePath,
+            content = "Other project active vector.",
+        )
+        val otherProjectSet = embeddingSet(
+            scope = "active-vector-other-project-set",
+            projectId = otherFixture.project.id,
+            model = "other-project-${V2EmbeddingProfile.fixed.model}",
+            version = V2EmbeddingProfile.fixed.revision,
+            dimension = 384,
+        )
+        saveChunk(
+            scope = "active-vector-other-project",
+            document = otherProjectDocument,
+            content = "wrong project and iteration",
+            metadata = mapOf("phase" to "ann"),
+            embeddingSet = otherProjectSet,
+            embedding = indexedVector(1.0f, 0.0f),
+        )
+        val wrongArtifact = saveChunk(
+            scope = "active-vector-other-artifact",
+            document = document,
+            content = "wrong artifact type",
+            chunkIndex = 5,
+            taskRun = taskRun,
+            metadata = mapOf("phase" to "ann"),
+            embeddingSet = activeSet,
+            embedding = indexedVector(1.0f, 0.0f),
+        )
+        jdbc.update(
+            "UPDATE document_chunks SET artifact_type = 'TASK_GRAPH' WHERE chunk_id = ?",
+            UUID.fromString(wrongArtifact.id.value),
+        )
+
+        val query = ActiveVectorSearchQuery(
+            embeddingSetId = activeSet.id,
+            embedding = indexedVector(1.0f, 0.0f),
+            projectId = fixture.project.id,
+            iterationId = fixture.iteration.id,
+            artifactType = ArtifactType.DOCUMENT_SNAPSHOT,
+            sourcePath = document.sourcePath,
+            taskId = taskRun.task.id,
+            runId = taskRun.run.id,
+            metadataFilters = mapOf("phase" to "ann"),
+            limit = 1,
+        )
+
+        val firstPage = vectorSearch.search(query)
+        val repeatedFirstPage = vectorSearch.search(query)
+        val secondPage = vectorSearch.search(query.copy(cursor = requireNotNull(firstPage.nextCursor)))
+
+        assertThat(firstPage.items.map { it.chunkId }).isEqualTo(repeatedFirstPage.items.map { it.chunkId })
+        assertThat((firstPage.items + secondPage.items).map { it.chunkId })
+            .containsExactlyInAnyOrder(first.id, second.id)
+        assertThat(firstPage.items.single().embeddingModel).isEqualTo(V2EmbeddingProfile.fixed.model)
+        assertThat(firstPage.items.single().embeddingVersion).isEqualTo(V2EmbeddingProfile.fixed.revision)
+    }
+
+    @Test
+    fun `active vector search falls back to exact cosine when filtered ANN underfills eligible rows`() {
+        val fixture = saveProjectAndIteration("active-vector-fallback")
+        val document = saveDocument(
+            scope = "active-vector-fallback",
+            fixture = fixture,
+            sourcePath = "docs/active-fallback.md",
+            content = "Active fallback fixture.",
+        )
+        val activeSet = embeddingSet(
+            scope = "active-vector-fallback-set",
+            projectId = fixture.project.id,
+            model = V2EmbeddingProfile.fixed.model,
+            version = V2EmbeddingProfile.fixed.revision,
+            dimension = 384,
+        )
+        val inactiveSet = embeddingSet(
+            scope = "active-vector-fallback-inactive-set",
+            projectId = fixture.project.id,
+            model = "inactive-${V2EmbeddingProfile.fixed.model}",
+            version = V2EmbeddingProfile.fixed.revision,
+            dimension = 384,
+        )
+        val activeChunks = listOf(
+            saveChunk("active-vector-fallback-a", document, "active fallback a", embeddingSet = activeSet, embedding = indexedVector(0.8f, 0.6f)),
+            saveChunk("active-vector-fallback-b", document, "active fallback b", chunkIndex = 1, embeddingSet = activeSet, embedding = indexedVector(0.7f, 0.7f)),
+            saveChunk("active-vector-fallback-c", document, "active fallback c", chunkIndex = 2, embeddingSet = activeSet, embedding = indexedVector(0.6f, 0.8f)),
+        )
+        repeat(12) { index ->
+            saveChunk(
+                scope = "active-vector-fallback-inactive-$index",
+                document = document,
+                content = "inactive ANN neighbor $index",
+                chunkIndex = index + 3,
+                embeddingSet = inactiveSet,
+                embedding = indexedVector(1.0f, 0.0f),
+            )
+        }
+        jdbc.execute("SET hnsw.ef_search = 1")
+        jdbc.execute("SET hnsw.max_scan_tuples = 1")
+
+        val result = vectorSearch.search(
+            ActiveVectorSearchQuery(
+                embeddingSetId = activeSet.id,
+                embedding = indexedVector(1.0f, 0.0f),
+                projectId = fixture.project.id,
+                sourcePath = document.sourcePath,
+                limit = 2,
+            ),
+        )
+
+        assertThat(result.items.map { it.chunkId }).containsExactly(activeChunks[0].id, activeChunks[1].id)
+        assertThat(result.nextCursor).isNotBlank()
+    }
+
+    @Test
+    fun `active vector search returns the actual short eligible set without requiring fallback`() {
+        val fixture = saveProjectAndIteration("active-vector-short")
+        val document = saveDocument(
+            scope = "active-vector-short",
+            fixture = fixture,
+            sourcePath = "docs/active-short.md",
+            content = "Active short fixture.",
+        )
+        val activeSet = embeddingSet(
+            scope = "active-vector-short-set",
+            projectId = fixture.project.id,
+            model = V2EmbeddingProfile.fixed.model,
+            version = V2EmbeddingProfile.fixed.revision,
+            dimension = 384,
+        )
+        val chunk = saveChunk(
+            scope = "active-vector-short-match",
+            document = document,
+            content = "only eligible vector",
+            embeddingSet = activeSet,
+            embedding = indexedVector(1.0f, 0.0f),
+        )
+
+        val result = vectorSearch.search(
+            ActiveVectorSearchQuery(
+                embeddingSetId = activeSet.id,
+                embedding = indexedVector(1.0f, 0.0f),
+                projectId = fixture.project.id,
+                limit = 2,
+            ),
+        )
+
+        assertThat(result.items.map { it.chunkId }).containsExactly(chunk.id)
+        assertThat(result.nextCursor).isNull()
+    }
+
+    @Test
     fun `vector search handles empty embeddings and model dimension version mismatches`() {
         val fixture = saveProjectAndIteration("vector-validation")
         val document = saveDocument(
@@ -905,6 +1150,9 @@ private fun stableUuid(seed: String): String =
 
 private fun List<Float>.toPgVectorLiteral(): String =
     joinToString(separator = ",", prefix = "[", postfix = "]") { it.toString() }
+
+private fun indexedVector(first: Float, second: Float): Embedding =
+    Embedding(List(384) { index -> if (index == 0) first else if (index == 1) second else 0.0f })
 
 private fun entry(key: String, value: String): Map.Entry<String, String> =
     java.util.AbstractMap.SimpleImmutableEntry(key, value)
