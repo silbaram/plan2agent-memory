@@ -114,12 +114,14 @@ class FileSystemTransformersArtifactVerifier : TransformersArtifactVerifier {
         embeddingProperties: EmbeddingProperties,
         profile: V2EmbeddingProfile,
     ): TransformersEmbeddingArtifacts {
-        val modelArtifactUri = requireFileUri(embeddingProperties.modelArtifactUri, "model artifact")
-        val tokenizerArtifactUri = requireFileUri(embeddingProperties.tokenizerArtifactUri, "tokenizer artifact")
+        val modelArtifactUri = requireFileUri(embeddingProperties.modelArtifactUri)
+        val tokenizerArtifactUri = requireFileUri(embeddingProperties.tokenizerArtifactUri)
 
-        verifyChecksum(modelArtifactUri, profile.modelSha256, "model artifact")
-        verifyChecksum(tokenizerArtifactUri, profile.tokenizerSha256, "tokenizer artifact")
-        require(profile.modelOutputName.isNotBlank()) { "Transformers model output name must not be blank" }
+        verifyChecksum(modelArtifactUri, profile.modelSha256)
+        verifyChecksum(tokenizerArtifactUri, profile.tokenizerSha256)
+        if (profile.modelOutputName.isBlank()) {
+            throw TransformersArtifactValidationException()
+        }
 
         return TransformersEmbeddingArtifacts(
             modelArtifactUri = modelArtifactUri,
@@ -128,33 +130,54 @@ class FileSystemTransformersArtifactVerifier : TransformersArtifactVerifier {
         )
     }
 
-    private fun requireFileUri(uri: URI?, artifactName: String): URI {
-        requireNotNull(uri) { "Transformers $artifactName URI is required" }
-        require(uri.scheme == "file") { "Transformers $artifactName URI must use the file scheme" }
+    private fun requireFileUri(uri: URI?): URI {
+        if (uri == null || !uri.scheme.equals("file", ignoreCase = true)) {
+            throw TransformersArtifactValidationException()
+        }
 
-        val path = Path.of(uri)
-        require(Files.isRegularFile(path) && Files.isReadable(path)) {
-            "Transformers $artifactName must be a readable file"
+        val readableFile = try {
+            val path = Path.of(uri)
+            Files.isRegularFile(path) && Files.isReadable(path)
+        } catch (failure: Throwable) {
+            if (failure is VirtualMachineError) {
+                throw failure
+            }
+            false
+        }
+        if (!readableFile) {
+            throw TransformersArtifactValidationException()
         }
         return uri
     }
 
-    private fun verifyChecksum(uri: URI, expectedChecksum: String, artifactName: String) {
-        val actualChecksum = Files.newInputStream(Path.of(uri)).use { input ->
-            val digest = MessageDigest.getInstance("SHA-256")
-            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-            while (true) {
-                val read = input.read(buffer)
-                if (read < 0) {
-                    break
+    private fun verifyChecksum(uri: URI, expectedChecksum: String) {
+        val actualChecksum = try {
+            Files.newInputStream(Path.of(uri)).use { input ->
+                val digest = MessageDigest.getInstance("SHA-256")
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) {
+                        break
+                    }
+                    digest.update(buffer, 0, read)
                 }
-                digest.update(buffer, 0, read)
+                HexFormat.of().formatHex(digest.digest())
             }
-            HexFormat.of().formatHex(digest.digest())
+        } catch (failure: Throwable) {
+            if (failure is VirtualMachineError) {
+                throw failure
+            }
+            throw TransformersArtifactValidationException()
         }
-        require(actualChecksum == expectedChecksum) { "Transformers $artifactName checksum does not match the embedding profile" }
+        if (actualChecksum != expectedChecksum) {
+            throw TransformersArtifactValidationException()
+        }
     }
 }
+
+/** A safe failure for local model validation; artifact locations and contents stay private. */
+class TransformersArtifactValidationException : IllegalStateException("Transformers artifact validation failed")
 
 fun interface TransformersEmbeddingModelFactory {
     fun create(artifacts: TransformersEmbeddingArtifacts): TransformersEmbeddingModelSession

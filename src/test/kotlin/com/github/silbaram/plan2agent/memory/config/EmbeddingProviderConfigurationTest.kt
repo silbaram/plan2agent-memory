@@ -129,11 +129,57 @@ class EmbeddingProviderConfigurationTest {
     }
 
     @Test
-    fun `transformers lifecycle makes output node failures unavailable`() {
+    fun `artifact validation failures have a stable non-sensitive message`() {
+        val verifier = FileSystemTransformersArtifactVerifier()
+        val missingModel = URI.create("file:///private/models/credential=do-not-expose/model.onnx")
+        val missingTokenizer = URI.create("file:///private/models/credential=do-not-expose/tokenizer.json")
+        val model = Files.createTempFile("p2a-model-integrity-", ".onnx")
+        val tokenizer = Files.createTempFile("p2a-tokenizer-integrity-", ".json")
+
+        try {
+            assertThatThrownBy {
+                verifier.verify(
+                    EmbeddingProperties(
+                        provider = EmbeddingProviderKind.TRANSFORMERS,
+                        modelArtifactUri = missingModel,
+                        tokenizerArtifactUri = missingTokenizer,
+                    ),
+                    V2EmbeddingProfile.fixed,
+                )
+            }
+                .isInstanceOf(TransformersArtifactValidationException::class.java)
+                .hasMessage("Transformers artifact validation failed")
+                .hasMessageNotContaining(missingModel.toString())
+                .hasMessageNotContaining("credential=do-not-expose")
+
+            assertThatThrownBy {
+                verifier.verify(
+                    EmbeddingProperties(
+                        provider = EmbeddingProviderKind.TRANSFORMERS,
+                        modelArtifactUri = model.toUri(),
+                        tokenizerArtifactUri = tokenizer.toUri(),
+                    ),
+                    V2EmbeddingProfile.fixed,
+                )
+            }
+                .isInstanceOf(TransformersArtifactValidationException::class.java)
+                .hasMessage("Transformers artifact validation failed")
+                .hasMessageNotContaining(model.toString())
+                .hasMessageNotContaining(tokenizer.toString())
+        } finally {
+            Files.deleteIfExists(model)
+            Files.deleteIfExists(tokenizer)
+        }
+    }
+
+    @Test
+    fun `transformers lifecycle makes output node failures unavailable without surfacing model details`() {
         transformerContext(
             modelFactory = TransformersEmbeddingModelFactory {
                 TransformersEmbeddingModelSession {
-                    throw IllegalStateException("Configured model output node does not exist")
+                    throw IllegalStateException(
+                        "Configured output node exposed credential=do-not-expose at file:///private/model.onnx for source content",
+                    )
                 }
             },
         )

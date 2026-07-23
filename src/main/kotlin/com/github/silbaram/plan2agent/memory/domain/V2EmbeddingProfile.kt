@@ -1,5 +1,9 @@
 package com.github.silbaram.plan2agent.memory.domain
 
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
+import java.util.HexFormat
+
 /**
  * Immutable vector-space contract for the initial server-managed embedding target.
  *
@@ -43,6 +47,33 @@ data class V2EmbeddingProfile(
 
     fun queryInput(query: String): String = queryPrefix + query
 
+    /**
+     * The complete vector-space manifest used to identify an immutable embedding set.
+     *
+     * Provider kind, local artifact URIs, and worker tuning are runtime bindings, not
+     * vector-space properties, and are intentionally absent from this manifest.
+     */
+    val manifest: V2EmbeddingProfileManifest
+        get() = V2EmbeddingProfileManifest(
+            profileSchema = schemaVersion,
+            model = model,
+            revision = revision,
+            modelSha256 = modelSha256,
+            tokenizerSha256 = tokenizerSha256,
+            modelOutputName = modelOutputName,
+            dimension = dimension,
+            distanceMetric = distanceMetric.canonicalValue,
+            documentPrefix = documentPrefix,
+            queryPrefix = queryPrefix,
+            tokenizer = tokenizer.toManifest(),
+            pooling = pooling.canonicalValue,
+            l2Normalize = l2Normalize,
+        )
+
+    /** A deterministic `sha256:<lowercase-hex>` identifier for [manifest]. */
+    val fingerprint: String
+        get() = manifest.fingerprint
+
     companion object {
         const val SCHEMA_VERSION = "p2a.embedding-profile.v1"
         const val MODEL = "intfloat/multilingual-e5-small"
@@ -74,8 +105,137 @@ data class V2TokenizerContract(
     }
 }
 
+/**
+ * A serializable vector-space manifest. Its canonical JSON and fingerprint are stable
+ * across deployment-specific configuration changes.
+ */
+data class V2EmbeddingProfileManifest(
+    val profileSchema: String,
+    val model: String,
+    val revision: String,
+    val modelSha256: String,
+    val tokenizerSha256: String,
+    val modelOutputName: String,
+    val dimension: Int,
+    val distanceMetric: String,
+    val documentPrefix: String,
+    val queryPrefix: String,
+    val tokenizer: V2TokenizerManifest,
+    val pooling: String,
+    val l2Normalize: Boolean,
+) {
+    /**
+     * Whitespace-free UTF-8 JSON with a fixed field order. Do not use a general-purpose
+     * serializer here: serializer configuration could make a persisted fingerprint vary.
+     */
+    val canonicalJson: String
+        get() = buildString {
+            append('{')
+            appendJsonField("profileSchema", profileSchema, leadingComma = false)
+            appendJsonField("model", model)
+            appendJsonField("revision", revision)
+            appendJsonField("modelSha256", modelSha256)
+            appendJsonField("tokenizerSha256", tokenizerSha256)
+            appendJsonField("modelOutputName", modelOutputName)
+            appendJsonField("dimension", dimension)
+            appendJsonField("distanceMetric", distanceMetric)
+            appendJsonField("documentPrefix", documentPrefix)
+            appendJsonField("queryPrefix", queryPrefix)
+            append(",\"tokenizer\":{")
+            appendJsonField("addSpecialTokens", tokenizer.addSpecialTokens, leadingComma = false)
+            appendJsonField("modelMaxLength", tokenizer.modelMaxLength)
+            appendJsonField("maxLength", tokenizer.maxLength)
+            appendJsonField("padding", tokenizer.padding)
+            appendJsonField("truncation", tokenizer.truncation)
+            append('}')
+            appendJsonField("pooling", pooling)
+            appendJsonField("l2Normalize", l2Normalize)
+            append('}')
+        }
+
+    /** SHA-256 over [canonicalJson] encoded as UTF-8. */
+    val fingerprint: String
+        get() = "sha256:" + HexFormat.of().formatHex(
+            MessageDigest.getInstance("SHA-256").digest(canonicalJson.toByteArray(StandardCharsets.UTF_8)),
+        )
+}
+
+data class V2TokenizerManifest(
+    val addSpecialTokens: Boolean,
+    val modelMaxLength: Int,
+    val maxLength: Int,
+    val padding: Boolean,
+    val truncation: Boolean,
+)
+
 enum class V2Pooling {
     ATTENTION_MASKED_MEAN_V1,
+}
+
+private val DistanceMetric.canonicalValue: String
+    get() = name.lowercase()
+
+private val V2Pooling.canonicalValue: String
+    get() = name.lowercase()
+
+private fun V2TokenizerContract.toManifest(): V2TokenizerManifest =
+    V2TokenizerManifest(
+        addSpecialTokens = addSpecialTokens,
+        modelMaxLength = modelMaxLength,
+        maxLength = maxLength,
+        padding = padding,
+        truncation = truncation,
+    )
+
+private fun StringBuilder.appendJsonField(name: String, value: String, leadingComma: Boolean = true) {
+    if (leadingComma) {
+        append(',')
+    }
+    appendJsonString(name)
+    append(':')
+    appendJsonString(value)
+}
+
+private fun StringBuilder.appendJsonField(name: String, value: Int, leadingComma: Boolean = true) {
+    if (leadingComma) {
+        append(',')
+    }
+    appendJsonString(name)
+    append(':')
+    append(value)
+}
+
+private fun StringBuilder.appendJsonField(name: String, value: Boolean, leadingComma: Boolean = true) {
+    if (leadingComma) {
+        append(',')
+    }
+    appendJsonString(name)
+    append(':')
+    append(value)
+}
+
+private fun StringBuilder.appendJsonString(value: String) {
+    append('"')
+    value.forEach { character ->
+        when (character) {
+            '"' -> append("\\\"")
+            '\\' -> append("\\\\")
+            '\b' -> append("\\b")
+            '\u000C' -> append("\\f")
+            '\n' -> append("\\n")
+            '\r' -> append("\\r")
+            '\t' -> append("\\t")
+            else -> {
+                if (character.code < 0x20) {
+                    append("\\u")
+                    append(character.code.toString(16).padStart(4, '0'))
+                } else {
+                    append(character)
+                }
+            }
+        }
+    }
+    append('"')
 }
 
 private fun String.isSha256(): Boolean = matches(Regex("[0-9a-f]{64}"))
