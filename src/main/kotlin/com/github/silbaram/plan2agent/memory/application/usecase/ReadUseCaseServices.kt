@@ -5,6 +5,7 @@ import com.github.silbaram.plan2agent.memory.application.port.`in`.FindArtifactG
 import com.github.silbaram.plan2agent.memory.application.port.`in`.TraceArtifactGraphUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.HybridSearchUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.KeywordSearchUseCase
+import com.github.silbaram.plan2agent.memory.application.port.`in`.SemanticSearchUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.VectorSearchUseCase
 import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactQueryPort
 import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactGraphStorePort
@@ -27,6 +28,7 @@ class ReadUseCaseService(
     private val artifactQueryPort: ArtifactQueryPort,
     private val keywordSearchPort: KeywordSearchPort,
     private val vectorSearchPort: VectorSearchPort,
+    private val semanticSearchUseCase: SemanticSearchUseCase,
     private val artifactGraphStore: ArtifactGraphStorePort,
 ) : FindArtifactsUseCase,
     KeywordSearchUseCase,
@@ -83,14 +85,6 @@ class ReadUseCaseService(
     @Transactional(readOnly = true)
     override fun hybridSearch(query: HybridSearchQuery): PagedResult<HybridSearchMatch> {
         require(query.query.isNotBlank()) { "HybridSearchQuery query must not be blank" }
-        require(query.embedding.values.isNotEmpty()) { "HybridSearchQuery embedding must not be empty" }
-        require(query.embedding.values.all { it.isFinite() }) { "HybridSearchQuery embedding values must be finite" }
-        require(query.embeddingModel.isNotBlank()) { "HybridSearchQuery embeddingModel must not be blank" }
-        require(query.embeddingDimension > 0) { "HybridSearchQuery embeddingDimension must be positive" }
-        require(query.embedding.values.size == query.embeddingDimension) {
-            "HybridSearchQuery embeddingDimension must match embedding size"
-        }
-        require(query.embeddingVersion.isNotBlank()) { "HybridSearchQuery embeddingVersion must not be blank" }
         require(query.rrfK > 0) { "HybridSearchQuery rrfK must be positive" }
         require(query.candidateLimit >= query.limit) {
             "HybridSearchQuery candidateLimit must be greater than or equal to limit"
@@ -101,36 +95,8 @@ class ReadUseCaseService(
         validateMetadataFilters(query.metadataFilters, "HybridSearchQuery")
         validateOptionalCursor(query.cursor, "HybridSearchQuery")
 
-        val keywordMatches = keywordSearchPort.search(
-            KeywordSearchQuery(
-                query = query.query,
-                projectId = query.projectId,
-                iterationId = query.iterationId,
-                artifactType = query.artifactType,
-                sourcePath = query.sourcePath,
-                taskId = query.taskId,
-                runId = query.runId,
-                metadataFilters = query.metadataFilters,
-                limit = query.candidateLimit,
-            ),
-        ).items
-        val vectorMatches = vectorSearchPort.search(
-            VectorSearchQuery(
-                embedding = query.embedding,
-                embeddingModel = query.embeddingModel,
-                embeddingDimension = query.embeddingDimension,
-                embeddingVersion = query.embeddingVersion,
-                distanceMetric = query.distanceMetric,
-                projectId = query.projectId,
-                iterationId = query.iterationId,
-                artifactType = query.artifactType,
-                sourcePath = query.sourcePath,
-                taskId = query.taskId,
-                runId = query.runId,
-                metadataFilters = query.metadataFilters,
-                limit = query.candidateLimit,
-            ),
-        ).items
+        val vectorMatches = semanticSearchUseCase.semanticSearch(query.toSemanticSearchQuery()).items
+        val keywordMatches = keywordSearchPort.search(query.toKeywordSearchQuery()).items
 
         val fused = fuseByReciprocalRank(keywordMatches, vectorMatches, query.rrfK)
         val afterCursor = query.cursor?.let(::decodeHybridCursor)
@@ -221,6 +187,32 @@ class ReadUseCaseService(
         }
     }
 }
+
+private fun HybridSearchQuery.toKeywordSearchQuery(): KeywordSearchQuery =
+    KeywordSearchQuery(
+        query = query,
+        projectId = projectId,
+        iterationId = iterationId,
+        artifactType = artifactType,
+        sourcePath = sourcePath,
+        taskId = taskId,
+        runId = runId,
+        metadataFilters = metadataFilters,
+        limit = candidateLimit,
+    )
+
+private fun HybridSearchQuery.toSemanticSearchQuery(): SemanticSearchQuery =
+    SemanticSearchQuery(
+        query = query,
+        projectId = projectId,
+        iterationId = iterationId,
+        artifactType = artifactType,
+        sourcePath = sourcePath,
+        taskId = taskId,
+        runId = runId,
+        metadataFilters = metadataFilters,
+        limit = candidateLimit,
+    )
 
 private data class RankedKeyword(
     val match: KeywordSearchMatch,

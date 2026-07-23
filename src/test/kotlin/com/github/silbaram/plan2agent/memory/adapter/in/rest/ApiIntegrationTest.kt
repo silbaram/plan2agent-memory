@@ -206,15 +206,10 @@ class ApiIntegrationTest {
             .isEqualTo("${fixture.sourcePath}#chunk-0")
         assertThat(vectorResults["nextCursor"].isNull).isTrue()
 
-        val hybridResults = postJson(
+        val hybridProviderFailure = postJson(
             "/api/search/hybrid",
             mapOf(
                 "q" to "api-search-needle",
-                "embedding" to listOf(1.0f, 0.0f),
-                "embeddingModel" to fixture.embeddingModel,
-                "embeddingDimension" to 2,
-                "embeddingVersion" to fixture.embeddingVersion,
-                "distanceMetric" to "COSINE",
                 "projectId" to fixture.projectId,
                 "iterationId" to fixture.iterationId,
                 "taskId" to fixture.taskId,
@@ -223,14 +218,8 @@ class ApiIntegrationTest {
                 "candidateLimit" to 10,
                 "limit" to 5,
             ),
-        ).expectOkJson()
-        assertThat(hybridResults["items"].single()["chunkId"].asText()).isEqualTo(fixture.chunkId)
-        assertThat(hybridResults["items"].single()["matchReason"].asText()).isEqualTo("hybrid.keyword+vector")
-        assertThat(hybridResults["items"].single()["keyword"]["rank"].asInt()).isEqualTo(1)
-        assertThat(hybridResults["items"].single()["vector"]["rank"].asInt()).isEqualTo(1)
-        assertThat(hybridResults["items"].single()["citation"]["sourceReference"]["path"].asText())
-            .isEqualTo("${fixture.sourcePath}#chunk-0")
-        assertThat(hybridResults["nextCursor"].isNull).isTrue()
+        ).andExpect(status().isServiceUnavailable()).andReturnJson()
+        assertThat(hybridProviderFailure["error"].asText()).isEqualTo("embedding_provider_not_configured")
 
         getWithoutToken("/actuator/metrics/p2a.memory.write.calls")
             .andExpect(status().isOk())

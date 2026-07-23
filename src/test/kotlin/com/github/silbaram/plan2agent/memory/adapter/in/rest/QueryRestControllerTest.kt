@@ -1,3 +1,5 @@
+@file:Suppress("DEPRECATION")
+
 package com.github.silbaram.plan2agent.memory.adapter.`in`.rest
 
 import com.fasterxml.jackson.databind.exc.UnrecognizedPropertyException
@@ -12,6 +14,7 @@ import com.github.silbaram.plan2agent.memory.application.port.`in`.VectorSearchU
 import com.github.silbaram.plan2agent.memory.application.port.out.ProviderNotConfiguredException
 import com.github.silbaram.plan2agent.memory.application.port.out.ProviderUnavailableException
 import com.github.silbaram.plan2agent.memory.application.usecase.FindArtifactsQuery
+import com.github.silbaram.plan2agent.memory.application.usecase.DEFAULT_RRF_K
 import com.github.silbaram.plan2agent.memory.application.usecase.GraphNodeSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.GraphTraceQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.HybridSearchQuery
@@ -48,6 +51,12 @@ import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
 import java.time.Instant
+import org.springframework.http.MediaType
+import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post
+import org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath
+import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
+import org.springframework.test.web.servlet.setup.MockMvcBuilders
 
 class QueryRestControllerTest {
     private val findArtifacts = FakeFindArtifactsUseCase()
@@ -420,7 +429,7 @@ class QueryRestControllerTest {
     }
 
     @Test
-    fun `semantic REST contract exposes stable provider 503 errors and rejects client vectors`() {
+    fun `semantic and hybrid REST contracts expose stable provider 503 errors and reject client vectors`() {
         val errors = RestExceptionHandler()
         val notConfigured = errors.embeddingProviderNotConfigured(ProviderNotConfiguredException())
         val unavailable = errors.embeddingProviderUnavailable(ProviderUnavailableException())
@@ -438,6 +447,39 @@ class QueryRestControllerTest {
             )
         }
             .isInstanceOf(UnrecognizedPropertyException::class.java)
+        assertThatThrownBy {
+            JacksonObjectMapperConfig().objectMapper().readValue(
+                """{"q":"결제 취소 정책","embedding":[0.1]}""",
+                HybridSearchRequest::class.java,
+            )
+        }
+            .isInstanceOf(UnrecognizedPropertyException::class.java)
+    }
+
+    @Test
+    fun `hybrid controller propagates configured and unavailable provider failures as 503 responses`() {
+        val mockMvc = MockMvcBuilders.standaloneSetup(controller)
+            .setControllerAdvice(RestExceptionHandler())
+            .setMessageConverters(MappingJackson2HttpMessageConverter(JacksonObjectMapperConfig().objectMapper()))
+            .build()
+
+        hybridSearch.failure = ProviderNotConfiguredException()
+        mockMvc.perform(
+            post("/api/search/hybrid")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""{"q":"decision"}"""),
+        )
+            .andExpect(status().isServiceUnavailable())
+            .andExpect(jsonPath("$.error").value("embedding_provider_not_configured"))
+
+        hybridSearch.failure = ProviderUnavailableException()
+        mockMvc.perform(
+            post("/api/search/hybrid")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""{"q":"decision"}"""),
+        )
+            .andExpect(status().isServiceUnavailable())
+            .andExpect(jsonPath("$.error").value("embedding_provider_unavailable"))
     }
 
     @Test
@@ -467,11 +509,6 @@ class QueryRestControllerTest {
         val response = controller.hybridSearch(
             HybridSearchRequest(
                 q = "decision",
-                embedding = listOf(0.1f, 0.2f),
-                embeddingModel = "text-embedding-test",
-                embeddingDimension = 2,
-                embeddingVersion = "v1",
-                distanceMetric = "cosine",
                 projectId = RestTestIds.projectId.value,
                 iterationId = RestTestIds.iterationId.value,
                 artifactType = "document_chunk",
@@ -489,11 +526,6 @@ class QueryRestControllerTest {
         assertThat(hybridSearch.received).isEqualTo(
             HybridSearchQuery(
                 query = "decision",
-                embedding = Embedding(listOf(0.1f, 0.2f)),
-                embeddingModel = "text-embedding-test",
-                embeddingDimension = 2,
-                embeddingVersion = "v1",
-                distanceMetric = DistanceMetric.COSINE,
                 projectId = RestTestIds.projectId,
                 iterationId = RestTestIds.iterationId,
                 artifactType = ArtifactType.DOCUMENT_CHUNK,
@@ -512,6 +544,16 @@ class QueryRestControllerTest {
         assertThat(response.items.single().vector?.rank).isEqualTo(2)
         assertThat(response.items.single().citation.sourceReference?.uri).isEqualTo("file:///repo/runs/task.md")
         assertThat(response.nextCursor).isEqualTo("next-hybrid-cursor")
+    }
+
+    @Test
+    fun `hybrid request normalizes q and resolves fusion defaults before use case execution`() {
+        val query = HybridSearchRequest(q = "  decision  ", limit = 25).toQuery()
+
+        assertThat(query.query).isEqualTo("decision")
+        assertThat(query.rrfK).isEqualTo(DEFAULT_RRF_K)
+        assertThat(query.candidateLimit).isEqualTo(100)
+        assertThat(query.limit).isEqualTo(25)
     }
 
     @Test
@@ -563,9 +605,11 @@ private class FakeSemanticSearchUseCase : SemanticSearchUseCase {
 private class FakeHybridSearchUseCase : HybridSearchUseCase {
     var received: HybridSearchQuery? = null
     var result: PagedResult<HybridSearchMatch> = PagedResult(emptyList(), nextCursor = "next-hybrid-cursor")
+    var failure: RuntimeException? = null
 
     override fun hybridSearch(query: HybridSearchQuery): PagedResult<HybridSearchMatch> {
         received = query
+        failure?.let { throw it }
         return result
     }
 }

@@ -246,11 +246,6 @@ data class VectorSearchQuery(
 
 data class HybridSearchQuery(
     val query: String,
-    val embedding: Embedding,
-    val embeddingModel: String,
-    val embeddingDimension: Int,
-    val embeddingVersion: String,
-    val distanceMetric: DistanceMetric,
     val projectId: ProjectId? = null,
     val iterationId: IterationId? = null,
     val artifactType: ArtifactType? = null,
@@ -265,10 +260,6 @@ data class HybridSearchQuery(
 ) {
     init {
         require(query.isNotBlank()) { "HybridSearchQuery query must not be blank" }
-        require(embedding.values.all { it.isFinite() }) { "HybridSearchQuery embedding values must be finite" }
-        require(embeddingModel.isNotBlank()) { "HybridSearchQuery embeddingModel must not be blank" }
-        require(embeddingDimension > 0) { "HybridSearchQuery embeddingDimension must be positive" }
-        require(embeddingVersion.isNotBlank()) { "HybridSearchQuery embeddingVersion must not be blank" }
         require(metadataFilters.keys.all { it.isNotBlank() }) {
             "HybridSearchQuery metadata filter keys must not be blank"
         }
