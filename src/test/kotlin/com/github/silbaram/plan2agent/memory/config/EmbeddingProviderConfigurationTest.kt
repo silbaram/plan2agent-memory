@@ -50,13 +50,15 @@ class EmbeddingProviderConfigurationTest {
             .withBean(ActiveEmbeddingProfileResolver::class.java, Supplier { resolvedProfile() })
             .run { context ->
                 assertThat(context).hasNotFailed()
-                assertThat(context).doesNotHaveBean(EmbeddingPort::class.java)
+                assertThat(context).hasSingleBean(EmbeddingPort::class.java)
                 assertThat(context).doesNotHaveBean(EmbeddingModel::class.java)
                 val properties = context.getBean(EmbeddingProperties::class.java)
                 assertThat(properties.provider).isEqualTo(EmbeddingProviderKind.TRANSFORMERS)
                 assertThat(properties.modelArtifactUri).hasToString("file:/models/model.onnx")
                 assertThat(properties.tokenizerArtifactUri).hasToString("file:/models/tokenizer.json")
                 assertThat(context.getBean(TransformersEmbeddingProviderLifecycle::class.java).providerState)
+                    .isEqualTo(EmbeddingProviderState.INITIALIZING)
+                assertThat(context.getBean(EmbeddingPort::class.java).providerState)
                     .isEqualTo(EmbeddingProviderState.INITIALIZING)
             }
     }

@@ -53,3 +53,8 @@ class ProviderUnavailableException(
     cause: Throwable? = null,
     retryable: Boolean = true,
 ) : EmbeddingProviderException(message, cause, retryable)
+
+class ProviderContractViolationException : EmbeddingProviderException(
+    message = "Embedding provider returned an invalid embedding",
+    retryable = false,
+)
