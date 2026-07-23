@@ -23,6 +23,17 @@ fun interface PersistedActiveEmbeddingSetResolver {
     fun requirePersistedActiveV2EmbeddingSetId(): EmbeddingSetId
 }
 
+/**
+ * Reads only an existing, structurally valid fixed V2 target for backfill and coverage.
+ *
+ * Unlike the bootstrap-capable resolvers used by the write and provider lifecycle paths, this
+ * boundary returns null for an absent, partial, dangling, or mismatched pointer. It intentionally
+ * exposes no set, pointer, or cutover mutation operation.
+ */
+fun interface StructurallyValidPersistedActiveEmbeddingSetResolver {
+    fun findStructurallyValidActiveV2EmbeddingSetId(): EmbeddingSetId?
+}
+
 class ActiveEmbeddingProfileResolutionException(
     cause: Throwable? = null,
 ) : RuntimeException("Active embedding profile resolution failed", cause)

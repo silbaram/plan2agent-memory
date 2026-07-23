@@ -33,6 +33,8 @@ p2a:
       worker:
         enabled: ${P2A_MEMORY_EMBEDDING_WORKER_ENABLED:true}
         poll-delay: ${P2A_MEMORY_EMBEDDING_WORKER_POLL_DELAY:1s}
+        backfill-poll-delay: ${P2A_MEMORY_EMBEDDING_WORKER_BACKFILL_POLL_DELAY:1m}
+        backfill-batch-size: ${P2A_MEMORY_EMBEDDING_WORKER_BACKFILL_BATCH_SIZE:500}
         claim-batch-size: ${P2A_MEMORY_EMBEDDING_WORKER_CLAIM_BATCH_SIZE:16}
         concurrency: ${P2A_MEMORY_EMBEDDING_WORKER_CONCURRENCY:1}
         lease-duration: ${P2A_MEMORY_EMBEDDING_WORKER_LEASE_DURATION:2m}

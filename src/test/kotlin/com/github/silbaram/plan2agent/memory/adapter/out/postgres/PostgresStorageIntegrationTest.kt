@@ -7,6 +7,7 @@ import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactQueryP
 import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingProfileResolutionException
 import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingProfileResolver
 import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingTarget
+import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingBackfillStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.ChunkEmbeddingStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.DocumentChunkStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.DocumentSnapshotStorePort
@@ -19,6 +20,7 @@ import com.github.silbaram.plan2agent.memory.application.port.out.FindEmbeddingJ
 import com.github.silbaram.plan2agent.memory.application.port.out.IterationStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.PersistedActiveEmbeddingSetResolutionException
 import com.github.silbaram.plan2agent.memory.application.port.out.PersistedActiveEmbeddingSetResolver
+import com.github.silbaram.plan2agent.memory.application.port.out.StructurallyValidPersistedActiveEmbeddingSetResolver
 import com.github.silbaram.plan2agent.memory.application.port.out.ProjectStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.RunRecordStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.TaskGraphStorePort
@@ -44,6 +46,8 @@ import com.github.silbaram.plan2agent.memory.domain.ArtifactNodeKind
 import com.github.silbaram.plan2agent.memory.domain.ArtifactRef
 import com.github.silbaram.plan2agent.memory.domain.ArtifactType
 import com.github.silbaram.plan2agent.memory.domain.CanonicalServerId
+import com.github.silbaram.plan2agent.memory.domain.ChunkEmbedding
+import com.github.silbaram.plan2agent.memory.domain.ChunkEmbeddingId
 import com.github.silbaram.plan2agent.memory.domain.ContentHash
 import com.github.silbaram.plan2agent.memory.domain.DistanceMetric
 import com.github.silbaram.plan2agent.memory.domain.DocumentChunk
@@ -152,10 +156,16 @@ class PostgresStorageIntegrationTest {
     private lateinit var persistedActiveEmbeddingSetResolver: PersistedActiveEmbeddingSetResolver
 
     @Autowired
+    private lateinit var structurallyValidActiveEmbeddingSetResolver: StructurallyValidPersistedActiveEmbeddingSetResolver
+
+    @Autowired
     private lateinit var embeddingPort: EmbeddingPort
 
     @Autowired
     private lateinit var embeddingJobStore: EmbeddingJobStorePort
+
+    @Autowired
+    private lateinit var activeEmbeddingBackfillStore: ActiveEmbeddingBackfillStorePort
 
     @Autowired
     private lateinit var transactionManager: PlatformTransactionManager
@@ -973,6 +983,169 @@ class PostgresStorageIntegrationTest {
         val chunkPage = embeddingJobStore.findPage(query.copy(chunkId = firstFixture.chunk.id))
         assertThat(chunkPage.items.map { it.id }).containsExactly(firstJobId)
         assertThat(chunkPage.nextCursor).isNull()
+    }
+
+    @Test
+    fun `active-set backfill keyset batches repair mirrors and enqueue only missing active work`() {
+        val activeEmbeddingSetId = ensurePersistedActiveEmbeddingTarget()
+        val mirrorFixture = saveFixture("active-backfill-mirror")
+        val missingFixture = saveFixture("active-backfill-missing")
+        val legacyFixture = saveFixture("active-backfill-legacy")
+        val activeEmbeddingId = UUID.fromString(stableUuid("active-backfill-mirror-embedding"))
+        val vector = List(384) { index -> if (index == 0) 1f else 0f }.toPgVectorLiteral()
+
+        jdbc.update(
+            """
+            INSERT INTO chunk_embeddings (
+                chunk_embedding_id, chunk_id, embedding_set_id, embedding, metadata, created_at
+            ) VALUES (?, ?, ?, CAST(? AS vector), '{}'::jsonb, ?)
+            """.trimIndent(),
+            activeEmbeddingId,
+            UUID.fromString(mirrorFixture.chunk.id.value),
+            UUID.fromString(activeEmbeddingSetId.value),
+            vector,
+            java.sql.Timestamp.from(now),
+        )
+        val legacySet = embeddingSetStore.resolveOrCreate(
+            embeddingSet(
+                scope = "active-backfill-legacy",
+                projectId = legacyFixture.project.id,
+                model = "legacy-backfill-model",
+                version = "v1",
+            ),
+        )
+        chunkEmbeddingStore.saveAll(
+            listOf(
+                ChunkEmbedding(
+                    id = ChunkEmbeddingId(stableUuid("active-backfill-legacy-embedding")),
+                    embeddingSetId = legacySet.id,
+                    chunkId = legacyFixture.chunk.id,
+                    embedding = Embedding(listOf(1f, 0f)),
+                    createdAt = now,
+                ),
+            ),
+        )
+
+        var afterChunkId: DocumentChunkId? = null
+        repeat(3) {
+            val result = activeEmbeddingBackfillStore.reconcile(
+                embeddingSetId = activeEmbeddingSetId,
+                batchSize = 1,
+                afterChunkId = afterChunkId,
+                enqueuedAt = now,
+            )
+            assertThat(result.scannedChunks).isEqualTo(1)
+            afterChunkId = result.nextChunkId
+        }
+        val exhausted = activeEmbeddingBackfillStore.reconcile(
+            embeddingSetId = activeEmbeddingSetId,
+            batchSize = 1,
+            afterChunkId = afterChunkId,
+            enqueuedAt = now,
+        )
+
+        assertThat(exhausted.scannedChunks).isZero()
+        assertThat(
+            jdbc.queryForObject(
+                """
+                SELECT count(*)
+                FROM chunk_embedding_vectors_384
+                WHERE chunk_embedding_id = ?
+                """.trimIndent(),
+                Long::class.java,
+                activeEmbeddingId,
+            ),
+        ).isEqualTo(1L)
+        assertThat(embeddingJobStore.findPage(FindEmbeddingJobsQuery(chunkId = mirrorFixture.chunk.id)).items).isEmpty()
+        assertThat(embeddingJobStore.findPage(FindEmbeddingJobsQuery(chunkId = missingFixture.chunk.id)).items)
+            .singleElement()
+            .extracting { it.embeddingSetId }
+            .isEqualTo(activeEmbeddingSetId)
+        assertThat(embeddingJobStore.findPage(FindEmbeddingJobsQuery(chunkId = legacyFixture.chunk.id)).items)
+            .singleElement()
+            .extracting { it.embeddingSetId }
+            .isEqualTo(activeEmbeddingSetId)
+
+        val coverage = activeEmbeddingBackfillStore.coverage(activeEmbeddingSetId)
+        assertThat(coverage).extracting(
+            { it.eligibleTotal },
+            { it.pending },
+            { it.running },
+            { it.retrying },
+            { it.succeeded },
+            { it.permanentlyFailed },
+            { it.missing },
+        ).containsExactly(3L, 2L, 0L, 0L, 1L, 0L, 0L)
+
+        val repeated = activeEmbeddingBackfillStore.reconcile(
+            embeddingSetId = activeEmbeddingSetId,
+            batchSize = 500,
+            afterChunkId = null,
+            enqueuedAt = now,
+        )
+        assertThat(repeated.scannedChunks).isZero()
+        assertThat(
+            jdbc.queryForObject(
+                "SELECT count(*) FROM embedding_jobs WHERE embedding_set_id = ?",
+                Long::class.java,
+                UUID.fromString(activeEmbeddingSetId.value),
+            ),
+        ).isEqualTo(2L)
+    }
+
+    @Test
+    fun `concurrent active-set reconciliation creates one job per chunk`() {
+        val activeEmbeddingSetId = ensurePersistedActiveEmbeddingTarget()
+        repeat(4) { index -> saveFixture("active-backfill-concurrent-$index") }
+        val workers = 2
+        val ready = CountDownLatch(workers)
+        val start = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(workers)
+
+        try {
+            val results = (1..workers).map {
+                executor.submit {
+                    ready.countDown()
+                    check(start.await(10, TimeUnit.SECONDS)) { "concurrent backfill start timed out" }
+                    activeEmbeddingBackfillStore.reconcile(
+                        embeddingSetId = activeEmbeddingSetId,
+                        batchSize = 4,
+                        afterChunkId = null,
+                        enqueuedAt = now,
+                    )
+                }
+            }
+            assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue()
+            start.countDown()
+            results.forEach { it.get(20, TimeUnit.SECONDS) }
+        } finally {
+            executor.shutdownNow()
+            executor.awaitTermination(10, TimeUnit.SECONDS)
+        }
+
+        assertThat(
+            jdbc.queryForObject(
+                "SELECT count(*) FROM embedding_jobs WHERE embedding_set_id = ?",
+                Long::class.java,
+                UUID.fromString(activeEmbeddingSetId.value),
+            ),
+        ).isEqualTo(4L)
+    }
+
+    @Test
+    fun `backfill target resolver fails closed for a structurally invalid active pointer`() {
+        val mismatchedSetId = UUID.fromString(stableUuid("active-backfill-invalid-pointer"))
+        insertServerGlobalEmbeddingSet(
+            id = mismatchedSetId,
+            fingerprint = "sha256:not-the-fixed-v2-profile",
+            manifest = V2EmbeddingProfile.fixed.manifest.canonicalJson,
+            embeddingVersion = V2EmbeddingProfile.fixed.revision,
+        )
+        insertActiveProfilePointer(mismatchedSetId)
+
+        assertThat(structurallyValidActiveEmbeddingSetResolver.findStructurallyValidActiveV2EmbeddingSetId()).isNull()
+        assertThat(activeProfilePointer()).isEqualTo(mismatchedSetId.toString())
+        assertThat(rowCount("embedding_sets")).isEqualTo(1)
     }
 
     @Test
