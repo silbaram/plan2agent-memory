@@ -1,6 +1,7 @@
 package com.github.silbaram.plan2agent.memory.adapter.out.postgres
 
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.github.silbaram.plan2agent.memory.application.port.out.ActiveVectorSearchQuery
 import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactQueryPort
 import com.github.silbaram.plan2agent.memory.application.port.out.KeywordSearchPort
 import com.github.silbaram.plan2agent.memory.application.port.out.VectorSearchPort
@@ -22,10 +23,13 @@ import com.github.silbaram.plan2agent.memory.domain.RunId
 import com.github.silbaram.plan2agent.memory.domain.SourceReference
 import com.github.silbaram.plan2agent.memory.domain.TaskId
 import com.github.silbaram.plan2agent.memory.domain.VectorSearchMatch
+import com.github.silbaram.plan2agent.memory.domain.V2EmbeddingProfile
 import org.springframework.jdbc.core.RowMapper
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
 import org.springframework.stereotype.Repository
+import org.springframework.transaction.PlatformTransactionManager
+import org.springframework.transaction.support.TransactionTemplate
 import java.sql.ResultSet
 import java.sql.Timestamp
 import java.time.Instant
@@ -598,9 +602,11 @@ class PostgresVectorSearchAdapter(
     private val jdbc: NamedParameterJdbcTemplate,
     private val metrics: PostgresAdapterMetrics,
     objectMapper: ObjectMapper,
+    transactionManager: PlatformTransactionManager,
 ) : VectorSearchPort {
     private val json = PostgresJsonSupport(objectMapper)
     private val cursorCodec = SearchCursorCodec(objectMapper)
+    private val transactions = TransactionTemplate(transactionManager)
 
     override fun search(query: VectorSearchQuery): PagedResult<VectorSearchMatch> = metrics.recordSearch("vector.search") {
         require(query.embedding.values.isNotEmpty()) { "VectorSearchQuery embedding must not be empty" }
@@ -635,7 +641,7 @@ class PostgresVectorSearchAdapter(
         } ?: ""
         val distanceExpression = query.distanceMetric.distanceExpression(embeddingColumn, queryVectorType)
         val orderExpression = query.distanceMetric.orderExpression(embeddingColumn, queryVectorType)
-        val cursorWhere = vectorCursorWhere(query.cursor, params, orderExpression)
+        val cursorWhere = vectorCursorClause(query.cursor, params, orderExpression)?.let { "AND $it" } ?: ""
 
         val rows = jdbc.query(
             """
@@ -693,12 +699,125 @@ class PostgresVectorSearchAdapter(
         rows.toPagedResult(query.limit, { it.match }) { cursorCodec.encode(it.cursor) }
     }
 
-    private fun vectorCursorWhere(
+    override fun search(query: ActiveVectorSearchQuery): PagedResult<VectorSearchMatch> = metrics.recordSearch("vector.search.active") {
+        val profile = V2EmbeddingProfile.fixed
+        val params = activeSearchParams(query)
+            .addValue("embeddingSetId", uuid(query.embeddingSetId.value))
+            .addValue("embeddingModel", profile.model)
+            .addValue("embeddingVersion", profile.revision)
+            .addValue("distanceMetric", DistanceMetric.COSINE.toDbValue())
+            .addValue("queryEmbedding", query.embedding.toPgVectorLiteral())
+            .addValue("limit", query.limit + 1)
+        if (query.metadataFilters.isNotEmpty()) {
+            params.addValue("metadataFiltersJson", json.metadataToJson(query.metadataFilters))
+        }
+        val sql = indexedVectorSearchSql(query, params)
+        val rows = requireNotNull(transactions.execute<List<VectorSearchRow>> {
+            jdbc.jdbcTemplate.execute("SET LOCAL hnsw.iterative_scan = strict_order")
+            val annRows = queryVectorRows(sql)
+            if (annRows.size < query.limit + 1 && eligibleVectorRowCount(sql) >= query.limit + 1) {
+                jdbc.jdbcTemplate.execute("SET LOCAL enable_indexscan = off")
+                jdbc.jdbcTemplate.execute("SET LOCAL enable_indexonlyscan = off")
+                jdbc.jdbcTemplate.execute("SET LOCAL enable_bitmapscan = off")
+                queryVectorRows(sql)
+            } else {
+                annRows
+            }
+        })
+        rows.toPagedResult(query.limit, { it.match }) { cursorCodec.encode(it.cursor) }
+    }
+
+    private fun indexedVectorSearchSql(
+        query: ActiveVectorSearchQuery,
+        params: MapSqlParameterSource,
+    ): IndexedVectorSearchSql {
+        val distanceExpression = "(tev.embedding <=> CAST(:queryEmbedding AS vector(384)))"
+        val filters = chunkFilterClauses(query, params, alias = "dc")
+            .withMetadataFilters(query.metadataFilters, alias = "dc")
+            .toMutableList()
+        filters += "ce.embedding_set_id = :embeddingSetId"
+        vectorCursorClause(query.cursor, params, distanceExpression)?.let(filters::add)
+        return IndexedVectorSearchSql(
+            params = params,
+            distanceExpression = distanceExpression,
+            whereClause = filters.toWhereClause(prefix = "WHERE"),
+        )
+    }
+
+    private fun queryVectorRows(sql: IndexedVectorSearchSql): List<VectorSearchRow> =
+        jdbc.query(
+            """
+            SELECT
+                dc.chunk_id,
+                dc.document_id,
+                dc.project_id,
+                dc.iteration_id,
+                dc.artifact_type,
+                dc.source_path,
+                dc.chunk_index,
+                dc.content,
+                ${sql.distanceExpression} AS score,
+                ${sql.distanceExpression} AS sort_value,
+                :distanceMetric AS distance_metric,
+                :embeddingModel AS embedding_model,
+                :embeddingVersion AS embedding_version,
+                dc.metadata,
+                p.source_project_id,
+                i.source_iteration_id,
+                d.source_document_id,
+                tg.source_task_graph_id,
+                t.source_task_id,
+                r.source_run_id,
+                dc.source_chunk_id,
+                d.snapshot_version,
+                COALESCE(dc.updated_at, dc.created_at) AS sort_timestamp
+            FROM chunk_embedding_vectors_384 tev
+            JOIN chunk_embeddings ce ON ce.chunk_embedding_id = tev.chunk_embedding_id
+            JOIN document_chunks dc ON dc.chunk_id = ce.chunk_id
+            JOIN projects p ON p.project_id = dc.project_id
+            LEFT JOIN iterations i ON i.iteration_id = dc.iteration_id
+            JOIN documents d ON d.document_id = dc.document_id
+            LEFT JOIN tasks t ON t.task_id = dc.task_id
+            LEFT JOIN task_graphs tg ON tg.task_graph_id = t.task_graph_id
+            LEFT JOIN runs r ON r.run_id = dc.run_id
+            ${sql.whereClause}
+            ORDER BY
+                sort_value ASC,
+                COALESCE(d.snapshot_version, -1) DESC,
+                sort_timestamp DESC,
+                COALESCE(dc.chunk_index, 2147483647) ASC,
+                dc.chunk_id::text ASC
+            LIMIT :limit
+            """.trimIndent(),
+            sql.params,
+            vectorSearchRowMapper(json),
+        )
+
+    private fun eligibleVectorRowCount(sql: IndexedVectorSearchSql): Long =
+        jdbc.queryForObject(
+            """
+            SELECT COUNT(*)
+            FROM chunk_embedding_vectors_384 tev
+            JOIN chunk_embeddings ce ON ce.chunk_embedding_id = tev.chunk_embedding_id
+            JOIN document_chunks dc ON dc.chunk_id = ce.chunk_id
+            JOIN projects p ON p.project_id = dc.project_id
+            LEFT JOIN iterations i ON i.iteration_id = dc.iteration_id
+            JOIN documents d ON d.document_id = dc.document_id
+            LEFT JOIN tasks t ON t.task_id = dc.task_id
+            LEFT JOIN task_graphs tg ON tg.task_graph_id = t.task_graph_id
+            LEFT JOIN runs r ON r.run_id = dc.run_id
+            ${sql.whereClause}
+            """.trimIndent(),
+            sql.params,
+            Long::class.java,
+        ) ?: 0L
+
+    private fun vectorCursorClause(
         cursorValue: String?,
         params: MapSqlParameterSource,
         orderExpression: String,
-    ): String {
-        val cursor = cursorValue?.let(cursorCodec::decodeVector) ?: return ""
+    ): String? {
+        val cursor = cursorValue?.let(cursorCodec::decodeVector) ?: return null
         params
             .addValue("cursorSortValue", cursor.sortValue)
             .addValue("cursorSnapshotSort", cursor.snapshotSort)
@@ -706,7 +825,7 @@ class PostgresVectorSearchAdapter(
             .addValue("cursorChunkIndexSort", cursor.chunkIndexSort)
             .addValue("cursorChunkId", cursor.chunkId)
         return """
-            AND (
+            (
                 $orderExpression > :cursorSortValue
                 OR (
                     $orderExpression = :cursorSortValue
@@ -757,6 +876,12 @@ class PostgresVectorSearchAdapter(
     }
 }
 
+private data class IndexedVectorSearchSql(
+    val params: MapSqlParameterSource,
+    val distanceExpression: String,
+    val whereClause: String,
+)
+
 private fun searchParams(query: KeywordSearchQuery): MapSqlParameterSource =
     MapSqlParameterSource()
         .addNullableUuid("projectId", query.projectId)
@@ -775,6 +900,15 @@ private fun searchParams(query: VectorSearchQuery): MapSqlParameterSource =
         .addNullableUuid("taskId", query.taskId)
         .addNullableUuid("runId", query.runId)
 
+private fun activeSearchParams(query: ActiveVectorSearchQuery): MapSqlParameterSource =
+    MapSqlParameterSource()
+        .addNullableUuid("projectId", query.projectId)
+        .addNullableUuid("iterationId", query.iterationId)
+        .addValue("artifactType", query.artifactType?.name)
+        .addValue("sourcePath", query.sourcePath)
+        .addNullableUuid("taskId", query.taskId)
+        .addNullableUuid("runId", query.runId)
+
 private fun chunkFilterClauses(
     query: KeywordSearchQuery,
     params: MapSqlParameterSource,
@@ -784,6 +918,13 @@ private fun chunkFilterClauses(
 
 private fun chunkFilterClauses(
     query: VectorSearchQuery,
+    params: MapSqlParameterSource,
+    alias: String,
+): List<String> =
+    searchFilterClauses(query.projectId, query.iterationId, query.artifactType, query.sourcePath, query.taskId, query.runId, alias)
+
+private fun chunkFilterClauses(
+    query: ActiveVectorSearchQuery,
     params: MapSqlParameterSource,
     alias: String,
 ): List<String> =
