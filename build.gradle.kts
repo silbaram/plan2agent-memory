@@ -21,6 +21,7 @@ kotlin {
 }
 
 dependencies {
+    implementation(platform("org.springframework.ai:spring-ai-bom:2.0.0"))
     implementation("org.springframework.boot:spring-boot-starter-webmvc")
     implementation("org.springframework.boot:spring-boot-starter-validation")
     implementation("org.springframework.boot:spring-boot-starter-jdbc")
@@ -30,6 +31,8 @@ dependencies {
     implementation("org.jetbrains.kotlin:kotlin-reflect")
     implementation("org.flywaydb:flyway-database-postgresql")
     implementation("com.google.cloud.sql:postgres-socket-factory:1.28.6")
+    implementation("org.springframework.ai:spring-ai-transformers")
+    runtimeOnly("com.microsoft.onnxruntime:onnxruntime")
     runtimeOnly("org.postgresql:postgresql")
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
