@@ -146,8 +146,9 @@ class ApiIntegrationTest {
         assertThat(rowCount("tasks")).isEqualTo(1)
         assertThat(rowCount("runs")).isEqualTo(1)
         assertThat(rowCount("document_chunks")).isEqualTo(1)
-        assertThat(rowCount("embedding_sets")).isEqualTo(1)
+        assertThat(rowCount("embedding_sets")).isEqualTo(2)
         assertThat(rowCount("chunk_embeddings")).isEqualTo(1)
+        assertThat(rowCount("embedding_jobs")).isEqualTo(1)
 
         val artifactLookup = getJson(
             "/api/artifacts" +
