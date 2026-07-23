@@ -2,6 +2,8 @@ package com.github.silbaram.plan2agent.memory.adapter.out.postgres
 
 import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingProfileResolutionException
 import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingProfileResolver
+import com.github.silbaram.plan2agent.memory.application.port.out.PersistedActiveEmbeddingSetResolutionException
+import com.github.silbaram.plan2agent.memory.application.port.out.PersistedActiveEmbeddingSetResolver
 import com.github.silbaram.plan2agent.memory.domain.DistanceMetric
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingSetId
 import com.github.silbaram.plan2agent.memory.domain.V2EmbeddingProfile
@@ -25,7 +27,8 @@ class PostgresActiveEmbeddingProfileResolver(
     private val jdbc: NamedParameterJdbcTemplate,
     private val metrics: PostgresAdapterMetrics,
     transactionManager: PlatformTransactionManager,
-) : ActiveEmbeddingProfileResolver {
+) : ActiveEmbeddingProfileResolver,
+    PersistedActiveEmbeddingSetResolver {
     private val transactions = TransactionTemplate(transactionManager)
 
     override fun resolveActiveV2EmbeddingSetId(): EmbeddingSetId =
@@ -35,7 +38,9 @@ class PostgresActiveEmbeddingProfileResolver(
                     acquireBootstrapLock()
                     val pointers = activePointers()
                     when {
-                        pointers.isEmpty() -> bootstrapOnlyWhenNoServerGlobalSetExists()
+                        pointers.isEmpty() -> bootstrapOnlyWhenNoServerGlobalSetExists {
+                            ActiveEmbeddingProfileResolutionException()
+                        }
                         pointers.size == 1 && pointers.single().scope == ACTIVE_SCOPE ->
                             resolveExistingPointer(pointers.single())
                         else -> throw ActiveEmbeddingProfileResolutionException()
@@ -49,6 +54,29 @@ class PostgresActiveEmbeddingProfileResolver(
                     throw failure
                 }
                 throw ActiveEmbeddingProfileResolutionException(failure)
+            }
+        }
+
+    override fun requirePersistedActiveV2EmbeddingSetId(): EmbeddingSetId =
+        metrics.recordSearch("embedding_profile.require_persisted_active_v2") {
+            try {
+                requireNotNull(transactions.execute<EmbeddingSetId> {
+                    val pointers = lockedActivePointers()
+                    when {
+                        pointers.isEmpty() -> bootstrapPersistedActiveTarget()
+                        pointers.size == 1 && pointers.single().scope == ACTIVE_SCOPE ->
+                            resolvePersistedPointer(pointers.single())
+                        else -> throw PersistedActiveEmbeddingSetResolutionException()
+                    }
+                })
+            } catch (failure: Throwable) {
+                if (failure is VirtualMachineError) {
+                    throw failure
+                }
+                if (failure is PersistedActiveEmbeddingSetResolutionException) {
+                    throw failure
+                }
+                throw PersistedActiveEmbeddingSetResolutionException(failure)
             }
         }
 
@@ -74,14 +102,45 @@ class PostgresActiveEmbeddingProfileResolver(
             )
         }
 
-    private fun bootstrapOnlyWhenNoServerGlobalSetExists(): EmbeddingSetId {
+    private fun lockedActivePointers(): List<ActiveProfilePointer> =
+        jdbc.query(
+            """
+            SELECT scope, active_embedding_set_id::text AS active_embedding_set_id
+            FROM embedding_active_profiles
+            ORDER BY scope
+            FOR SHARE
+            """.trimIndent(),
+            MapSqlParameterSource(),
+        ) { row, _ ->
+            ActiveProfilePointer(
+                scope = row.getString("scope"),
+                embeddingSetId = row.getString("active_embedding_set_id"),
+            )
+        }
+
+    private fun bootstrapPersistedActiveTarget(): EmbeddingSetId {
+        acquireBootstrapLock()
+        val pointers = lockedActivePointers()
+        return when {
+            pointers.isEmpty() -> bootstrapOnlyWhenNoServerGlobalSetExists {
+                PersistedActiveEmbeddingSetResolutionException()
+            }
+            pointers.size == 1 && pointers.single().scope == ACTIVE_SCOPE ->
+                resolvePersistedPointer(pointers.single())
+            else -> throw PersistedActiveEmbeddingSetResolutionException()
+        }
+    }
+
+    private fun bootstrapOnlyWhenNoServerGlobalSetExists(
+        failure: () -> RuntimeException,
+    ): EmbeddingSetId {
         val serverGlobalSetExists = jdbc.queryForObject(
             "SELECT EXISTS (SELECT 1 FROM embedding_sets WHERE scope = 'SERVER_GLOBAL')",
             MapSqlParameterSource(),
             Boolean::class.java,
-        ) ?: throw ActiveEmbeddingProfileResolutionException()
+        ) ?: throw failure()
         if (serverGlobalSetExists) {
-            throw ActiveEmbeddingProfileResolutionException()
+            throw failure()
         }
 
         val profile = V2EmbeddingProfile.fixed
@@ -180,6 +239,33 @@ class PostgresActiveEmbeddingProfileResolver(
         return EmbeddingSetId(pointerId.toString())
     }
 
+    private fun resolvePersistedPointer(pointer: ActiveProfilePointer): EmbeddingSetId {
+        val pointerId = try {
+            UUID.fromString(pointer.embeddingSetId)
+        } catch (failure: IllegalArgumentException) {
+            throw PersistedActiveEmbeddingSetResolutionException(failure)
+        }
+        val target = jdbc.query(
+            """
+            SELECT project_id::text AS project_id, scope
+            FROM embedding_sets
+            WHERE embedding_set_id = :embeddingSetId
+            FOR KEY SHARE
+            """.trimIndent(),
+            MapSqlParameterSource("embeddingSetId", pointerId),
+        ) { row, _ ->
+            PersistedActiveProfileTarget(
+                projectId = row.getString("project_id"),
+                scope = row.getString("scope"),
+            )
+        }.singleOrNull() ?: throw PersistedActiveEmbeddingSetResolutionException()
+
+        if (target.projectId != null || target.scope != SERVER_GLOBAL_SCOPE) {
+            throw PersistedActiveEmbeddingSetResolutionException()
+        }
+        return EmbeddingSetId(pointerId.toString())
+    }
+
     private data class ActiveProfilePointer(
         val scope: String,
         val embeddingSetId: String,
@@ -195,6 +281,11 @@ class PostgresActiveEmbeddingProfileResolver(
         val embeddingVersion: String,
         val distanceMetric: String,
         val storageType: String,
+    )
+
+    private data class PersistedActiveProfileTarget(
+        val projectId: String?,
+        val scope: String,
     )
 
     companion object {

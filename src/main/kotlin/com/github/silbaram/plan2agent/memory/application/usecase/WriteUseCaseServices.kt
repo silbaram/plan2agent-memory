@@ -12,8 +12,11 @@ import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactGraphS
 import com.github.silbaram.plan2agent.memory.application.port.out.ChunkEmbeddingStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.DocumentChunkStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.DocumentSnapshotStorePort
+import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingJobStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingSetStorePort
+import com.github.silbaram.plan2agent.memory.application.port.out.EnqueueEmbeddingJobCommand
 import com.github.silbaram.plan2agent.memory.application.port.out.IterationStorePort
+import com.github.silbaram.plan2agent.memory.application.port.out.PersistedActiveEmbeddingSetResolver
 import com.github.silbaram.plan2agent.memory.application.port.out.ProjectStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.RunRecordStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.TaskGraphStorePort
@@ -25,7 +28,9 @@ import com.github.silbaram.plan2agent.memory.domain.ContentHash
 import com.github.silbaram.plan2agent.memory.domain.DocumentChunk
 import com.github.silbaram.plan2agent.memory.domain.DocumentChunkId
 import com.github.silbaram.plan2agent.memory.domain.DocumentSnapshot
+import com.github.silbaram.plan2agent.memory.domain.EmbeddingJobId
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingSet
+import com.github.silbaram.plan2agent.memory.domain.EmbeddingSetId
 import com.github.silbaram.plan2agent.memory.domain.Iteration
 import com.github.silbaram.plan2agent.memory.domain.IterationId
 import com.github.silbaram.plan2agent.memory.domain.Project
@@ -50,6 +55,8 @@ class WriteUseCaseService(
     private val taskStore: TaskStorePort,
     private val runRecordStore: RunRecordStorePort,
     private val documentChunkStore: DocumentChunkStorePort,
+    private val persistedActiveEmbeddingSetResolver: PersistedActiveEmbeddingSetResolver,
+    private val embeddingJobStore: EmbeddingJobStorePort,
     private val embeddingSetStore: EmbeddingSetStorePort,
     private val chunkEmbeddingStore: ChunkEmbeddingStorePort,
     private val artifactGraphStore: ArtifactGraphStorePort,
@@ -294,6 +301,9 @@ class WriteUseCaseService(
                 }
             }
         }
+        val persistedActiveEmbeddingSetId = chunks
+            .takeIf { it.isNotEmpty() }
+            ?.let { persistedActiveEmbeddingSetResolver.requirePersistedActiveV2EmbeddingSetId() }
         val newChunks = chunks.filter { chunk -> !existingByHash.containsKey(chunk.chunkHash) }
         val newlySavedChunks = documentChunkStore.saveAll(newChunks)
         val savedChunks = chunks.map { chunk ->
@@ -324,6 +334,19 @@ class WriteUseCaseService(
         }
         if (chunkEmbeddings.isNotEmpty()) {
             chunkEmbeddingStore.saveAll(chunkEmbeddings)
+        }
+        persistedActiveEmbeddingSetId?.let { embeddingSetId ->
+            val enqueuedAt = Instant.now()
+            savedChunks.forEach { chunk ->
+                embeddingJobStore.enqueueMissing(
+                    EnqueueEmbeddingJobCommand(
+                        id = deterministicEmbeddingJobId(chunk.id, embeddingSetId),
+                        chunkId = chunk.id,
+                        embeddingSetId = embeddingSetId,
+                        enqueuedAt = enqueuedAt,
+                    ),
+                )
+            }
         }
 
         return savedChunks
@@ -480,6 +503,16 @@ private fun deterministicChunkEmbeddingId(
     ChunkEmbeddingId(
         UUID.nameUUIDFromBytes(
             "chunk-embedding:${chunkId.value}:${embeddingSetId.value}".toByteArray(StandardCharsets.UTF_8),
+        ).toString(),
+    )
+
+private fun deterministicEmbeddingJobId(
+    chunkId: DocumentChunkId,
+    embeddingSetId: EmbeddingSetId,
+): EmbeddingJobId =
+    EmbeddingJobId(
+        UUID.nameUUIDFromBytes(
+            "embedding-job:${chunkId.value}:${embeddingSetId.value}".toByteArray(StandardCharsets.UTF_8),
         ).toString(),
     )
 

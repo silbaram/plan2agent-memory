@@ -4,8 +4,12 @@ import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactGraphS
 import com.github.silbaram.plan2agent.memory.application.port.out.ChunkEmbeddingStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.DocumentChunkStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.DocumentSnapshotStorePort
+import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingJobStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingSetStorePort
+import com.github.silbaram.plan2agent.memory.application.port.out.EnqueueEmbeddingJobCommand
+import com.github.silbaram.plan2agent.memory.application.port.out.FindEmbeddingJobsQuery
 import com.github.silbaram.plan2agent.memory.application.port.out.IterationStorePort
+import com.github.silbaram.plan2agent.memory.application.port.out.PersistedActiveEmbeddingSetResolver
 import com.github.silbaram.plan2agent.memory.application.port.out.ProjectStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.RunRecordStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.TaskGraphStorePort
@@ -28,6 +32,10 @@ import com.github.silbaram.plan2agent.memory.domain.DocumentChunkId
 import com.github.silbaram.plan2agent.memory.domain.DocumentId
 import com.github.silbaram.plan2agent.memory.domain.DocumentSnapshot
 import com.github.silbaram.plan2agent.memory.domain.Embedding
+import com.github.silbaram.plan2agent.memory.domain.EmbeddingJob
+import com.github.silbaram.plan2agent.memory.domain.EmbeddingJobFailure
+import com.github.silbaram.plan2agent.memory.domain.EmbeddingJobId
+import com.github.silbaram.plan2agent.memory.domain.EmbeddingJobStatus
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingSet
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingSetId
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingStorageType
@@ -448,6 +456,10 @@ class WriteUseCaseServiceTest {
         assertThat(savedEmbedding.chunkId).isEqualTo(newChunk.id)
         assertThat(savedEmbedding.embeddingSetId).isEqualTo(embeddingSet.id)
         assertThat(savedEmbedding.embeddingHash).isEqualTo(ContentHash("embedding-new"))
+        assertThat(stores.embeddingJobs.jobs.map { it.chunkId })
+            .containsExactly(existingChunk.id, newChunk.id)
+        assertThat(stores.embeddingJobs.jobs.map { it.embeddingSetId })
+            .containsOnly(stores.persistedActiveEmbeddingSet.target)
     }
 
     @Test
@@ -475,6 +487,14 @@ class WriteUseCaseServiceTest {
         assertThat(saved).containsExactly(keywordOnlyChunk)
         assertThat(stores.embeddingSets.resolved).isEmpty()
         assertThat(stores.chunkEmbeddings.saved).isEmpty()
+        assertThat(stores.embeddingJobs.jobs)
+            .singleElement()
+            .extracting(EmbeddingJob::chunkId, EmbeddingJob::embeddingSetId, EmbeddingJob::status)
+            .containsExactly(
+                keywordOnlyChunk.id,
+                stores.persistedActiveEmbeddingSet.target,
+                EmbeddingJobStatus.PENDING,
+            )
     }
 
     @Test
@@ -642,6 +662,8 @@ private class TestStores(ids: TestIds) {
     val tasks = FakeTaskStore(ids.task)
     val runRecords = FakeRunRecordStore()
     val documentChunks = FakeDocumentChunkStore(ids.existingChunk)
+    val persistedActiveEmbeddingSet = FakePersistedActiveEmbeddingSetResolver()
+    val embeddingJobs = FakeEmbeddingJobStore()
     val embeddingSets = FakeEmbeddingSetStore()
     val chunkEmbeddings = FakeChunkEmbeddingStore()
     val artifactGraph = FakeArtifactGraphStore()
@@ -655,6 +677,8 @@ private class TestStores(ids: TestIds) {
             taskStore = tasks,
             runRecordStore = runRecords,
             documentChunkStore = documentChunks,
+            persistedActiveEmbeddingSetResolver = persistedActiveEmbeddingSet,
+            embeddingJobStore = embeddingJobs,
             embeddingSetStore = embeddingSets,
             chunkEmbeddingStore = chunkEmbeddings,
             artifactGraphStore = artifactGraph,
@@ -766,6 +790,72 @@ private class FakeDocumentChunkStore(existingChunk: DocumentChunk) : DocumentChu
 
     override fun findByDocumentId(documentId: DocumentId): List<DocumentChunk> =
         chunks.filter { it.documentId == documentId }
+}
+
+private class FakePersistedActiveEmbeddingSetResolver : PersistedActiveEmbeddingSetResolver {
+    val target = EmbeddingSetId(uuid(900))
+
+    override fun requirePersistedActiveV2EmbeddingSetId(): EmbeddingSetId = target
+}
+
+private class FakeEmbeddingJobStore : EmbeddingJobStorePort {
+    val jobs = mutableListOf<EmbeddingJob>()
+
+    override fun enqueueMissing(command: EnqueueEmbeddingJobCommand): EmbeddingJob {
+        return jobs.firstOrNull {
+            it.chunkId == command.chunkId && it.embeddingSetId == command.embeddingSetId
+        } ?: EmbeddingJob(
+            id = command.id,
+            chunkId = command.chunkId,
+            embeddingSetId = command.embeddingSetId,
+            status = EmbeddingJobStatus.PENDING,
+            attemptCount = 0,
+            nextAttemptAt = command.enqueuedAt,
+            createdAt = command.enqueuedAt,
+        ).also(jobs::add)
+    }
+
+    override fun claimDue(batchSize: Int, owner: String, leaseUntil: Instant): List<EmbeddingJob> = emptyList()
+
+    override fun releaseClaimToPending(
+        jobId: EmbeddingJobId,
+        owner: String,
+        leaseGeneration: Long,
+    ): EmbeddingJob? = null
+
+    override fun markRetrying(
+        jobId: EmbeddingJobId,
+        owner: String,
+        leaseGeneration: Long,
+        failure: EmbeddingJobFailure,
+        nextAttemptAt: Instant,
+    ): EmbeddingJob? = null
+
+    override fun markSucceeded(
+        jobId: EmbeddingJobId,
+        owner: String,
+        leaseGeneration: Long,
+    ): EmbeddingJob? = null
+
+    override fun markPermanentlyFailed(
+        jobId: EmbeddingJobId,
+        owner: String,
+        leaseGeneration: Long,
+        failure: EmbeddingJobFailure,
+    ): EmbeddingJob? = null
+
+    override fun recoverExpiredLeases(): List<EmbeddingJob> = emptyList()
+
+    override fun findById(id: EmbeddingJobId): EmbeddingJob? = jobs.firstOrNull { it.id == id }
+
+    override fun findPage(query: FindEmbeddingJobsQuery): PagedResult<EmbeddingJob> =
+        PagedResult(
+            jobs.filter { job -> query.chunkId == null || job.chunkId == query.chunkId }
+                .filter { job -> query.statuses.isEmpty() || job.status in query.statuses }
+                .take(query.limit),
+        )
+
+    override fun retryFailed(jobId: EmbeddingJobId): EmbeddingJob? = findById(jobId)
 }
 
 private class FakeEmbeddingSetStore : EmbeddingSetStorePort {

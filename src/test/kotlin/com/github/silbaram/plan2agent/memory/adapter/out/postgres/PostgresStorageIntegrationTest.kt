@@ -9,11 +9,15 @@ import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddin
 import com.github.silbaram.plan2agent.memory.application.port.out.ChunkEmbeddingStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.DocumentChunkStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.DocumentSnapshotStorePort
+import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingPort
+import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingProviderState
 import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingJobStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingSetStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.EnqueueEmbeddingJobCommand
 import com.github.silbaram.plan2agent.memory.application.port.out.FindEmbeddingJobsQuery
 import com.github.silbaram.plan2agent.memory.application.port.out.IterationStorePort
+import com.github.silbaram.plan2agent.memory.application.port.out.PersistedActiveEmbeddingSetResolutionException
+import com.github.silbaram.plan2agent.memory.application.port.out.PersistedActiveEmbeddingSetResolver
 import com.github.silbaram.plan2agent.memory.application.port.out.ProjectStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.RunRecordStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.TaskGraphStorePort
@@ -82,6 +86,7 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
+import org.springframework.dao.DataAccessException
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.test.context.DynamicPropertyRegistry
 import org.springframework.test.context.DynamicPropertySource
@@ -95,7 +100,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
-@SpringBootTest
+@SpringBootTest(properties = ["p2a.embedding.provider=none"])
 class PostgresStorageIntegrationTest {
     @Autowired
     private lateinit var jdbc: JdbcTemplate
@@ -129,6 +134,12 @@ class PostgresStorageIntegrationTest {
 
     @Autowired
     private lateinit var activeEmbeddingProfileResolver: ActiveEmbeddingProfileResolver
+
+    @Autowired
+    private lateinit var persistedActiveEmbeddingSetResolver: PersistedActiveEmbeddingSetResolver
+
+    @Autowired
+    private lateinit var embeddingPort: EmbeddingPort
 
     @Autowired
     private lateinit var embeddingJobStore: EmbeddingJobStorePort
@@ -463,6 +474,7 @@ class PostgresStorageIntegrationTest {
     @Test
     fun `server-global profiles coexist and pointer rollback preserves the exact active set`() {
         val fixture = saveProjectAndIteration("server-global-profile")
+        ensurePersistedActiveEmbeddingTarget()
         val document = writeUseCase.saveDocumentSnapshot(documentCommand(
             scope = "server-global-profile-document",
             projectId = fixture.project.id,
@@ -526,7 +538,7 @@ class PostgresStorageIntegrationTest {
             vector,
         )
         jdbc.update(
-            "INSERT INTO embedding_active_profiles (scope, active_embedding_set_id) VALUES ('server_global', ?)",
+            "UPDATE embedding_active_profiles SET active_embedding_set_id = ? WHERE scope = 'server_global'",
             firstSetId,
         )
         val legacySet = embeddingSet(
@@ -785,6 +797,7 @@ class PostgresStorageIntegrationTest {
     @Test
     fun `document snapshots and chunks are idempotent by content and chunk hash`() {
         val fixture = saveProjectAndIteration("idempotency")
+        val activeEmbeddingSetId = ensurePersistedActiveEmbeddingTarget()
         val first = writeUseCase.saveDocumentSnapshot(documentCommand(
             scope = "idempotency-first",
             projectId = fixture.project.id,
@@ -829,11 +842,16 @@ class PostgresStorageIntegrationTest {
 
         assertThat(repeatedChunk.id).isEqualTo(firstChunk.id)
         assertThat(rowCount("document_chunks")).isEqualTo(1)
+        assertThat(embeddingJobStore.findPage(FindEmbeddingJobsQuery(chunkId = firstChunk.id)).items)
+            .singleElement()
+            .extracting { it.embeddingSetId }
+            .isEqualTo(activeEmbeddingSetId)
     }
 
     @Test
     fun `embedding persistence is idempotent by chunk and embedding set`() {
         val fixture = saveProjectAndIteration("embedding")
+        ensurePersistedActiveEmbeddingTarget()
         val document = writeUseCase.saveDocumentSnapshot(documentCommand(
             scope = "embedding-doc",
             projectId = fixture.project.id,
@@ -915,6 +933,7 @@ class PostgresStorageIntegrationTest {
     @Test
     fun `384 dimensional embeddings are persisted through the typed vector mirror`() {
         val fixture = saveProjectAndIteration("typed-384")
+        ensurePersistedActiveEmbeddingTarget()
         val document = writeUseCase.saveDocumentSnapshot(documentCommand(
             scope = "typed-384-document",
             projectId = fixture.project.id,
@@ -983,6 +1002,230 @@ class PostgresStorageIntegrationTest {
             ),
         )
         assertThat(found.items.map { it.artifactId }).containsExactly(first.id.value)
+    }
+
+    @Test
+    fun `empty profile state bootstraps one pending job while no provider is configured`() {
+        val fixture = saveProjectAndIteration("pending-job-not-configured")
+        val document = writeUseCase.saveDocumentSnapshot(documentCommand(
+            scope = "pending-job-not-configured-document",
+            projectId = fixture.project.id,
+            iterationId = fixture.iteration.id,
+            sourcePath = "docs/pending-job-not-configured.md",
+            contentHash = "pending-job-not-configured-document-hash",
+        ))
+
+        assertThat(embeddingPort.providerState).isEqualTo(EmbeddingProviderState.NOT_CONFIGURED)
+        assertThat(activeProfilePointer()).isNull()
+        assertThat(rowCount("embedding_sets")).isZero()
+
+        val first = writeUseCase.saveDocumentChunks(
+            SaveDocumentChunksCommand(
+                documentId = document.id,
+                chunks = listOf(DocumentChunkWrite(chunk(
+                    "pending-job-not-configured-first",
+                    document,
+                    chunkHash = "pending-job-not-configured-chunk-hash",
+                ))),
+            ),
+        ).single()
+        val repeated = writeUseCase.saveDocumentChunks(
+            SaveDocumentChunksCommand(
+                documentId = document.id,
+                chunks = listOf(DocumentChunkWrite(chunk(
+                    "pending-job-not-configured-repeat",
+                    document,
+                    chunkHash = "pending-job-not-configured-chunk-hash",
+                ))),
+            ),
+        ).single()
+
+        assertThat(repeated.id).isEqualTo(first.id)
+        val activeEmbeddingSetId = persistedActiveEmbeddingSetResolver.requirePersistedActiveV2EmbeddingSetId()
+        assertThat(embeddingJobStore.findPage(FindEmbeddingJobsQuery(chunkId = first.id)).items)
+            .singleElement()
+            .extracting(
+                { it.chunkId },
+                { it.embeddingSetId },
+                { it.status },
+            )
+            .containsExactly(first.id, activeEmbeddingSetId, EmbeddingJobStatus.PENDING)
+        assertThat(activeProfilePointer()).isEqualTo(activeEmbeddingSetId.value)
+        assertThat(rowCount("embedding_sets")).isEqualTo(1)
+    }
+
+    @Test
+    fun `chunk and pending job roll back together when enqueue fails`() {
+        val fixture = saveProjectAndIteration("chunk-job-atomicity")
+        val document = writeUseCase.saveDocumentSnapshot(documentCommand(
+            scope = "chunk-job-atomicity-document",
+            projectId = fixture.project.id,
+            iterationId = fixture.iteration.id,
+            sourcePath = "docs/chunk-job-atomicity.md",
+            contentHash = "chunk-job-atomicity-document-hash",
+        ))
+        jdbc.execute(
+            """
+            CREATE FUNCTION reject_embedding_job_enqueue()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                RAISE EXCEPTION 'embedding job enqueue rejected for atomicity test';
+            END;
+            $$
+            """.trimIndent(),
+        )
+        jdbc.execute(
+            """
+            CREATE TRIGGER reject_embedding_job_enqueue_trigger
+            BEFORE INSERT ON embedding_jobs
+            FOR EACH ROW
+            EXECUTE FUNCTION reject_embedding_job_enqueue()
+            """.trimIndent(),
+        )
+
+        try {
+            assertThatThrownBy {
+                writeUseCase.saveDocumentChunks(
+                    SaveDocumentChunksCommand(
+                        documentId = document.id,
+                        chunks = listOf(DocumentChunkWrite(chunk(
+                            "chunk-job-atomicity",
+                            document,
+                            chunkHash = "chunk-job-atomicity-chunk-hash",
+                        ))),
+                    ),
+                )
+            }.isInstanceOf(DataAccessException::class.java)
+        } finally {
+            jdbc.execute("DROP TRIGGER IF EXISTS reject_embedding_job_enqueue_trigger ON embedding_jobs")
+            jdbc.execute("DROP FUNCTION IF EXISTS reject_embedding_job_enqueue()")
+        }
+
+        assertThat(rowCount("document_chunks")).isZero()
+        assertThat(rowCount("embedding_jobs")).isZero()
+        assertThat(rowCount("embedding_active_profiles")).isZero()
+        assertThat(rowCount("embedding_sets")).isZero()
+    }
+
+    @Test
+    fun `profile mismatch with a structurally valid pointer still queues without profile mutation`() {
+        val mismatchedSetId = UUID.randomUUID()
+        insertServerGlobalEmbeddingSet(
+            id = mismatchedSetId,
+            fingerprint = "sha256:provider-profile-mismatch",
+            manifest = V2EmbeddingProfile.fixed.manifest.canonicalJson,
+            embeddingVersion = V2EmbeddingProfile.fixed.revision,
+        )
+        insertActiveProfilePointer(mismatchedSetId)
+        val fixture = saveProjectAndIteration("profile-mismatch-queue")
+        val document = writeUseCase.saveDocumentSnapshot(documentCommand(
+            scope = "profile-mismatch-queue-document",
+            projectId = fixture.project.id,
+            iterationId = fixture.iteration.id,
+            sourcePath = "docs/profile-mismatch-queue.md",
+            contentHash = "profile-mismatch-queue-document-hash",
+        ))
+        val pointerBefore = activeProfilePointer()
+        val setCountBefore = rowCount("embedding_sets")
+
+        assertThat(embeddingPort.providerState).isEqualTo(EmbeddingProviderState.NOT_CONFIGURED)
+        assertThatThrownBy { activeEmbeddingProfileResolver.resolveActiveV2EmbeddingSetId() }
+            .isInstanceOf(ActiveEmbeddingProfileResolutionException::class.java)
+
+        val saved = writeUseCase.saveDocumentChunks(
+            SaveDocumentChunksCommand(
+                documentId = document.id,
+                chunks = listOf(DocumentChunkWrite(chunk(
+                    "profile-mismatch-queue",
+                    document,
+                    chunkHash = "profile-mismatch-queue-chunk-hash",
+                ))),
+            ),
+        ).single()
+
+        assertThat(persistedActiveEmbeddingSetResolver.requirePersistedActiveV2EmbeddingSetId())
+            .isEqualTo(EmbeddingSetId(mismatchedSetId.toString()))
+        assertThat(embeddingJobStore.findPage(FindEmbeddingJobsQuery(chunkId = saved.id)).items)
+            .singleElement()
+            .extracting(
+                { it.embeddingSetId },
+                { it.status },
+            )
+            .containsExactly(EmbeddingSetId(mismatchedSetId.toString()), EmbeddingJobStatus.PENDING)
+        assertThat(activeProfilePointer()).isEqualTo(pointerBefore)
+        assertThat(rowCount("embedding_sets")).isEqualTo(setCountBefore)
+        assertThat(rowCount("chunk_embeddings")).isZero()
+        assertThat(rowCount("chunk_embedding_vectors_384")).isZero()
+    }
+
+    @Test
+    fun `pointerless server-global set fails closed before chunk or job persistence`() {
+        val partialSetId = UUID.randomUUID()
+        insertServerGlobalEmbeddingSet(
+            id = partialSetId,
+            fingerprint = V2EmbeddingProfile.fixed.fingerprint,
+            manifest = V2EmbeddingProfile.fixed.manifest.canonicalJson,
+            embeddingVersion = V2EmbeddingProfile.fixed.revision,
+        )
+        val fixture = saveProjectAndIteration("absent-pointer-queue")
+        val document = writeUseCase.saveDocumentSnapshot(documentCommand(
+            scope = "absent-pointer-queue-document",
+            projectId = fixture.project.id,
+            iterationId = fixture.iteration.id,
+            sourcePath = "docs/absent-pointer-queue.md",
+            contentHash = "absent-pointer-queue-document-hash",
+        ))
+
+        assertThatThrownBy {
+            writeUseCase.saveDocumentChunks(
+                SaveDocumentChunksCommand(
+                    documentId = document.id,
+                    chunks = listOf(DocumentChunkWrite(chunk(
+                        "absent-pointer-queue",
+                        document,
+                        chunkHash = "absent-pointer-queue-chunk-hash",
+                    ))),
+                ),
+            )
+        }.isInstanceOf(PersistedActiveEmbeddingSetResolutionException::class.java)
+
+        assertThat(rowCount("embedding_active_profiles")).isZero()
+        assertThat(rowCount("embedding_sets")).isEqualTo(1)
+        assertThat(rowCount("document_chunks")).isZero()
+        assertThat(rowCount("embedding_jobs")).isZero()
+    }
+
+    @Test
+    fun `dangling active pointer fails closed before chunk or job persistence`() {
+        val missingSetId = UUID.randomUUID()
+        insertDanglingActiveProfilePointer(missingSetId)
+        val fixture = saveProjectAndIteration("dangling-pointer-queue")
+        val document = writeUseCase.saveDocumentSnapshot(documentCommand(
+            scope = "dangling-pointer-queue-document",
+            projectId = fixture.project.id,
+            iterationId = fixture.iteration.id,
+            sourcePath = "docs/dangling-pointer-queue.md",
+            contentHash = "dangling-pointer-queue-document-hash",
+        ))
+
+        assertThatThrownBy {
+            writeUseCase.saveDocumentChunks(
+                SaveDocumentChunksCommand(
+                    documentId = document.id,
+                    chunks = listOf(DocumentChunkWrite(chunk(
+                        "dangling-pointer-queue",
+                        document,
+                        chunkHash = "dangling-pointer-queue-chunk-hash",
+                    ))),
+                ),
+            )
+        }.isInstanceOf(PersistedActiveEmbeddingSetResolutionException::class.java)
+
+        assertThat(activeProfilePointer()).isEqualTo(missingSetId.toString())
+        assertThat(rowCount("document_chunks")).isZero()
+        assertThat(rowCount("embedding_jobs")).isZero()
     }
 
     @Test
@@ -1226,6 +1469,9 @@ class PostgresStorageIntegrationTest {
         val iteration = iterationStore.save(iteration(scope, project.id))
         return ProjectIterationFixture(project, iteration)
     }
+
+    private fun ensurePersistedActiveEmbeddingTarget(): EmbeddingSetId =
+        activeEmbeddingProfileResolver.resolveActiveV2EmbeddingSetId()
 
     private fun tableNames(): Set<String> =
         strings(
