@@ -2,6 +2,8 @@ package com.github.silbaram.plan2agent.memory.config
 
 import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingProfileResolver
 import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingProviderState
+import com.github.silbaram.plan2agent.memory.application.port.out.ProviderUnavailableException
+import com.github.silbaram.plan2agent.memory.adapter.out.embedding.LocalEmbeddingRuntime
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingSetId
 import com.github.silbaram.plan2agent.memory.domain.V2EmbeddingProfile
 import org.springframework.ai.transformers.TransformersEmbeddingModel
@@ -32,18 +34,34 @@ class TransformersEmbeddingProviderLifecycle(
     private val modelFactory: TransformersEmbeddingModelFactory,
     private val activeEmbeddingProfileResolver: ActiveEmbeddingProfileResolver,
     private val initializationExecutor: ExecutorService = newInitializationExecutor(),
-) : ApplicationListener<ApplicationReadyEvent>, DisposableBean {
+) : ApplicationListener<ApplicationReadyEvent>, DisposableBean, LocalEmbeddingRuntime {
     private val state = AtomicReference(EmbeddingProviderState.INITIALIZING)
     private val initializationScheduled = AtomicBoolean(false)
     private val initializedModel = AtomicReference<TransformersEmbeddingModelSession?>(null)
     private val resolvedEmbeddingSetId = AtomicReference<EmbeddingSetId?>(null)
 
-    val providerState: EmbeddingProviderState
+    override val providerState: EmbeddingProviderState
         get() = state.get()
 
     /** The verified active V2 set, available only while this provider is ready. */
-    val activeEmbeddingSetId: EmbeddingSetId?
+    override val activeEmbeddingSetId: EmbeddingSetId?
         get() = resolvedEmbeddingSetId.get()
+
+    /** Invokes the initialized local model with fully prepared tokenizer input. */
+    override fun embed(input: String): FloatArray {
+        if (providerState != EmbeddingProviderState.READY) {
+            throw ProviderUnavailableException()
+        }
+        val model = initializedModel.get() ?: throw ProviderUnavailableException()
+        return try {
+            model.embed(input)
+        } catch (failure: Throwable) {
+            if (failure is VirtualMachineError) {
+                throw failure
+            }
+            throw ProviderUnavailableException()
+        }
+    }
 
     override fun onApplicationEvent(event: ApplicationReadyEvent) {
         scheduleInitialization()
@@ -198,17 +216,57 @@ fun interface TransformersEmbeddingModelFactory {
 
 fun interface TransformersEmbeddingModelSession {
     fun warmUp(document: String): Int
+
+    /** Returns Spring AI's attention-mask mean-pooled output for one tokenized input. */
+    fun embed(input: String): FloatArray =
+        throw ProviderUnavailableException()
 }
 
-class SpringAiTransformersEmbeddingModelFactory : TransformersEmbeddingModelFactory {
+class SpringAiTransformersEmbeddingModelFactory(
+    private val modelLoader: TransformersEmbeddingModelLoader = SpringAiTransformersEmbeddingModelLoader(),
+) : TransformersEmbeddingModelFactory {
     override fun create(artifacts: TransformersEmbeddingArtifacts): TransformersEmbeddingModelSession {
+        return modelLoader.load(
+            artifacts,
+            TransformersTokenizerOptions.fixed,
+        )
+    }
+}
+
+fun interface TransformersEmbeddingModelLoader {
+    fun load(
+        artifacts: TransformersEmbeddingArtifacts,
+        tokenizerOptions: Map<String, String>,
+    ): TransformersEmbeddingModelSession
+}
+
+class SpringAiTransformersEmbeddingModelLoader : TransformersEmbeddingModelLoader {
+    override fun load(
+        artifacts: TransformersEmbeddingArtifacts,
+        tokenizerOptions: Map<String, String>,
+    ): TransformersEmbeddingModelSession {
         val model = TransformersEmbeddingModel().apply {
             setModelResource(artifacts.modelArtifactUri.toString())
             setTokenizerResource(artifacts.tokenizerArtifactUri.toString())
             setModelOutputName(artifacts.modelOutputName)
+            setTokenizerOptions(tokenizerOptions)
             setDisableCaching(true)
             afterPropertiesSet()
         }
-        return TransformersEmbeddingModelSession { document -> model.embed(document).size }
+        return object : TransformersEmbeddingModelSession {
+            override fun warmUp(document: String): Int = embed(document).size
+
+            override fun embed(input: String): FloatArray = model.embed(input)
+        }
     }
+}
+
+object TransformersTokenizerOptions {
+    val fixed: Map<String, String> = mapOf(
+        "addSpecialTokens" to V2EmbeddingProfile.fixed.tokenizer.addSpecialTokens.toString(),
+        "modelMaxLength" to V2EmbeddingProfile.fixed.tokenizer.modelMaxLength.toString(),
+        "maxLength" to V2EmbeddingProfile.fixed.tokenizer.maxLength.toString(),
+        "padding" to V2EmbeddingProfile.fixed.tokenizer.padding.toString(),
+        "truncation" to V2EmbeddingProfile.fixed.tokenizer.truncation.toString(),
+    )
 }
