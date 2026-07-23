@@ -790,6 +790,8 @@ private class FakeDocumentChunkStore(existingChunk: DocumentChunk) : DocumentChu
 
     override fun findByDocumentId(documentId: DocumentId): List<DocumentChunk> =
         chunks.filter { it.documentId == documentId }
+
+    override fun findById(id: DocumentChunkId): DocumentChunk? = chunks.firstOrNull { it.id == id }
 }
 
 private class FakePersistedActiveEmbeddingSetResolver : PersistedActiveEmbeddingSetResolver {
@@ -816,6 +818,13 @@ private class FakeEmbeddingJobStore : EmbeddingJobStorePort {
     }
 
     override fun claimDue(batchSize: Int, owner: String, leaseUntil: Instant): List<EmbeddingJob> = emptyList()
+
+    override fun claimDueForEmbeddingSet(
+        embeddingSetId: EmbeddingSetId,
+        batchSize: Int,
+        owner: String,
+        leaseUntil: Instant,
+    ): List<EmbeddingJob> = emptyList()
 
     override fun releaseClaimToPending(
         jobId: EmbeddingJobId,

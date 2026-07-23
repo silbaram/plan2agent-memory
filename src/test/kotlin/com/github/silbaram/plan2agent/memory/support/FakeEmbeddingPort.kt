@@ -30,6 +30,7 @@ class FakeEmbeddingPort(
     private val invocations = mutableListOf<FakeEmbeddingRequest>()
     private val configuredEmbeddings = mutableMapOf<FakeEmbeddingRequest, List<Float>>()
     private val configuredFailures = mutableMapOf<FakeEmbeddingMode, FakeEmbeddingFailure>()
+    private val beforeEmbedActions = mutableMapOf<FakeEmbeddingMode, () -> Unit>()
 
     init {
         require(providerState in supportedStates) { "FakeEmbeddingPort supports only NOT_CONFIGURED and READY" }
@@ -63,6 +64,12 @@ class FakeEmbeddingPort(
         return this
     }
 
+    /** Runs once immediately before the next matching provider invocation. */
+    fun beforeNextEmbed(mode: FakeEmbeddingMode, action: () -> Unit): FakeEmbeddingPort {
+        beforeEmbedActions[mode] = action
+        return this
+    }
+
     override fun embedDocuments(documents: List<String>): List<EmbeddingResult> =
         documents.map { document -> embed(FakeEmbeddingMode.DOCUMENT, document) }
 
@@ -71,6 +78,7 @@ class FakeEmbeddingPort(
     private fun embed(mode: FakeEmbeddingMode, input: String): EmbeddingResult {
         val request = FakeEmbeddingRequest(mode, input)
         invocations += request
+        beforeEmbedActions.remove(mode)?.invoke()
 
         if (providerState == EmbeddingProviderState.NOT_CONFIGURED) {
             throw ProviderNotConfiguredException()

@@ -232,7 +232,7 @@ class PostgresDocumentChunkStoreAdapter(
             .addValue("createdAt", Timestamp.from(chunk.createdAt))
     }
 
-    private fun findById(id: DocumentChunkId): DocumentChunk? =
+    override fun findById(id: DocumentChunkId): DocumentChunk? =
         jdbc.queryOne(
             "SELECT * FROM document_chunks WHERE chunk_id = :chunkId",
             MapSqlParameterSource("chunkId", uuid(id.value)),
