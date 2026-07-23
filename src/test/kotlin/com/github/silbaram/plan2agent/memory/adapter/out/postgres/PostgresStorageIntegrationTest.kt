@@ -141,6 +141,18 @@ class PostgresStorageIntegrationTest {
     fun `flyway migration creates pgvector schema contracts`() {
         assertThat(
             jdbc.queryForObject(
+                "SELECT current_setting('server_version_num')::integer / 10000",
+                Int::class.java,
+            ),
+        ).isEqualTo(17)
+        assertThat(
+            jdbc.queryForObject(
+                "SELECT extversion FROM pg_extension WHERE extname = 'vector'",
+                String::class.java,
+            ),
+        ).isEqualTo("0.8.5")
+        assertThat(
+            jdbc.queryForObject(
                 "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector')",
                 Boolean::class.java,
             ),
@@ -587,7 +599,7 @@ class PostgresStorageIntegrationTest {
         )
 
     companion object {
-        private val pgvectorImage = DockerImageName.parse("pgvector/pgvector:pg16")
+        private val pgvectorImage = DockerImageName.parse("pgvector/pgvector:0.8.5-pg17-bookworm@sha256:d2ef61f42ef767baa5a1475393303cc235bcd92febd9d7014eddb48b41f3bad0")
             .asCompatibleSubstituteFor("postgres")
 
         @JvmStatic

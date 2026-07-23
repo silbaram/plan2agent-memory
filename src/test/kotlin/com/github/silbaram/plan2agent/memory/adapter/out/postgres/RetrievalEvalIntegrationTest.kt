@@ -308,7 +308,7 @@ class RetrievalEvalIntegrationTest {
     }
 
     companion object {
-        private val pgvectorImage = DockerImageName.parse("pgvector/pgvector:pg16")
+        private val pgvectorImage = DockerImageName.parse("pgvector/pgvector:0.8.5-pg17-bookworm@sha256:d2ef61f42ef767baa5a1475393303cc235bcd92febd9d7014eddb48b41f3bad0")
             .asCompatibleSubstituteFor("postgres")
         @JvmStatic
         val postgres: RetrievalEvalPgVectorContainer = RetrievalEvalPgVectorContainer(pgvectorImage)

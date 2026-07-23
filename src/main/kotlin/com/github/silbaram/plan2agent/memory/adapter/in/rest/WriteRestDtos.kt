@@ -721,7 +721,7 @@ data class ArtifactNodeWriteRequest(
     val documentId: String? = null,
     val taskId: String? = null,
     val runId: String? = null,
-    val metadata: Map<String, String> = emptyMap(),
+    val metadata: Map<String, String>? = emptyMap(),
 )
 
 data class ArtifactEdgeWriteRequest(
@@ -730,7 +730,7 @@ data class ArtifactEdgeWriteRequest(
     val toNodeId: String? = null,
     val edgeType: String? = null,
     val sourceReference: String? = null,
-    val metadata: Map<String, String> = emptyMap(),
+    val metadata: Map<String, String>? = emptyMap(),
 )
 
 data class ArtifactGraphSnapshotResponse(val nodeCount: Int, val edgeCount: Int)
@@ -752,7 +752,7 @@ private fun ArtifactNodeWriteRequest.toDomain(projectId: ProjectId, iterationId:
     documentId = documentId?.trim()?.takeIf(String::isNotEmpty)?.let(::DocumentId),
     taskId = taskId?.trim()?.takeIf(String::isNotEmpty)?.let(::TaskId),
     runId = runId?.trim()?.takeIf(String::isNotEmpty)?.let(::RunId),
-    metadata = metadata,
+    metadata = metadata.orEmpty(),
 )
 
 private fun ArtifactEdgeWriteRequest.toDomain(projectId: ProjectId) = com.github.silbaram.plan2agent.memory.domain.ArtifactEdge(
@@ -762,7 +762,7 @@ private fun ArtifactEdgeWriteRequest.toDomain(projectId: ProjectId) = com.github
     toNodeId = com.github.silbaram.plan2agent.memory.domain.ArtifactNodeId(requireText(toNodeId, "toNodeId")),
     type = parseRequiredEnum(edgeType, "edgeType"),
     sourceReference = sourceReference?.trim()?.takeIf(String::isNotEmpty),
-    metadata = metadata,
+    metadata = metadata.orEmpty(),
 )
 
 fun ArtifactGraphSnapshotResult.toResponse(): ArtifactGraphSnapshotResponse = ArtifactGraphSnapshotResponse(nodeCount, edgeCount)
