@@ -47,6 +47,7 @@ import com.github.silbaram.plan2agent.memory.domain.DocumentChunkId
 import com.github.silbaram.plan2agent.memory.domain.DocumentId
 import com.github.silbaram.plan2agent.memory.domain.DocumentSnapshot
 import com.github.silbaram.plan2agent.memory.domain.Embedding
+import com.github.silbaram.plan2agent.memory.domain.EmbeddingJob
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingJobErrorCode
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingJobFailure
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingJobId
@@ -433,6 +434,133 @@ class PostgresStorageIntegrationTest {
             embeddingJobStore.markSucceeded(finalClaim.id, "worker-d", finalClaim.leaseGeneration),
         ).extracting { it?.status }.isEqualTo(EmbeddingJobStatus.SUCCEEDED)
         assertThat(embeddingJobStore.retryFailed(jobId)?.status).isEqualTo(EmbeddingJobStatus.SUCCEEDED)
+    }
+
+    @Test
+    fun `concurrent embedding job claims do not duplicate work and fence same-owner reclaims`() {
+        val current = Instant.now()
+        val fixture = saveFixture("embedding-job-concurrent-claim")
+        val embeddingSet = embeddingSetStore.resolveOrCreate(
+            embeddingSet(
+                scope = "embedding-job-concurrent-claim",
+                projectId = fixture.project.id,
+                model = "embedding-job-concurrent-claim-model",
+                version = "v1",
+            ),
+        )
+        val jobId = EmbeddingJobId(stableUuid("embedding-job-concurrent-claim"))
+        embeddingJobStore.enqueueMissing(
+            EnqueueEmbeddingJobCommand(jobId, fixture.chunk.id, embeddingSet.id, current.minusSeconds(1)),
+        )
+
+        val workerCount = 2
+        val ready = CountDownLatch(workerCount)
+        val start = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(workerCount)
+        try {
+            val claims = (1..workerCount).map {
+                executor.submit<List<EmbeddingJob>> {
+                    ready.countDown()
+                    check(start.await(10, TimeUnit.SECONDS)) { "concurrent embedding job claim start timed out" }
+                    embeddingJobStore.claimDue(1, "worker-a", current.plusSeconds(600))
+                }
+            }
+            assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue()
+            start.countDown()
+
+            val firstClaim = claims.flatMap { it.get(20, TimeUnit.SECONDS) }.single()
+            assertThat(firstClaim).extracting(
+                { it.id },
+                { it.status },
+                { it.attemptCount },
+                { it.leaseOwner },
+                { it.leaseGeneration },
+            ).containsExactly(jobId, EmbeddingJobStatus.RUNNING, 1, "worker-a", 1L)
+
+            requireNotNull(
+                embeddingJobStore.releaseClaimToPending(
+                    firstClaim.id,
+                    "worker-a",
+                    firstClaim.leaseGeneration,
+                ),
+            )
+            val reclaimed = embeddingJobStore.claimDue(1, "worker-a", current.plusSeconds(600)).single()
+            assertThat(reclaimed).extracting({ it.attemptCount }, { it.leaseGeneration })
+                .containsExactly(2, 2L)
+
+            assertThat(
+                embeddingJobStore.markSucceeded(firstClaim.id, "worker-a", firstClaim.leaseGeneration),
+            ).isNull()
+            assertThat(
+                embeddingJobStore.releaseClaimToPending(firstClaim.id, "worker-a", firstClaim.leaseGeneration),
+            ).isNull()
+            assertThat(embeddingJobStore.findById(jobId)).isEqualTo(reclaimed)
+        } finally {
+            executor.shutdownNow()
+            executor.awaitTermination(10, TimeUnit.SECONDS)
+        }
+    }
+
+    @Test
+    fun `embedding job lease transitions reject stale and expired workers`() {
+        val current = Instant.now()
+        val fixture = saveFixture("embedding-job-fenced-transition")
+        val embeddingSet = embeddingSetStore.resolveOrCreate(
+            embeddingSet(
+                scope = "embedding-job-fenced-transition",
+                projectId = fixture.project.id,
+                model = "embedding-job-fenced-transition-model",
+                version = "v1",
+            ),
+        )
+        val jobId = EmbeddingJobId(stableUuid("embedding-job-fenced-transition"))
+        embeddingJobStore.enqueueMissing(
+            EnqueueEmbeddingJobCommand(jobId, fixture.chunk.id, embeddingSet.id, current.minusSeconds(1)),
+        )
+        val firstClaim = embeddingJobStore.claimDue(1, "worker-a", current.plusSeconds(600)).single()
+        requireNotNull(
+            embeddingJobStore.releaseClaimToPending(firstClaim.id, "worker-a", firstClaim.leaseGeneration),
+        )
+        val currentClaim = embeddingJobStore.claimDue(1, "worker-a", current.plusSeconds(600)).single()
+        val failure = EmbeddingJobFailure.fromUntrustedMessage(
+            EmbeddingJobErrorCode.PROVIDER_UNAVAILABLE,
+            "provider unavailable",
+        )
+
+        assertThat(
+            embeddingJobStore.markRetrying(
+                firstClaim.id,
+                "worker-a",
+                firstClaim.leaseGeneration,
+                failure,
+                current.plusSeconds(60),
+            ),
+        ).isNull()
+        assertThat(
+            embeddingJobStore.markPermanentlyFailed(
+                firstClaim.id,
+                "worker-a",
+                firstClaim.leaseGeneration,
+                failure,
+            ),
+        ).isNull()
+        assertThat(embeddingJobStore.findById(jobId)).isEqualTo(currentClaim)
+
+        jdbc.update(
+            "UPDATE embedding_jobs SET lease_expires_at = now() - INTERVAL '1 second' WHERE embedding_job_id = ?",
+            UUID.fromString(jobId.value),
+        )
+        assertThat(
+            embeddingJobStore.markSucceeded(currentClaim.id, "worker-a", currentClaim.leaseGeneration),
+        ).isNull()
+        assertThat(
+            embeddingJobStore.releaseClaimToPending(currentClaim.id, "worker-a", currentClaim.leaseGeneration),
+        ).isNull()
+        assertThat(embeddingJobStore.findById(jobId)).extracting(
+            { it?.status },
+            { it?.leaseOwner },
+            { it?.leaseGeneration },
+        ).containsExactly(EmbeddingJobStatus.RUNNING, "worker-a", currentClaim.leaseGeneration)
     }
 
     @Test
