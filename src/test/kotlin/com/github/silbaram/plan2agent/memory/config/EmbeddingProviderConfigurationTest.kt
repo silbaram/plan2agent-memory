@@ -1,7 +1,10 @@
 package com.github.silbaram.plan2agent.memory.config
 
+import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingProfileResolutionException
+import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingProfileResolver
 import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingPort
 import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingProviderState
+import com.github.silbaram.plan2agent.memory.domain.EmbeddingSetId
 import com.github.silbaram.plan2agent.memory.application.port.out.ProviderNotConfiguredException
 import com.github.silbaram.plan2agent.memory.domain.V2EmbeddingProfile
 import org.assertj.core.api.Assertions.assertThat
@@ -44,6 +47,7 @@ class EmbeddingProviderConfigurationTest {
                 "p2a.embedding.model-artifact-uri=file:/models/model.onnx",
                 "p2a.embedding.tokenizer-artifact-uri=file:/models/tokenizer.json",
             )
+            .withBean(ActiveEmbeddingProfileResolver::class.java, Supplier { resolvedProfile() })
             .run { context ->
                 assertThat(context).hasNotFailed()
                 assertThat(context).doesNotHaveBean(EmbeddingPort::class.java)
@@ -61,6 +65,7 @@ class EmbeddingProviderConfigurationTest {
     fun `transformers lifecycle makes missing artifact URIs unavailable after ready`() {
         contextRunner
             .withPropertyValues("p2a.embedding.provider=transformers")
+            .withBean(ActiveEmbeddingProfileResolver::class.java, Supplier { resolvedProfile() })
             .run { context ->
                 val lifecycle = context.getBean(TransformersEmbeddingProviderLifecycle::class.java)
 
@@ -78,6 +83,7 @@ class EmbeddingProviderConfigurationTest {
                 "p2a.embedding.model-artifact-uri=file:/missing/model.onnx",
                 "p2a.embedding.tokenizer-artifact-uri=file:/missing/tokenizer.json",
             )
+            .withBean(ActiveEmbeddingProfileResolver::class.java, Supplier { resolvedProfile() })
             .run { context ->
                 val lifecycle = context.getBean(TransformersEmbeddingProviderLifecycle::class.java)
 
@@ -95,6 +101,7 @@ class EmbeddingProviderConfigurationTest {
                 "p2a.embedding.model-artifact-uri=https://example.invalid/model.onnx",
                 "p2a.embedding.tokenizer-artifact-uri=https://example.invalid/tokenizer.json",
             )
+            .withBean(ActiveEmbeddingProfileResolver::class.java, Supplier { resolvedProfile() })
             .run { context ->
                 val lifecycle = context.getBean(TransformersEmbeddingProviderLifecycle::class.java)
 
@@ -115,6 +122,7 @@ class EmbeddingProviderConfigurationTest {
                     "p2a.embedding.model-artifact-uri=${model.toUri()}",
                     "p2a.embedding.tokenizer-artifact-uri=${tokenizer.toUri()}",
                 )
+                .withBean(ActiveEmbeddingProfileResolver::class.java, Supplier { resolvedProfile() })
                 .run { context ->
                     val lifecycle = context.getBean(TransformersEmbeddingProviderLifecycle::class.java)
 
@@ -260,6 +268,30 @@ class EmbeddingProviderConfigurationTest {
 
                 assertThat(awaitProviderState(lifecycle, EmbeddingProviderState.READY)).isTrue()
                 assertThat(factoryCalls).isEqualTo(1)
+                assertThat(lifecycle.activeEmbeddingSetId).isEqualTo(RESOLVED_EMBEDDING_SET_ID)
+            }
+    }
+
+    @Test
+    fun `transformers lifecycle makes an unresolved active profile unavailable before opening model artifacts`() {
+        var factoryCalls = 0
+        transformerContext(
+            activeProfileResolver = ActiveEmbeddingProfileResolver {
+                throw ActiveEmbeddingProfileResolutionException()
+            },
+            modelFactory = TransformersEmbeddingModelFactory {
+                factoryCalls += 1
+                TransformersEmbeddingModelSession { V2EmbeddingProfile.fixed.dimension }
+            },
+        )
+            .run { context ->
+                val lifecycle = context.getBean(TransformersEmbeddingProviderLifecycle::class.java)
+
+                lifecycle.scheduleInitialization()
+
+                assertThat(awaitProviderState(lifecycle, EmbeddingProviderState.UNAVAILABLE)).isTrue()
+                assertThat(factoryCalls).isZero()
+                assertThat(lifecycle.activeEmbeddingSetId).isNull()
             }
     }
 
@@ -286,11 +318,16 @@ class EmbeddingProviderConfigurationTest {
         modelFactory: TransformersEmbeddingModelFactory = TransformersEmbeddingModelFactory {
             TransformersEmbeddingModelSession { V2EmbeddingProfile.fixed.dimension }
         },
+        activeProfileResolver: ActiveEmbeddingProfileResolver = resolvedProfile(),
     ): ApplicationContextRunner =
         contextRunner
             .withPropertyValues("p2a.embedding.provider=transformers")
             .withBean(TransformersArtifactVerifier::class.java, Supplier { artifactVerifier })
             .withBean(TransformersEmbeddingModelFactory::class.java, Supplier { modelFactory })
+            .withBean(ActiveEmbeddingProfileResolver::class.java, Supplier { activeProfileResolver })
+
+    private fun resolvedProfile(): ActiveEmbeddingProfileResolver =
+        ActiveEmbeddingProfileResolver { RESOLVED_EMBEDDING_SET_ID }
 
     private fun awaitProviderState(
         lifecycle: TransformersEmbeddingProviderLifecycle,
@@ -303,5 +340,9 @@ class EmbeddingProviderConfigurationTest {
             Thread.sleep(10)
         }
         return false
+    }
+
+    private companion object {
+        val RESOLVED_EMBEDDING_SET_ID = EmbeddingSetId("10d2d6cc-a2d8-4c4d-a7ab-3443a29533b5")
     }
 }

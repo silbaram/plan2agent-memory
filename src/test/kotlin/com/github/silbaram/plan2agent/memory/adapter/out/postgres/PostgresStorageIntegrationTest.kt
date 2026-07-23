@@ -4,6 +4,8 @@ package com.github.silbaram.plan2agent.memory.adapter.out.postgres
 
 import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactGraphStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactQueryPort
+import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingProfileResolutionException
+import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingProfileResolver
 import com.github.silbaram.plan2agent.memory.application.port.out.ChunkEmbeddingStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.DocumentChunkStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.DocumentSnapshotStorePort
@@ -70,6 +72,7 @@ import com.github.silbaram.plan2agent.memory.domain.TaskGraph
 import com.github.silbaram.plan2agent.memory.domain.TaskGraphId
 import com.github.silbaram.plan2agent.memory.domain.TaskId
 import com.github.silbaram.plan2agent.memory.domain.TaskStatus
+import com.github.silbaram.plan2agent.memory.domain.V2EmbeddingProfile
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.assertj.core.groups.Tuple.tuple
@@ -88,6 +91,9 @@ import java.nio.charset.StandardCharsets
 import java.sql.DriverManager
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 @SpringBootTest
 class PostgresStorageIntegrationTest {
@@ -120,6 +126,9 @@ class PostgresStorageIntegrationTest {
 
     @Autowired
     private lateinit var embeddingSetStore: EmbeddingSetStorePort
+
+    @Autowired
+    private lateinit var activeEmbeddingProfileResolver: ActiveEmbeddingProfileResolver
 
     @Autowired
     private lateinit var embeddingJobStore: EmbeddingJobStorePort
@@ -976,6 +985,232 @@ class PostgresStorageIntegrationTest {
         assertThat(found.items.map { it.artifactId }).containsExactly(first.id.value)
     }
 
+    @Test
+    fun `active V2 profile resolver atomically bootstraps one immutable global set and pointer`() {
+        val resolvedId = activeEmbeddingProfileResolver.resolveActiveV2EmbeddingSetId()
+        val profile = V2EmbeddingProfile.fixed
+        val stored = requireNotNull(embeddingSetStore.findById(resolvedId))
+
+        assertThat(stored).extracting(
+            { it.projectId },
+            { it.scope },
+            { it.profileFingerprint },
+            { it.embeddingModel },
+            { it.embeddingDimension },
+            { it.embeddingVersion },
+            { it.distanceMetric },
+            { it.storageType },
+        ).containsExactly(
+            null,
+            EmbeddingSetScope.SERVER_GLOBAL,
+            profile.fingerprint,
+            profile.model,
+            profile.dimension,
+            profile.revision,
+            profile.distanceMetric,
+            EmbeddingStorageType.VECTOR_INDEX,
+        )
+        assertThat(profileManifestMatches(resolvedId, profile.manifest.canonicalJson)).isTrue()
+        assertThat(activeProfilePointer()).isEqualTo(resolvedId.value)
+        assertThat(serverGlobalSetCount()).isEqualTo(1)
+    }
+
+    @Test
+    fun `active V2 profile resolver follows the exact existing pointer without model tuple lookup`() {
+        val initialId = activeEmbeddingProfileResolver.resolveActiveV2EmbeddingSetId()
+        val profile = V2EmbeddingProfile.fixed
+        val fixture = saveFixture("active-v2-exact-resolution")
+        val legacySet = embeddingSetStore.resolveOrCreate(
+            embeddingSet(
+                scope = "active-v2-exact-resolution-legacy",
+                projectId = fixture.project.id,
+                model = profile.model,
+                version = profile.revision,
+                dimension = profile.dimension,
+            ),
+        )
+
+        assertThat(activeEmbeddingProfileResolver.resolveActiveV2EmbeddingSetId()).isEqualTo(initialId)
+        assertThat(activeProfilePointer()).isEqualTo(initialId.value)
+        assertThat(legacySet.id).isNotEqualTo(initialId)
+        assertThat(serverGlobalSetCount()).isEqualTo(1)
+    }
+
+    @Test
+    fun `active V2 profile resolver leaves a mismatched existing pointer untouched`() {
+        val mismatchedSetId = UUID.randomUUID()
+        insertServerGlobalEmbeddingSet(
+            id = mismatchedSetId,
+            fingerprint = "sha256:mismatched-profile",
+            manifest = V2EmbeddingProfile.fixed.manifest.canonicalJson,
+            embeddingVersion = V2EmbeddingProfile.fixed.revision,
+        )
+        insertActiveProfilePointer(mismatchedSetId)
+        val pointerBefore = activeProfilePointer()
+        val setCountBefore = rowCount("embedding_sets")
+
+        assertThatThrownBy { activeEmbeddingProfileResolver.resolveActiveV2EmbeddingSetId() }
+            .isInstanceOf(ActiveEmbeddingProfileResolutionException::class.java)
+
+        assertThat(activeProfilePointer()).isEqualTo(pointerBefore)
+        assertThat(rowCount("embedding_sets")).isEqualTo(setCountBefore)
+        assertThat(serverGlobalSetCount()).isEqualTo(1)
+        assertThat(
+            jdbc.queryForObject(
+                "SELECT profile_fingerprint FROM embedding_sets WHERE embedding_set_id = ?",
+                String::class.java,
+                mismatchedSetId,
+            ),
+        ).isEqualTo("sha256:mismatched-profile")
+    }
+
+    @Test
+    fun `active V2 profile resolver does not repair a server global set without a pointer`() {
+        val existingSetId = UUID.randomUUID()
+        insertServerGlobalEmbeddingSet(
+            id = existingSetId,
+            fingerprint = V2EmbeddingProfile.fixed.fingerprint,
+            manifest = V2EmbeddingProfile.fixed.manifest.canonicalJson,
+            embeddingVersion = V2EmbeddingProfile.fixed.revision,
+        )
+        val setCountBefore = rowCount("embedding_sets")
+
+        assertThatThrownBy { activeEmbeddingProfileResolver.resolveActiveV2EmbeddingSetId() }
+            .isInstanceOf(ActiveEmbeddingProfileResolutionException::class.java)
+
+        assertThat(activeProfilePointer()).isNull()
+        assertThat(rowCount("embedding_sets")).isEqualTo(setCountBefore)
+        assertThat(serverGlobalSetCount()).isEqualTo(1)
+    }
+
+    @Test
+    fun `active V2 profile resolver leaves dangling pointer untouched`() {
+        val missingSetId = UUID.randomUUID()
+        insertDanglingActiveProfilePointer(missingSetId)
+        val pointerBefore = activeProfilePointer()
+
+        assertThatThrownBy { activeEmbeddingProfileResolver.resolveActiveV2EmbeddingSetId() }
+            .isInstanceOf(ActiveEmbeddingProfileResolutionException::class.java)
+
+        assertThat(activeProfilePointer()).isEqualTo(pointerBefore)
+        assertThat(rowCount("embedding_sets")).isZero()
+        assertThat(rowCount("embedding_active_profiles")).isEqualTo(1)
+    }
+
+    @Test
+    fun `active V2 profile resolver leaves malformed profile manifest untouched`() {
+        val malformedSetId = UUID.randomUUID()
+        insertServerGlobalEmbeddingSet(
+            id = malformedSetId,
+            fingerprint = V2EmbeddingProfile.fixed.fingerprint,
+            manifest = """{"profileSchema":"p2a.embedding-profile.v1","unexpected":true}""",
+            embeddingVersion = V2EmbeddingProfile.fixed.revision,
+        )
+        insertActiveProfilePointer(malformedSetId)
+        val pointerBefore = activeProfilePointer()
+        val manifestBefore = jdbc.queryForObject(
+            "SELECT profile_manifest::text FROM embedding_sets WHERE embedding_set_id = ?",
+            String::class.java,
+            malformedSetId,
+        )
+
+        assertThatThrownBy { activeEmbeddingProfileResolver.resolveActiveV2EmbeddingSetId() }
+            .isInstanceOf(ActiveEmbeddingProfileResolutionException::class.java)
+
+        assertThat(activeProfilePointer()).isEqualTo(pointerBefore)
+        assertThat(
+            jdbc.queryForObject(
+                "SELECT profile_manifest::text FROM embedding_sets WHERE embedding_set_id = ?",
+                String::class.java,
+                malformedSetId,
+            ),
+        ).isEqualTo(manifestBefore)
+        assertThat(serverGlobalSetCount()).isEqualTo(1)
+    }
+
+    @Test
+    fun `active V2 profile bootstrap is concurrent and restart safe`() {
+        val workers = 8
+        val ready = CountDownLatch(workers)
+        val start = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(workers)
+        try {
+            val resolutions = (1..workers).map {
+                executor.submit<EmbeddingSetId> {
+                    ready.countDown()
+                    check(start.await(10, TimeUnit.SECONDS))
+                    activeEmbeddingProfileResolver.resolveActiveV2EmbeddingSetId()
+                }
+            }
+            assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue()
+            start.countDown()
+
+            val resolvedIds = resolutions.map { it.get(20, TimeUnit.SECONDS) }
+            assertThat(resolvedIds).containsOnly(resolvedIds.first())
+            repeat(3) {
+                assertThat(activeEmbeddingProfileResolver.resolveActiveV2EmbeddingSetId()).isEqualTo(resolvedIds.first())
+            }
+            assertThat(serverGlobalSetCount()).isEqualTo(1)
+            assertThat(rowCount("embedding_active_profiles")).isEqualTo(1)
+            assertThat(activeProfilePointer()).isEqualTo(resolvedIds.first().value)
+        } finally {
+            executor.shutdownNow()
+            executor.awaitTermination(10, TimeUnit.SECONDS)
+        }
+    }
+
+    @Test
+    fun `active V2 profile bootstrap preserves legacy vectors`() {
+        val fixture = saveFixture("active-v2-legacy-preservation")
+        val legacySet = embeddingSetStore.resolveOrCreate(
+            embeddingSet(
+                scope = "active-v2-legacy-preservation",
+                projectId = fixture.project.id,
+                model = "legacy-vector-model",
+                version = "v1",
+                dimension = 384,
+            ),
+        )
+        val legacyEmbeddingId = UUID.randomUUID()
+        val legacyVector = List(384) { index -> if (index == 0) 1f else 0f }.toPgVectorLiteral()
+        jdbc.update(
+            """
+            INSERT INTO chunk_embeddings (
+                chunk_embedding_id, chunk_id, embedding_set_id, embedding, metadata, created_at
+            ) VALUES (?, ?, ?, CAST(? AS vector), '{}'::jsonb, ?)
+            """.trimIndent(),
+            legacyEmbeddingId,
+            UUID.fromString(fixture.chunk.id.value),
+            UUID.fromString(legacySet.id.value),
+            legacyVector,
+            java.sql.Timestamp.from(now),
+        )
+        jdbc.update(
+            "INSERT INTO chunk_embedding_vectors_384 (chunk_embedding_id, embedding) VALUES (?, CAST(? AS vector(384)))",
+            legacyEmbeddingId,
+            legacyVector,
+        )
+
+        val resolvedId = activeEmbeddingProfileResolver.resolveActiveV2EmbeddingSetId()
+
+        assertThat(resolvedId).isNotEqualTo(legacySet.id)
+        assertThat(
+            jdbc.queryForObject(
+                "SELECT count(*) FROM chunk_embeddings WHERE embedding_set_id = ?",
+                Long::class.java,
+                UUID.fromString(legacySet.id.value),
+            ),
+        ).isEqualTo(1L)
+        assertThat(
+            jdbc.queryForObject(
+                "SELECT count(*) FROM chunk_embedding_vectors_384 WHERE chunk_embedding_id = ?",
+                Long::class.java,
+                legacyEmbeddingId,
+            ),
+        ).isEqualTo(1L)
+        assertThat(serverGlobalSetCount()).isEqualTo(1)
+    }
+
     private fun saveFixture(scope: String): StoredFixture {
         val base = saveProjectAndIteration(scope)
         val document = documentSnapshotStore.save(document(scope, base.project.id, base.iteration.id))
@@ -1045,6 +1280,45 @@ class PostgresStorageIntegrationTest {
     private fun rowCount(table: String): Long =
         jdbc.queryForObject("SELECT count(*) FROM $table", Long::class.java) ?: 0L
 
+    private fun activeProfilePointer(): String? =
+        jdbc.query(
+            "SELECT active_embedding_set_id::text FROM embedding_active_profiles WHERE scope = 'server_global'",
+        ) { row, _ -> row.getString(1) }.singleOrNull()
+
+    private fun serverGlobalSetCount(): Long =
+        jdbc.queryForObject(
+            "SELECT count(*) FROM embedding_sets WHERE scope = 'SERVER_GLOBAL'",
+            Long::class.java,
+        ) ?: 0L
+
+    private fun profileManifestMatches(embeddingSetId: EmbeddingSetId, expectedManifest: String): Boolean =
+        jdbc.queryForObject(
+            """
+            SELECT profile_manifest = CAST(? AS jsonb)
+            FROM embedding_sets
+            WHERE embedding_set_id = ?
+            """.trimIndent(),
+            Boolean::class.java,
+            expectedManifest,
+            UUID.fromString(embeddingSetId.value),
+        ) ?: false
+
+    private fun insertActiveProfilePointer(embeddingSetId: UUID) {
+        jdbc.update(
+            "INSERT INTO embedding_active_profiles (scope, active_embedding_set_id) VALUES ('server_global', ?)",
+            embeddingSetId,
+        )
+    }
+
+    private fun insertDanglingActiveProfilePointer(embeddingSetId: UUID) {
+        jdbc.execute("ALTER TABLE embedding_active_profiles DISABLE TRIGGER ALL")
+        try {
+            insertActiveProfilePointer(embeddingSetId)
+        } finally {
+            jdbc.execute("ALTER TABLE embedding_active_profiles ENABLE TRIGGER ALL")
+        }
+    }
+
     private fun documentPathRow(documentId: DocumentId): Map<String, Any?> =
         jdbc.queryForMap(
             "SELECT source_path, raw_source_path FROM documents WHERE document_id = ?",
@@ -1058,7 +1332,16 @@ class PostgresStorageIntegrationTest {
             UUID.fromString(taskGraphId.value),
         )
 
-    private fun insertServerGlobalEmbeddingSet(id: UUID, fingerprint: String) {
+    private fun insertServerGlobalEmbeddingSet(
+        id: UUID,
+        fingerprint: String,
+        manifest: String = """{"schemaVersion":"p2a.embedding-profile.v1"}""",
+        embeddingModel: String = "intfloat/multilingual-e5-small",
+        embeddingDimension: Int = 384,
+        embeddingVersion: String = "v2",
+        distanceMetric: String = "cosine",
+        storageType: String = "vector",
+    ) {
         jdbc.update(
             """
             INSERT INTO embedding_sets (
@@ -1066,13 +1349,18 @@ class PostgresStorageIntegrationTest {
                 embedding_version, distance_metric, storage_type, profile_fingerprint,
                 profile_manifest, metadata, created_at
             ) VALUES (
-                ?, NULL, 'SERVER_GLOBAL', 'intfloat/multilingual-e5-small', 384,
-                'v2', 'cosine', 'vector', ?, CAST(? AS jsonb), '{}'::jsonb, ?
+                ?, NULL, 'SERVER_GLOBAL', ?, ?,
+                ?, ?, ?, ?, CAST(? AS jsonb), '{}'::jsonb, ?
             )
             """.trimIndent(),
             id,
+            embeddingModel,
+            embeddingDimension,
+            embeddingVersion,
+            distanceMetric,
+            storageType,
             fingerprint,
-            """{"schemaVersion":"p2a.embedding-profile.v1"}""",
+            manifest,
             java.sql.Timestamp.from(now),
         )
     }
