@@ -64,6 +64,13 @@ value class ChunkEmbeddingId(val value: String) {
 }
 
 @JvmInline
+value class EmbeddingJobId(val value: String) {
+    init {
+        require(value.isNotBlank()) { "EmbeddingJobId must not be blank" }
+    }
+}
+
+@JvmInline
 value class CanonicalServerId(val value: String) {
     init {
         require(value.isNotBlank()) { "CanonicalServerId must not be blank" }

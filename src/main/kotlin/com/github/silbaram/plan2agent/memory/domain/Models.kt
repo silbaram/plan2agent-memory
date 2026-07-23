@@ -237,6 +237,128 @@ data class ChunkEmbedding(
     val metadata: Map<String, String> = emptyMap(),
 )
 
+data class EmbeddingJob(
+    val id: EmbeddingJobId,
+    val chunkId: DocumentChunkId,
+    val embeddingSetId: EmbeddingSetId,
+    val status: EmbeddingJobStatus,
+    val attemptCount: Int,
+    val nextAttemptAt: Instant,
+    val leaseOwner: String? = null,
+    val leaseGeneration: Long = 0,
+    val leaseExpiresAt: Instant? = null,
+    val lastError: EmbeddingJobFailure? = null,
+    val createdAt: Instant,
+    val updatedAt: Instant? = null,
+    val startedAt: Instant? = null,
+    val lastAttemptAt: Instant? = null,
+    val completedAt: Instant? = null,
+) {
+    init {
+        require(attemptCount >= 0) { "EmbeddingJob attemptCount must not be negative" }
+        require(leaseGeneration >= 0) { "EmbeddingJob leaseGeneration must not be negative" }
+
+        when (status) {
+            EmbeddingJobStatus.RUNNING -> {
+                require(!leaseOwner.isNullOrBlank()) { "Running EmbeddingJob must have a leaseOwner" }
+                require(leaseExpiresAt != null) { "Running EmbeddingJob must have a leaseExpiresAt" }
+                require(completedAt == null) { "Running EmbeddingJob must not be completed" }
+            }
+
+            EmbeddingJobStatus.PENDING,
+            EmbeddingJobStatus.RETRYING,
+            -> {
+                require(leaseOwner == null) { "Queued EmbeddingJob must not have a leaseOwner" }
+                require(leaseExpiresAt == null) { "Queued EmbeddingJob must not have a leaseExpiresAt" }
+                require(completedAt == null) { "Queued EmbeddingJob must not be completed" }
+            }
+
+            EmbeddingJobStatus.SUCCEEDED,
+            EmbeddingJobStatus.PERMANENTLY_FAILED,
+            -> {
+                require(leaseOwner == null) { "Completed EmbeddingJob must not have a leaseOwner" }
+                require(leaseExpiresAt == null) { "Completed EmbeddingJob must not have a leaseExpiresAt" }
+                require(completedAt != null) { "Completed EmbeddingJob must have a completedAt" }
+            }
+        }
+
+        if (status == EmbeddingJobStatus.PERMANENTLY_FAILED) {
+            require(lastError != null) { "Permanently failed EmbeddingJob must have an error" }
+        }
+        if (status == EmbeddingJobStatus.SUCCEEDED) {
+            require(lastError == null) { "Succeeded EmbeddingJob must not retain an error" }
+        }
+    }
+}
+
+enum class EmbeddingJobStatus {
+    PENDING,
+    RUNNING,
+    RETRYING,
+    SUCCEEDED,
+    PERMANENTLY_FAILED,
+}
+
+enum class EmbeddingJobErrorCode {
+    PROVIDER_UNAVAILABLE,
+    PROVIDER_CONTRACT_INVALID,
+    CONTENT_INVALID,
+    MAX_ATTEMPTS_EXHAUSTED,
+    LEASE_EXPIRED,
+}
+
+@ConsistentCopyVisibility
+data class EmbeddingJobFailure private constructor(
+    val code: EmbeddingJobErrorCode,
+    val message: String,
+) {
+    init {
+        require(message.isNotBlank()) { "EmbeddingJob failure message must not be blank" }
+        require(message == sanitizeMessage(message)) {
+            "EmbeddingJob failure message must be sanitized"
+        }
+    }
+
+    companion object {
+        const val MAX_MESSAGE_CHARACTERS: Int = 512
+
+        fun fromUntrustedMessage(code: EmbeddingJobErrorCode, message: String): EmbeddingJobFailure =
+            EmbeddingJobFailure(code, sanitizeMessage(message))
+
+        fun fromStoredMessage(code: EmbeddingJobErrorCode, message: String): EmbeddingJobFailure =
+            EmbeddingJobFailure(code, message)
+
+        private fun sanitizeMessage(message: String): String {
+            val sanitized = StringBuilder()
+            var index = 0
+            var characterCount = 0
+            var previousWasWhitespace = true
+
+            while (index < message.length && characterCount < MAX_MESSAGE_CHARACTERS) {
+                val codePoint = message.codePointAt(index)
+                index += Character.charCount(codePoint)
+                val normalized = when {
+                    Character.isISOControl(codePoint) || Character.isWhitespace(codePoint) -> ' '.code
+                    else -> codePoint
+                }
+                if (normalized == ' '.code) {
+                    if (!previousWasWhitespace) {
+                        sanitized.append(' ')
+                        characterCount += 1
+                    }
+                    previousWasWhitespace = true
+                } else {
+                    sanitized.appendCodePoint(normalized)
+                    characterCount += 1
+                    previousWasWhitespace = false
+                }
+            }
+
+            return sanitized.toString().trim().ifBlank { "Unspecified embedding job failure" }
+        }
+    }
+}
+
 enum class DistanceMetric {
     COSINE,
     INNER_PRODUCT,

@@ -7,7 +7,10 @@ import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactQueryP
 import com.github.silbaram.plan2agent.memory.application.port.out.ChunkEmbeddingStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.DocumentChunkStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.DocumentSnapshotStorePort
+import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingJobStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingSetStorePort
+import com.github.silbaram.plan2agent.memory.application.port.out.EnqueueEmbeddingJobCommand
+import com.github.silbaram.plan2agent.memory.application.port.out.FindEmbeddingJobsQuery
 import com.github.silbaram.plan2agent.memory.application.port.out.IterationStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.ProjectStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.RunRecordStorePort
@@ -38,6 +41,10 @@ import com.github.silbaram.plan2agent.memory.domain.DocumentChunkId
 import com.github.silbaram.plan2agent.memory.domain.DocumentId
 import com.github.silbaram.plan2agent.memory.domain.DocumentSnapshot
 import com.github.silbaram.plan2agent.memory.domain.Embedding
+import com.github.silbaram.plan2agent.memory.domain.EmbeddingJobErrorCode
+import com.github.silbaram.plan2agent.memory.domain.EmbeddingJobFailure
+import com.github.silbaram.plan2agent.memory.domain.EmbeddingJobId
+import com.github.silbaram.plan2agent.memory.domain.EmbeddingJobStatus
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingSet
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingSetId
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingSetScope
@@ -65,6 +72,7 @@ import com.github.silbaram.plan2agent.memory.domain.TaskId
 import com.github.silbaram.plan2agent.memory.domain.TaskStatus
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
+import org.assertj.core.groups.Tuple.tuple
 import org.flywaydb.core.Flyway
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeEach
@@ -114,6 +122,9 @@ class PostgresStorageIntegrationTest {
     private lateinit var embeddingSetStore: EmbeddingSetStorePort
 
     @Autowired
+    private lateinit var embeddingJobStore: EmbeddingJobStorePort
+
+    @Autowired
     private lateinit var artifactQuery: ArtifactQueryPort
 
     @Autowired
@@ -130,9 +141,9 @@ class PostgresStorageIntegrationTest {
                 artifact_edges,
                 artifact_nodes,
                 embedding_active_profiles,
+                embedding_jobs,
                 chunk_embeddings,
-            embedding_active_profiles,
-            embedding_sets,
+                embedding_sets,
                 document_chunks,
                 runs,
                 tasks,
@@ -175,6 +186,7 @@ class PostgresStorageIntegrationTest {
             "document_chunks",
             "embedding_sets",
             "chunk_embeddings",
+            "embedding_jobs",
             "chunk_embedding_vectors_2",
             "chunk_embedding_vectors_384",
             "chunk_embedding_vectors_1536",
@@ -202,6 +214,19 @@ class PostgresStorageIntegrationTest {
             "profile_fingerprint",
             "profile_manifest",
         )
+        assertThat(columnNames("embedding_jobs")).contains(
+            "embedding_job_id",
+            "chunk_id",
+            "embedding_set_id",
+            "status",
+            "attempt_count",
+            "next_attempt_at",
+            "lease_owner",
+            "lease_generation",
+            "lease_expires_at",
+            "last_error_code",
+            "last_error_message",
+        )
         assertThat(indexAndConstraintNames()).contains(
             "uq_documents_logical_snapshot_hash",
             "uq_documents_logical_snapshot_version",
@@ -217,6 +242,15 @@ class PostgresStorageIntegrationTest {
             "idx_chunk_embedding_vectors_1536_hnsw_cosine",
             "uq_embedding_sets_legacy_model_dimension_version_metric",
             "uq_embedding_sets_server_global_profile_fingerprint",
+            "uq_embedding_jobs_chunk_embedding_set",
+            "idx_embedding_jobs_claimable",
+            "idx_embedding_jobs_expired_leases",
+            "ck_embedding_jobs_status",
+            "ck_embedding_jobs_error_code",
+            "ck_embedding_jobs_error_message",
+            "ck_embedding_jobs_error_fields",
+            "ck_embedding_jobs_state_leases",
+            "ck_embedding_jobs_completed_states",
             "uq_artifact_nodes_scope_natural_key",
             "uq_artifact_edges_nodes_type",
             "ck_artifact_edges_no_self_loop",
@@ -225,6 +259,25 @@ class PostgresStorageIntegrationTest {
         )
         assertThat(indexAndConstraintNames())
             .doesNotContain("uq_task_graphs_project_iteration_graph_hash")
+        assertThat(constraintDefinition("ck_embedding_jobs_status")).contains(
+            "pending",
+            "running",
+            "retrying",
+            "succeeded",
+            "permanently_failed",
+        )
+        assertThat(constraintDefinition("ck_embedding_jobs_error_code")).contains(
+            "provider_unavailable",
+            "provider_contract_invalid",
+            "content_invalid",
+            "max_attempts_exhausted",
+            "lease_expired",
+        ).doesNotContain(
+            "provider_timeout",
+            "provider_response_invalid",
+            "input_validation",
+            "unknown",
+        )
         assertThat(
             jdbc.queryForObject(
                 """
@@ -247,7 +300,155 @@ class PostgresStorageIntegrationTest {
                 ORDER BY installed_rank
                 """.trimIndent(),
             ),
-        ).containsExactly("1", "2")
+        ).containsExactly("1", "2", "3")
+    }
+
+    @Test
+    fun `embedding jobs are idempotent and lease transitions use compare and swap`() {
+        val current = Instant.now()
+        val fixture = saveFixture("embedding-job")
+        val embeddingSet = embeddingSetStore.resolveOrCreate(
+            embeddingSet(
+                scope = "embedding-job",
+                projectId = fixture.project.id,
+                model = "embedding-job-model",
+                version = "v1",
+            ),
+        )
+        val jobId = EmbeddingJobId(stableUuid("embedding-job"))
+        val enqueued = embeddingJobStore.enqueueMissing(
+            EnqueueEmbeddingJobCommand(jobId, fixture.chunk.id, embeddingSet.id, current.minusSeconds(1)),
+        )
+        val duplicate = embeddingJobStore.enqueueMissing(
+            EnqueueEmbeddingJobCommand(
+                EmbeddingJobId(stableUuid("embedding-job-duplicate")),
+                fixture.chunk.id,
+                embeddingSet.id,
+                current,
+            ),
+        )
+
+        assertThat(enqueued.status).isEqualTo(EmbeddingJobStatus.PENDING)
+        assertThat(duplicate.id).isEqualTo(jobId)
+        assertThat(enqueued.attemptCount).isZero()
+        assertThat(rowCount("embedding_jobs")).isEqualTo(1)
+
+        val claimed = embeddingJobStore.claimDue(1, "worker-a", current.plusSeconds(600)).single()
+        assertThat(claimed).extracting(
+            { it.status },
+            { it.attemptCount },
+            { it.leaseGeneration },
+            { it.leaseOwner },
+        ).containsExactly(EmbeddingJobStatus.RUNNING, 1, 1L, "worker-a")
+        assertThat(
+            embeddingJobStore.releaseClaimToPending(claimed.id, "another-worker", claimed.leaseGeneration),
+        ).isNull()
+        val released = requireNotNull(
+            embeddingJobStore.releaseClaimToPending(claimed.id, "worker-a", claimed.leaseGeneration),
+        )
+        assertThat(released).extracting({ it.status }, { it.attemptCount })
+            .containsExactly(EmbeddingJobStatus.PENDING, 1)
+        val claimedForRetry = embeddingJobStore.claimDue(1, "worker-a", current.plusSeconds(600)).single()
+
+        val failure = EmbeddingJobFailure.fromUntrustedMessage(
+            EmbeddingJobErrorCode.PROVIDER_CONTRACT_INVALID,
+            "temporary timeout\n" + "x".repeat(600),
+        )
+        val retried = requireNotNull(
+            embeddingJobStore.markRetrying(
+                claimedForRetry.id,
+                "worker-a",
+                claimedForRetry.leaseGeneration,
+                failure,
+                nextAttemptAt = current.minusSeconds(1),
+            ),
+        )
+        assertThat(retried.status).isEqualTo(EmbeddingJobStatus.RETRYING)
+        assertThat(retried.lastError?.code).isEqualTo(EmbeddingJobErrorCode.PROVIDER_CONTRACT_INVALID)
+        assertThat(retried.lastError?.message).doesNotContain("\n")
+        assertThat(retried.lastError?.message?.codePointCount(0, retried.lastError.message.length)).isLessThanOrEqualTo(512)
+
+        val reclaimed = embeddingJobStore.claimDue(1, "worker-b", current.plusSeconds(600)).single()
+        assertThat(reclaimed).extracting({ it.attemptCount }, { it.leaseGeneration })
+            .containsExactly(3, 3L)
+        assertThat(
+            embeddingJobStore.markPermanentlyFailed(
+                claimedForRetry.id,
+                "worker-a",
+                claimedForRetry.leaseGeneration,
+                failure,
+            ),
+        ).isNull()
+
+        val permanentlyFailed = requireNotNull(
+            embeddingJobStore.markPermanentlyFailed(
+                reclaimed.id,
+                "worker-b",
+                reclaimed.leaseGeneration,
+                failure,
+            ),
+        )
+        assertThat(permanentlyFailed.status).isEqualTo(EmbeddingJobStatus.PERMANENTLY_FAILED)
+        val manuallyRetried = requireNotNull(
+            embeddingJobStore.retryFailed(jobId),
+        )
+        assertThat(manuallyRetried).extracting(
+            { it.status },
+            { it.attemptCount },
+            { it.lastError },
+            { it.completedAt },
+        ).containsExactly(EmbeddingJobStatus.PENDING, 0, null, null)
+        assertThat(embeddingJobStore.retryFailed(jobId)).isEqualTo(manuallyRetried)
+
+        val thirdClaim = embeddingJobStore.claimDue(1, "worker-c", Instant.now().minusSeconds(1)).single()
+        val recovered = embeddingJobStore.recoverExpiredLeases()
+        assertThat(recovered).extracting({ it.id }, { it.status }, { it.lastError?.code })
+            .containsExactly(tuple(jobId, EmbeddingJobStatus.PENDING, EmbeddingJobErrorCode.LEASE_EXPIRED))
+        assertThat(thirdClaim).extracting({ it.attemptCount }, { it.leaseGeneration })
+            .containsExactly(1, 4L)
+        assertThat(embeddingJobStore.findById(jobId)).isEqualTo(recovered.single())
+
+        val finalClaim = embeddingJobStore.claimDue(1, "worker-d", Instant.now().plusSeconds(600)).single()
+        assertThat(
+            embeddingJobStore.markSucceeded(finalClaim.id, "worker-d", finalClaim.leaseGeneration),
+        ).extracting { it?.status }.isEqualTo(EmbeddingJobStatus.SUCCEEDED)
+        assertThat(embeddingJobStore.retryFailed(jobId)?.status).isEqualTo(EmbeddingJobStatus.SUCCEEDED)
+    }
+
+    @Test
+    fun `embedding job page returns stable pages by creation order`() {
+        val current = Instant.now()
+        val firstFixture = saveFixture("embedding-job-page-first")
+        val secondFixture = saveFixture("embedding-job-page-second")
+        val embeddingSet = embeddingSetStore.resolveOrCreate(
+            embeddingSet(
+                scope = "embedding-job-page",
+                projectId = firstFixture.project.id,
+                model = "embedding-job-page-model",
+                version = "v1",
+            ),
+        )
+        val firstJobId = EmbeddingJobId(stableUuid("embedding-job-page-first"))
+        val secondJobId = EmbeddingJobId(stableUuid("embedding-job-page-second"))
+        embeddingJobStore.enqueueMissing(
+            EnqueueEmbeddingJobCommand(firstJobId, firstFixture.chunk.id, embeddingSet.id, current.minusSeconds(1)),
+        )
+        embeddingJobStore.enqueueMissing(
+            EnqueueEmbeddingJobCommand(secondJobId, secondFixture.chunk.id, embeddingSet.id, current),
+        )
+
+        val query = FindEmbeddingJobsQuery(statuses = setOf(EmbeddingJobStatus.PENDING), limit = 1)
+        val firstPage = embeddingJobStore.findPage(query)
+        val secondPage = embeddingJobStore.findPage(query.copy(cursor = requireNotNull(firstPage.nextCursor)))
+
+        assertThat(firstPage.items.map { it.id }).containsExactly(secondJobId)
+        assertThat(firstPage.nextCursor).isNotBlank()
+        assertThat(secondPage.items.map { it.id }).containsExactly(firstJobId)
+        assertThat(secondPage.nextCursor).isNull()
+
+        val chunkPage = embeddingJobStore.findPage(query.copy(chunkId = firstFixture.chunk.id))
+        assertThat(chunkPage.items.map { it.id }).containsExactly(firstJobId)
+        assertThat(chunkPage.nextCursor).isNull()
     }
 
     @Test
@@ -824,6 +1025,19 @@ class PostgresStorageIntegrationTest {
                     """.trimIndent(),
                 )
             ).toSet()
+
+    private fun constraintDefinition(constraintName: String): String =
+        jdbc.queryForObject(
+            """
+            SELECT pg_get_constraintdef(constraint_row.oid)
+            FROM pg_constraint AS constraint_row
+            JOIN pg_namespace AS namespace ON namespace.oid = constraint_row.connamespace
+            WHERE namespace.nspname = 'public'
+              AND constraint_row.conname = ?
+            """.trimIndent(),
+            String::class.java,
+            constraintName,
+        )!!
 
     private fun strings(sql: String): List<String> =
         jdbc.query(sql) { rs, _ -> rs.getString(1) }
