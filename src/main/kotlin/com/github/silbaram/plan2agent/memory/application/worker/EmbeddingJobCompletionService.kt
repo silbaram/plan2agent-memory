@@ -11,7 +11,7 @@ import org.springframework.stereotype.Service
 import org.springframework.transaction.PlatformTransactionManager
 import org.springframework.transaction.support.TransactionTemplate
 import java.nio.charset.StandardCharsets
-import java.time.Instant
+import java.time.Clock
 import java.util.UUID
 
 /**
@@ -24,6 +24,7 @@ class EmbeddingJobCompletionService(
     private val chunkEmbeddingStore: ChunkEmbeddingStorePort,
     private val embeddingJobStore: EmbeddingJobStorePort,
     transactionManager: PlatformTransactionManager,
+    private val clock: Clock,
 ) {
     private val transactions = TransactionTemplate(transactionManager)
 
@@ -41,7 +42,7 @@ class EmbeddingJobCompletionService(
                         embeddingSetId = job.embeddingSetId,
                         chunkId = chunk.id,
                         embedding = embedding,
-                        createdAt = Instant.now(),
+                        createdAt = clock.instant(),
                         metadata = chunk.metadata,
                     ),
                 ),

@@ -22,19 +22,11 @@ class FakeEmbeddingPort(
     providerState: EmbeddingProviderState = EmbeddingProviderState.READY,
 ) : EmbeddingPort {
     override var providerState: EmbeddingProviderState = providerState
-        set(value) {
-            require(value in supportedStates) { "FakeEmbeddingPort supports only NOT_CONFIGURED and READY" }
-            field = value
-        }
 
     private val invocations = mutableListOf<FakeEmbeddingRequest>()
     private val configuredEmbeddings = mutableMapOf<FakeEmbeddingRequest, List<Float>>()
     private val configuredFailures = mutableMapOf<FakeEmbeddingMode, FakeEmbeddingFailure>()
     private val beforeEmbedActions = mutableMapOf<FakeEmbeddingMode, () -> Unit>()
-
-    init {
-        require(providerState in supportedStates) { "FakeEmbeddingPort supports only NOT_CONFIGURED and READY" }
-    }
 
     /** Recorded raw port inputs, including the explicit mode used for each invocation. */
     val requests: List<FakeEmbeddingRequest>
@@ -80,8 +72,12 @@ class FakeEmbeddingPort(
         invocations += request
         beforeEmbedActions.remove(mode)?.invoke()
 
-        if (providerState == EmbeddingProviderState.NOT_CONFIGURED) {
-            throw ProviderNotConfiguredException()
+        when (providerState) {
+            EmbeddingProviderState.NOT_CONFIGURED -> throw ProviderNotConfiguredException()
+            EmbeddingProviderState.INITIALIZING,
+            EmbeddingProviderState.UNAVAILABLE,
+            -> throw ProviderUnavailableException()
+            EmbeddingProviderState.READY -> Unit
         }
 
         configuredFailures[mode]?.throwException()
@@ -132,9 +128,6 @@ class FakeEmbeddingPort(
         FakeEmbeddingFailure.CONTRACT_VIOLATION -> throw ProviderContractViolationException()
     }
 
-    private companion object {
-        val supportedStates = setOf(EmbeddingProviderState.NOT_CONFIGURED, EmbeddingProviderState.READY)
-    }
 }
 
 enum class FakeEmbeddingMode {

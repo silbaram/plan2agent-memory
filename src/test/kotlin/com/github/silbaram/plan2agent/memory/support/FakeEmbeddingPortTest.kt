@@ -57,11 +57,18 @@ class FakeEmbeddingPortTest {
     }
 
     @Test
-    fun `supports ready and not configured states plus mode-specific provider failures`() {
+    fun `supports provider lifecycle states plus mode-specific provider failures`() {
         val notConfigured = FakeEmbeddingPort(providerState = EmbeddingProviderState.NOT_CONFIGURED)
 
         assertThat(notConfigured.providerState).isEqualTo(EmbeddingProviderState.NOT_CONFIGURED)
         assertThrows<ProviderNotConfiguredException> { notConfigured.embedQuery("결제 취소 정책") }
+
+        listOf(EmbeddingProviderState.INITIALIZING, EmbeddingProviderState.UNAVAILABLE).forEach { state ->
+            val unavailableProvider = FakeEmbeddingPort(providerState = state)
+
+            assertThat(unavailableProvider.providerState).isEqualTo(state)
+            assertThrows<ProviderUnavailableException> { unavailableProvider.embedQuery("결제 취소 정책") }
+        }
 
         val fake = FakeEmbeddingPort()
             .fail(FakeEmbeddingMode.QUERY, FakeEmbeddingFailure.RETRYABLE_UNAVAILABLE)
