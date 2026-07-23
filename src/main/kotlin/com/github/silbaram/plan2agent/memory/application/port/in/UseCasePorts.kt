@@ -15,6 +15,7 @@ import com.github.silbaram.plan2agent.memory.application.usecase.SaveDocumentSna
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveRunRecordCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveTaskGraphCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveTasksCommand
+import com.github.silbaram.plan2agent.memory.application.usecase.SemanticSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.VectorSearchQuery
 import com.github.silbaram.plan2agent.memory.domain.ArtifactSummary
 import com.github.silbaram.plan2agent.memory.domain.ArtifactNode
@@ -64,6 +65,10 @@ interface FindArtifactsUseCase {
 
 interface KeywordSearchUseCase {
     fun keywordSearch(query: KeywordSearchQuery): PagedResult<KeywordSearchMatch>
+}
+
+interface SemanticSearchUseCase {
+    fun semanticSearch(query: SemanticSearchQuery): PagedResult<VectorSearchMatch>
 }
 
 interface VectorSearchUseCase {

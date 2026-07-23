@@ -9,6 +9,7 @@ import com.github.silbaram.plan2agent.memory.application.usecase.GraphTraceDirec
 import com.github.silbaram.plan2agent.memory.application.usecase.GraphTraceQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.KeywordSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.PagedResult
+import com.github.silbaram.plan2agent.memory.application.usecase.SemanticSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.VectorSearchQuery
 import com.github.silbaram.plan2agent.memory.domain.ArtifactSummary
 import com.github.silbaram.plan2agent.memory.domain.ArtifactType
@@ -57,6 +58,20 @@ data class ArtifactLookupRequest(
 )
 
 data class KeywordSearchRequest(
+    val q: String? = null,
+    val projectId: String? = null,
+    val iterationId: String? = null,
+    val artifactType: String? = null,
+    val sourcePath: String? = null,
+    val taskId: String? = null,
+    val runId: String? = null,
+    val metadataFilters: Map<String, String> = emptyMap(),
+    val limit: Int? = null,
+    val cursor: String? = null,
+)
+
+/** Public semantic-search contract deliberately omits client-provided vector metadata. */
+data class SemanticSearchRequest(
     val q: String? = null,
     val projectId: String? = null,
     val iterationId: String? = null,
@@ -245,6 +260,20 @@ fun ArtifactLookupRequest.toQuery(): FindArtifactsQuery =
 
 fun KeywordSearchRequest.toQuery(): KeywordSearchQuery =
     KeywordSearchQuery(
+        query = requireText(q, "q"),
+        projectId = projectId.toOptionalId(::ProjectId),
+        iterationId = iterationId.toOptionalId(::IterationId),
+        artifactType = parseOptionalEnum<ArtifactType>(artifactType, "artifactType"),
+        sourcePath = sourcePath?.trim()?.takeIf(String::isNotEmpty),
+        taskId = taskId.toOptionalId(::TaskId),
+        runId = runId.toOptionalId(::RunId),
+        metadataFilters = metadataFilters.validateMetadataFilters("metadataFilters"),
+        limit = limit ?: DEFAULT_SEARCH_LIMIT,
+        cursor = cursor.normalizedCursor(),
+    )
+
+fun SemanticSearchRequest.toQuery(): SemanticSearchQuery =
+    SemanticSearchQuery(
         query = requireText(q, "q"),
         projectId = projectId.toOptionalId(::ProjectId),
         iterationId = iterationId.toOptionalId(::IterationId),

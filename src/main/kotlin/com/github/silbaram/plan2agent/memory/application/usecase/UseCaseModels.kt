@@ -180,6 +180,38 @@ data class KeywordSearchQuery(
     }
 }
 
+/**
+ * Server-managed semantic search request. The caller supplies text and retrieval filters only;
+ * the embedding target and query vector remain owned by the server.
+ */
+data class SemanticSearchQuery(
+    val query: String,
+    val projectId: ProjectId? = null,
+    val iterationId: IterationId? = null,
+    val artifactType: ArtifactType? = null,
+    val sourcePath: String? = null,
+    val taskId: TaskId? = null,
+    val runId: RunId? = null,
+    val metadataFilters: Map<String, String> = emptyMap(),
+    val limit: Int = 20,
+    val cursor: String? = null,
+) {
+    init {
+        require(query.isNotBlank()) { "SemanticSearchQuery query must not be blank" }
+        require(sourcePath == null || sourcePath.isNotBlank()) {
+            "SemanticSearchQuery sourcePath must not be blank when supplied"
+        }
+        require(metadataFilters.keys.all { it.isNotBlank() }) {
+            "SemanticSearchQuery metadata filter keys must not be blank"
+        }
+        require(metadataFilters.values.all { it.isNotBlank() }) {
+            "SemanticSearchQuery metadata filter values must not be blank"
+        }
+        require(limit > 0) { "SemanticSearchQuery limit must be positive" }
+        require(cursor == null || cursor.isNotBlank()) { "SemanticSearchQuery cursor must not be blank" }
+    }
+}
+
 data class VectorSearchQuery(
     val embedding: Embedding,
     val embeddingModel: String,
