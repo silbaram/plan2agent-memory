@@ -1,8 +1,11 @@
 package com.github.silbaram.plan2agent.memory.application.usecase
 
+import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingTarget
+import com.github.silbaram.plan2agent.memory.application.port.out.ActiveVectorSearchQuery
 import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactGraphStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactQueryPort
 import com.github.silbaram.plan2agent.memory.application.port.out.KeywordSearchPort
+import com.github.silbaram.plan2agent.memory.application.port.out.ProviderUnavailableException
 import com.github.silbaram.plan2agent.memory.application.port.out.VectorSearchPort
 import com.github.silbaram.plan2agent.memory.domain.ArtifactEdge
 import com.github.silbaram.plan2agent.memory.domain.ArtifactNode
@@ -18,6 +21,7 @@ import com.github.silbaram.plan2agent.memory.domain.DistanceMetric
 import com.github.silbaram.plan2agent.memory.domain.DocumentChunkId
 import com.github.silbaram.plan2agent.memory.domain.DocumentId
 import com.github.silbaram.plan2agent.memory.domain.Embedding
+import com.github.silbaram.plan2agent.memory.domain.EmbeddingSetId
 import com.github.silbaram.plan2agent.memory.domain.IterationId
 import com.github.silbaram.plan2agent.memory.domain.KeywordSearchMatch
 import com.github.silbaram.plan2agent.memory.domain.ProjectId
@@ -30,7 +34,12 @@ import com.github.silbaram.plan2agent.memory.domain.SourceRunId
 import com.github.silbaram.plan2agent.memory.domain.SourceTaskGraphId
 import com.github.silbaram.plan2agent.memory.domain.SourceTaskId
 import com.github.silbaram.plan2agent.memory.domain.TaskId
+import com.github.silbaram.plan2agent.memory.domain.V2EmbeddingProfile
 import com.github.silbaram.plan2agent.memory.domain.VectorSearchMatch
+import com.github.silbaram.plan2agent.memory.support.FakeEmbeddingFailure
+import com.github.silbaram.plan2agent.memory.support.FakeEmbeddingMode
+import com.github.silbaram.plan2agent.memory.support.FakeEmbeddingPort
+import com.github.silbaram.plan2agent.memory.support.FakeEmbeddingRequest
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
@@ -39,8 +48,15 @@ class ReadUseCaseServiceTest {
     private val artifactQuery = FakeArtifactQueryPort()
     private val keywordSearch = FakeKeywordSearchPort()
     private val vectorSearch = FakeVectorSearchPort()
+    private val embeddingPort = FakeEmbeddingPort(
+        activeEmbeddingTarget = ActiveEmbeddingTarget(
+            profile = V2EmbeddingProfile.fixed,
+            embeddingSetId = EmbeddingSetId("active-v2-set"),
+        ),
+    )
+    private val semanticSearch = SemanticSearchUseCaseService(embeddingPort, vectorSearch)
     private val artifactGraph = FakeReadArtifactGraphStore()
-    private val service = ReadUseCaseService(artifactQuery, keywordSearch, vectorSearch, artifactGraph)
+    private val service = ReadUseCaseService(artifactQuery, keywordSearch, vectorSearch, semanticSearch, artifactGraph)
 
 
     @Test
@@ -243,7 +259,7 @@ class ReadUseCaseServiceTest {
     }
 
     @Test
-    fun `hybrid search fuses keyword and vector candidates with reciprocal rank`() {
+    fun `hybrid search uses the server managed semantic arm with every filter and default fusion`() {
         val sharedChunk = DocumentChunkId(uuid(9))
         val keywordOnlyChunk = DocumentChunkId(uuid(10))
         keywordSearch.result = PagedResult(
@@ -276,7 +292,7 @@ class ReadUseCaseServiceTest {
                 ),
             ),
         )
-        vectorSearch.result = PagedResult(
+        vectorSearch.activeResult = PagedResult(
             items = listOf(
                 VectorSearchMatch(
                     chunkId = sharedChunk,
@@ -297,24 +313,47 @@ class ReadUseCaseServiceTest {
         )
         val query = HybridSearchQuery(
             query = "decision",
-            embedding = Embedding(listOf(0.1f, 0.2f)),
-            embeddingModel = "text-embedding-test",
-            embeddingDimension = 2,
-            embeddingVersion = "v1",
-            distanceMetric = DistanceMetric.COSINE,
             projectId = ReadTestIds.projectId,
             iterationId = ReadTestIds.iterationId,
-            rrfK = 60,
-            candidateLimit = 10,
-            limit = 10,
+            artifactType = ArtifactType.DOCUMENT_CHUNK,
+            sourcePath = "runs/shared.md",
+            taskId = ReadTestIds.taskId,
+            runId = ReadTestIds.runId,
+            metadataFilters = mapOf("phase" to "gate-d"),
         )
 
         val result = service.hybridSearch(query)
 
-        assertThat(keywordSearch.received?.limit).isEqualTo(10)
+        assertThat(embeddingPort.requests).containsExactly(FakeEmbeddingRequest(FakeEmbeddingMode.QUERY, "decision"))
+        assertThat(keywordSearch.received).isEqualTo(
+            KeywordSearchQuery(
+                query = "decision",
+                projectId = ReadTestIds.projectId,
+                iterationId = ReadTestIds.iterationId,
+                artifactType = ArtifactType.DOCUMENT_CHUNK,
+                sourcePath = "runs/shared.md",
+                taskId = ReadTestIds.taskId,
+                runId = ReadTestIds.runId,
+                metadataFilters = mapOf("phase" to "gate-d"),
+                limit = DEFAULT_HYBRID_CANDIDATE_LIMIT,
+            ),
+        )
         assertThat(keywordSearch.received?.cursor).isNull()
-        assertThat(vectorSearch.received?.limit).isEqualTo(10)
-        assertThat(vectorSearch.received?.cursor).isNull()
+        assertThat(vectorSearch.activeQuery).isEqualTo(
+            ActiveVectorSearchQuery(
+                embeddingSetId = EmbeddingSetId("active-v2-set"),
+                embedding = requireNotNull(vectorSearch.activeQuery).embedding,
+                projectId = ReadTestIds.projectId,
+                iterationId = ReadTestIds.iterationId,
+                artifactType = ArtifactType.DOCUMENT_CHUNK,
+                sourcePath = "runs/shared.md",
+                taskId = ReadTestIds.taskId,
+                runId = ReadTestIds.runId,
+                metadataFilters = mapOf("phase" to "gate-d"),
+                limit = DEFAULT_HYBRID_CANDIDATE_LIMIT,
+            ),
+        )
+        assertThat(vectorSearch.activeQuery?.cursor).isNull()
         assertThat(result.items.map { it.chunkId }).containsExactly(sharedChunk, keywordOnlyChunk)
         assertThat(result.items.first().keyword?.rank).isEqualTo(1)
         assertThat(result.items.first().vector?.rank).isEqualTo(1)
@@ -322,13 +361,52 @@ class ReadUseCaseServiceTest {
         assertThat(result.items.first().metadata).containsEntry("sourceRunId", "source-run")
         assertThat(result.items.first().metadata).containsEntry("sourceTaskId", "source-task")
         assertThat(result.items.first().sourceReference?.uri).isEqualTo("file:///repo/runs/shared.md")
+        assertThat(result.items.first().score).isEqualTo(2.0 / (DEFAULT_RRF_K + 1).toDouble())
     }
 
     @Test
-    fun `hybrid search paginates fused candidates with opaque cursor`() {
+    fun `hybrid search returns keyword only matches when semantic search has no candidates`() {
         val firstChunk = DocumentChunkId(uuid(12))
-        val secondChunk = DocumentChunkId(uuid(13))
-        val thirdChunk = DocumentChunkId(uuid(14))
+        keywordSearch.result = PagedResult(
+            items = listOf(
+                keywordMatch(firstChunk, score = 3.0),
+            ),
+        )
+        vectorSearch.activeResult = PagedResult(emptyList())
+
+        val result = service.hybridSearch(HybridSearchQuery(query = "decision", candidateLimit = 3, limit = 2))
+
+        assertThat(result.items.single().chunkId).isEqualTo(firstChunk)
+        assertThat(result.items.single().matchReason).isEqualTo("hybrid.keyword")
+        assertThat(result.items.single().vector).isNull()
+    }
+
+    @Test
+    fun `hybrid search returns semantic only matches and propagates provider failures`() {
+        val semanticChunk = DocumentChunkId(uuid(13))
+        keywordSearch.result = PagedResult(emptyList())
+        vectorSearch.activeResult = PagedResult(items = listOf(vectorMatch(semanticChunk, score = 0.1)))
+
+        val semanticOnly = service.hybridSearch(HybridSearchQuery(query = "decision", candidateLimit = 3, limit = 2))
+
+        assertThat(semanticOnly.items.single().chunkId).isEqualTo(semanticChunk)
+        assertThat(semanticOnly.items.single().matchReason).isEqualTo("hybrid.vector")
+        assertThat(semanticOnly.items.single().keyword).isNull()
+
+        embeddingPort.fail(FakeEmbeddingMode.QUERY, FakeEmbeddingFailure.RETRYABLE_UNAVAILABLE)
+        keywordSearch.received = null
+
+        assertThatThrownBy { service.hybridSearch(HybridSearchQuery(query = "provider failure")) }
+            .isInstanceOf(ProviderUnavailableException::class.java)
+            .hasMessageContaining("Embedding provider is unavailable")
+        assertThat(keywordSearch.received).isNull()
+    }
+
+    @Test
+    fun `hybrid search paginates fused candidates with an opaque cursor`() {
+        val firstChunk = DocumentChunkId(uuid(14))
+        val secondChunk = DocumentChunkId(uuid(15))
+        val thirdChunk = DocumentChunkId(uuid(16))
         keywordSearch.result = PagedResult(
             items = listOf(
                 keywordMatch(firstChunk, score = 3.0),
@@ -336,19 +414,8 @@ class ReadUseCaseServiceTest {
                 keywordMatch(thirdChunk, score = 1.0),
             ),
         )
-        vectorSearch.result = PagedResult(emptyList())
-        val query = HybridSearchQuery(
-            query = "decision",
-            embedding = Embedding(listOf(0.1f, 0.2f)),
-            embeddingModel = "text-embedding-test",
-            embeddingDimension = 2,
-            embeddingVersion = "v1",
-            distanceMetric = DistanceMetric.COSINE,
-            projectId = ReadTestIds.projectId,
-            iterationId = ReadTestIds.iterationId,
-            candidateLimit = 3,
-            limit = 2,
-        )
+        vectorSearch.activeResult = PagedResult(emptyList())
+        val query = HybridSearchQuery(query = "decision", candidateLimit = 3, limit = 2)
 
         val firstPage = service.hybridSearch(query)
         val secondPage = service.hybridSearch(query.copy(cursor = requireNotNull(firstPage.nextCursor)))
@@ -357,23 +424,17 @@ class ReadUseCaseServiceTest {
         assertThat(firstPage.nextCursor).isNotBlank()
         assertThat(secondPage.items.map { it.chunkId }).containsExactly(thirdChunk)
         assertThat(secondPage.nextCursor).isNull()
+        assertThat(vectorSearch.activeQuery?.limit).isEqualTo(3)
+        assertThat(vectorSearch.activeQuery?.cursor).isNull()
     }
 
     @Test
     fun `hybrid search rejects malformed cursor`() {
-        val query = HybridSearchQuery(
-            query = "decision",
-            embedding = Embedding(listOf(0.1f, 0.2f)),
-            embeddingModel = "text-embedding-test",
-            embeddingDimension = 2,
-            embeddingVersion = "v1",
-            distanceMetric = DistanceMetric.COSINE,
-            candidateLimit = 3,
-            limit = 2,
-            cursor = "not-a-cursor",
-        )
-
-        assertThatThrownBy { service.hybridSearch(query) }
+        assertThatThrownBy {
+            service.hybridSearch(
+                HybridSearchQuery(query = "decision", candidateLimit = 3, limit = 2, cursor = "not-a-cursor"),
+            )
+        }
             .isInstanceOf(IllegalArgumentException::class.java)
             .hasMessageContaining("cursor has invalid format")
     }
@@ -394,6 +455,25 @@ private fun keywordMatch(
         content = "keyword content ${chunkId.value}",
         score = score,
         matchReason = "chunk.content",
+    )
+
+private fun vectorMatch(
+    chunkId: DocumentChunkId,
+    score: Double,
+): VectorSearchMatch =
+    VectorSearchMatch(
+        chunkId = chunkId,
+        documentId = ReadTestIds.documentId,
+        projectId = ReadTestIds.projectId,
+        iterationId = ReadTestIds.iterationId,
+        artifactType = ArtifactType.DOCUMENT_CHUNK,
+        sourcePath = "runs/${chunkId.value}.md",
+        chunkIndex = 0,
+        content = "semantic content ${chunkId.value}",
+        score = score,
+        distanceMetric = DistanceMetric.COSINE,
+        embeddingModel = V2EmbeddingProfile.MODEL,
+        embeddingVersion = V2EmbeddingProfile.REVISION,
     )
 
 private class FakeReadArtifactGraphStore : ArtifactGraphStorePort {
@@ -480,6 +560,8 @@ private class FakeKeywordSearchPort : KeywordSearchPort {
 private class FakeVectorSearchPort : VectorSearchPort {
     var received: VectorSearchQuery? = null
     var result: PagedResult<VectorSearchMatch>? = null
+    var activeQuery: ActiveVectorSearchQuery? = null
+    var activeResult: PagedResult<VectorSearchMatch>? = null
 
     override fun search(query: VectorSearchQuery): PagedResult<VectorSearchMatch> {
         received = query
@@ -502,6 +584,11 @@ private class FakeVectorSearchPort : VectorSearchPort {
                 ),
             ),
         )
+    }
+
+    override fun search(query: ActiveVectorSearchQuery): PagedResult<VectorSearchMatch> {
+        activeQuery = query
+        return activeResult ?: PagedResult(emptyList())
     }
 }
 

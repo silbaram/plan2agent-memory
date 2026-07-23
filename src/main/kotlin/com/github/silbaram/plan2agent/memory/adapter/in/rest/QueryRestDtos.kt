@@ -103,11 +103,6 @@ data class VectorSearchRequest(
 
 data class HybridSearchRequest(
     val q: String? = null,
-    val embedding: List<Float>? = null,
-    val embeddingModel: String? = null,
-    val embeddingDimension: Int? = null,
-    val embeddingVersion: String? = null,
-    val distanceMetric: String? = null,
     val projectId: String? = null,
     val iterationId: String? = null,
     val artifactType: String? = null,
@@ -312,21 +307,10 @@ fun VectorSearchRequest.toQuery(): VectorSearchQuery {
 }
 
 fun HybridSearchRequest.toQuery(): HybridSearchQuery {
-    val embeddingValues = requireNotNull(embedding) { "embedding is required" }
-    require(embeddingValues.isNotEmpty()) { "embedding must not be empty" }
-    require(embeddingValues.all { it.isFinite() }) { "embedding values must be finite" }
-    val dimension = requireNotNull(embeddingDimension) { "embeddingDimension is required" }
-    require(dimension > 0) { "embeddingDimension must be positive" }
-    require(embeddingValues.size == dimension) { "embeddingDimension must match embedding size" }
     val resolvedLimit = limit ?: DEFAULT_SEARCH_LIMIT
     val resolvedCandidateLimit = candidateLimit ?: maxOf(DEFAULT_HYBRID_CANDIDATE_LIMIT, resolvedLimit * 4)
     return HybridSearchQuery(
         query = requireText(q, "q"),
-        embedding = Embedding(embeddingValues),
-        embeddingModel = requireText(embeddingModel, "embeddingModel"),
-        embeddingDimension = dimension,
-        embeddingVersion = requireText(embeddingVersion, "embeddingVersion"),
-        distanceMetric = parseOptionalEnum<DistanceMetric>(distanceMetric, "distanceMetric") ?: DistanceMetric.COSINE,
         projectId = projectId.toOptionalId(::ProjectId),
         iterationId = iterationId.toOptionalId(::IterationId),
         artifactType = parseOptionalEnum<ArtifactType>(artifactType, "artifactType"),

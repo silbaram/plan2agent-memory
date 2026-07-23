@@ -5,14 +5,12 @@ package com.github.silbaram.plan2agent.memory.adapter.out.postgres
 import com.github.silbaram.plan2agent.memory.application.port.out.KeywordSearchPort
 import com.github.silbaram.plan2agent.memory.application.port.out.VectorSearchPort
 import com.github.silbaram.plan2agent.memory.application.usecase.DocumentChunkWrite
-import com.github.silbaram.plan2agent.memory.application.usecase.HybridSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.KeywordSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.RegisterIterationCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.RegisterProjectCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveDocumentChunksCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveDocumentSnapshotCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.VectorSearchQuery
-import com.github.silbaram.plan2agent.memory.application.usecase.ReadUseCaseService
 import com.github.silbaram.plan2agent.memory.application.usecase.WriteUseCaseService
 import com.github.silbaram.plan2agent.memory.domain.ArtifactType
 import com.github.silbaram.plan2agent.memory.domain.CanonicalServerId
@@ -58,9 +56,6 @@ class RetrievalEvalIntegrationTest {
     private lateinit var writeUseCase: WriteUseCaseService
 
     @Autowired
-    private lateinit var readUseCase: ReadUseCaseService
-
-    @Autowired
     private lateinit var keywordSearch: KeywordSearchPort
 
     @Autowired
@@ -86,7 +81,7 @@ class RetrievalEvalIntegrationTest {
     }
 
     @Test
-    fun `fixed retrieval eval corpus protects keyword vector and hybrid recall`() {
+    fun `fixed retrieval eval corpus protects keyword and vector recall`() {
         val corpus = saveEvalCorpus()
         val cases = listOf(
             RetrievalEvalCase(
@@ -135,27 +130,6 @@ class RetrievalEvalIntegrationTest {
                 k = 3,
             )
         }
-        val hybridResults = cases.map { evalCase ->
-            RetrievalEvalHarness.evaluate(
-                evalCase = evalCase,
-                returnedChunkIds = readUseCase.hybridSearch(
-                    HybridSearchQuery(
-                        query = evalCase.keywordQuery,
-                        embedding = evalCase.embedding,
-                        embeddingModel = corpus.embeddingSet.embeddingModel,
-                        embeddingDimension = corpus.embeddingSet.embeddingDimension,
-                        embeddingVersion = corpus.embeddingSet.embeddingVersion,
-                        distanceMetric = DistanceMetric.COSINE,
-                        projectId = corpus.projectId,
-                        iterationId = corpus.iterationId,
-                        candidateLimit = 4,
-                        limit = 3,
-                    ),
-                ).items.mapNotNull { it.chunkId?.value },
-                k = 3,
-            )
-        }
-
         assertThat(keywordResults).allSatisfy {
             assertThat(it.recallAtK).describedAs("${it.caseName} keyword recall@3").isEqualTo(1.0)
             assertThat(it.ndcgAtK).describedAs("${it.caseName} keyword nDCG@3").isGreaterThanOrEqualTo(0.5)
@@ -163,10 +137,6 @@ class RetrievalEvalIntegrationTest {
         assertThat(vectorResults).allSatisfy {
             assertThat(it.recallAtK).describedAs("${it.caseName} vector recall@3").isEqualTo(1.0)
             assertThat(it.ndcgAtK).describedAs("${it.caseName} vector nDCG@3").isGreaterThanOrEqualTo(0.5)
-        }
-        assertThat(hybridResults).allSatisfy {
-            assertThat(it.recallAtK).describedAs("${it.caseName} hybrid recall@3").isEqualTo(1.0)
-            assertThat(it.ndcgAtK).describedAs("${it.caseName} hybrid nDCG@3").isGreaterThanOrEqualTo(0.5)
         }
     }
 
