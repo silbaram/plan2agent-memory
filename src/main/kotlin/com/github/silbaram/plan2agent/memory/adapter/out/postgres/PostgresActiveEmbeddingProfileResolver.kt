@@ -4,6 +4,7 @@ import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddin
 import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingProfileResolver
 import com.github.silbaram.plan2agent.memory.application.port.out.PersistedActiveEmbeddingSetResolutionException
 import com.github.silbaram.plan2agent.memory.application.port.out.PersistedActiveEmbeddingSetResolver
+import com.github.silbaram.plan2agent.memory.application.port.out.StructurallyValidPersistedActiveEmbeddingSetResolver
 import com.github.silbaram.plan2agent.memory.domain.DistanceMetric
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingSetId
 import com.github.silbaram.plan2agent.memory.domain.V2EmbeddingProfile
@@ -28,7 +29,8 @@ class PostgresActiveEmbeddingProfileResolver(
     private val metrics: PostgresAdapterMetrics,
     transactionManager: PlatformTransactionManager,
 ) : ActiveEmbeddingProfileResolver,
-    PersistedActiveEmbeddingSetResolver {
+    PersistedActiveEmbeddingSetResolver,
+    StructurallyValidPersistedActiveEmbeddingSetResolver {
     private val transactions = TransactionTemplate(transactionManager)
 
     override fun resolveActiveV2EmbeddingSetId(): EmbeddingSetId =
@@ -77,6 +79,29 @@ class PostgresActiveEmbeddingProfileResolver(
                     throw failure
                 }
                 throw PersistedActiveEmbeddingSetResolutionException(failure)
+            }
+        }
+
+    override fun findStructurallyValidActiveV2EmbeddingSetId(): EmbeddingSetId? =
+        metrics.recordSearch("embedding_profile.find_structurally_valid_active_v2") {
+            try {
+                transactions.execute<EmbeddingSetId?> {
+                    val pointers = lockedActivePointers()
+                    if (pointers.size != 1 || pointers.single().scope != ACTIVE_SCOPE) {
+                        null
+                    } else {
+                        try {
+                            resolveExistingPointer(pointers.single())
+                        } catch (_: ActiveEmbeddingProfileResolutionException) {
+                            null
+                        }
+                    }
+                }
+            } catch (failure: Throwable) {
+                if (failure is VirtualMachineError) {
+                    throw failure
+                }
+                null
             }
         }
 

@@ -7,6 +7,8 @@ import java.time.Duration
 data class EmbeddingWorkerProperties(
     val enabled: Boolean = true,
     val pollDelay: Duration = Duration.ofSeconds(1),
+    val backfillPollDelay: Duration = Duration.ofMinutes(1),
+    val backfillBatchSize: Int = 500,
     val claimBatchSize: Int = 16,
     val concurrency: Int = 1,
     val leaseDuration: Duration = Duration.ofMinutes(2),
@@ -16,6 +18,10 @@ data class EmbeddingWorkerProperties(
 ) {
     init {
         require(!pollDelay.isNegative && !pollDelay.isZero) { "Embedding worker pollDelay must be positive" }
+        require(!backfillPollDelay.isNegative && !backfillPollDelay.isZero) {
+            "Embedding worker backfillPollDelay must be positive"
+        }
+        require(backfillBatchSize > 0) { "Embedding worker backfillBatchSize must be positive" }
         require(claimBatchSize > 0) { "Embedding worker claimBatchSize must be positive" }
         require(concurrency > 0) { "Embedding worker concurrency must be positive" }
         require(!leaseDuration.isNegative && !leaseDuration.isZero) { "Embedding worker leaseDuration must be positive" }
