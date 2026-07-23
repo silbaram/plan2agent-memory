@@ -1,5 +1,7 @@
 package com.github.silbaram.plan2agent.memory.adapter.`in`.rest
 
+import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingProviderException
+import com.github.silbaram.plan2agent.memory.application.port.out.ProviderNotConfiguredException
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
 import org.springframework.http.converter.HttpMessageNotReadableException
@@ -22,6 +24,14 @@ class RestNotFoundException(message: String) : RuntimeException(message)
 
 @RestControllerAdvice
 class RestExceptionHandler {
+    @ExceptionHandler(ProviderNotConfiguredException::class)
+    fun embeddingProviderNotConfigured(exception: ProviderNotConfiguredException): ResponseEntity<RestErrorResponse> =
+        error(HttpStatus.SERVICE_UNAVAILABLE, "embedding_provider_not_configured", exception)
+
+    @ExceptionHandler(EmbeddingProviderException::class)
+    fun embeddingProviderUnavailable(exception: EmbeddingProviderException): ResponseEntity<RestErrorResponse> =
+        error(HttpStatus.SERVICE_UNAVAILABLE, "embedding_provider_unavailable", exception)
+
     @ExceptionHandler(
         IllegalArgumentException::class,
         HttpMessageNotReadableException::class,

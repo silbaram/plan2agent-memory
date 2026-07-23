@@ -1,17 +1,23 @@
 package com.github.silbaram.plan2agent.memory.adapter.`in`.rest
 
+import com.fasterxml.jackson.databind.exc.UnrecognizedPropertyException
+import com.github.silbaram.plan2agent.memory.config.JacksonObjectMapperConfig
 import com.github.silbaram.plan2agent.memory.application.port.`in`.FindArtifactsUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.FindArtifactGraphNodesUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.HybridSearchUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.KeywordSearchUseCase
+import com.github.silbaram.plan2agent.memory.application.port.`in`.SemanticSearchUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.TraceArtifactGraphUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.VectorSearchUseCase
+import com.github.silbaram.plan2agent.memory.application.port.out.ProviderNotConfiguredException
+import com.github.silbaram.plan2agent.memory.application.port.out.ProviderUnavailableException
 import com.github.silbaram.plan2agent.memory.application.usecase.FindArtifactsQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.GraphNodeSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.GraphTraceQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.HybridSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.KeywordSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.PagedResult
+import com.github.silbaram.plan2agent.memory.application.usecase.SemanticSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.VectorSearchQuery
 import com.github.silbaram.plan2agent.memory.domain.ArtifactSummary
 import com.github.silbaram.plan2agent.memory.domain.ArtifactNode
@@ -46,6 +52,7 @@ import java.time.Instant
 class QueryRestControllerTest {
     private val findArtifacts = FakeFindArtifactsUseCase()
     private val keywordSearch = FakeKeywordSearchUseCase()
+    private val semanticSearch = FakeSemanticSearchUseCase()
     private val vectorSearch = FakeVectorSearchUseCase()
     private val hybridSearch = FakeHybridSearchUseCase()
     private val findGraphNodes = FakeFindArtifactGraphNodesUseCase()
@@ -53,6 +60,7 @@ class QueryRestControllerTest {
     private val controller = QueryRestController(
         findArtifactsUseCase = findArtifacts,
         keywordSearchUseCase = keywordSearch,
+        semanticSearchUseCase = semanticSearch,
         vectorSearchUseCase = vectorSearch,
         hybridSearchUseCase = hybridSearch,
         findArtifactGraphNodesUseCase = findGraphNodes,
@@ -341,6 +349,98 @@ class QueryRestControllerTest {
     }
 
     @Test
+    fun `semantic search accepts text and filters only then preserves vector citation response`() {
+        semanticSearch.result = PagedResult(
+            items = listOf(
+                VectorSearchMatch(
+                    chunkId = RestTestIds.chunkId,
+                    documentId = RestTestIds.documentId,
+                    projectId = RestTestIds.projectId,
+                    iterationId = RestTestIds.iterationId,
+                    artifactType = ArtifactType.DOCUMENT_CHUNK,
+                    sourcePath = "runs/task.md",
+                    chunkIndex = 1,
+                    content = "semantic content",
+                    score = 0.12,
+                    distanceMetric = DistanceMetric.COSINE,
+                    embeddingModel = "intfloat/multilingual-e5-small",
+                    embeddingVersion = "d1d99a1efae6779390caba937d92c54b5bc70e51",
+                    metadata = mapOf("sourceRunId" to "source-run", "sourceChunkId" to "source-chunk"),
+                    sourceReference = SourceReference(CanonicalServerId(RestTestIds.chunkId.value), "file:///repo/runs/task.md"),
+                ),
+            ),
+            nextCursor = "next-semantic-cursor",
+        )
+
+        val response = controller.semanticSearch(
+            SemanticSearchRequest(
+                q = " decision ",
+                projectId = RestTestIds.projectId.value,
+                iterationId = RestTestIds.iterationId.value,
+                artifactType = "document_chunk",
+                sourcePath = "runs/task.md",
+                taskId = RestTestIds.taskId.value,
+                runId = RestTestIds.runId.value,
+                metadataFilters = mapOf("phase" to "gate-d"),
+                limit = 5,
+                cursor = "semantic-cursor",
+            ),
+        )
+
+        assertThat(semanticSearch.received).isEqualTo(
+            SemanticSearchQuery(
+                query = "decision",
+                projectId = RestTestIds.projectId,
+                iterationId = RestTestIds.iterationId,
+                artifactType = ArtifactType.DOCUMENT_CHUNK,
+                sourcePath = "runs/task.md",
+                taskId = RestTestIds.taskId,
+                runId = RestTestIds.runId,
+                metadataFilters = mapOf("phase" to "gate-d"),
+                limit = 5,
+                cursor = "semantic-cursor",
+            ),
+        )
+        assertThat(response.items.single().embeddingModel).isEqualTo("intfloat/multilingual-e5-small")
+        assertThat(response.items.single().sourceIds.sourceRunId).isEqualTo("source-run")
+        assertThat(response.items.single().citation.lineage.chunkId).isEqualTo(RestTestIds.chunkId.value)
+        assertThat(response.items.single().citation.sourceReference?.uri).isEqualTo("file:///repo/runs/task.md")
+        assertThat(response.nextCursor).isEqualTo("next-semantic-cursor")
+
+        assertThatThrownBy {
+            controller.semanticSearch(SemanticSearchRequest(q = " "))
+        }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessageContaining("q is required")
+        assertThatThrownBy {
+            controller.semanticSearch(SemanticSearchRequest(q = "decision", artifactType = "not_an_artifact"))
+        }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessageContaining("artifactType has invalid value")
+    }
+
+    @Test
+    fun `semantic REST contract exposes stable provider 503 errors and rejects client vectors`() {
+        val errors = RestExceptionHandler()
+        val notConfigured = errors.embeddingProviderNotConfigured(ProviderNotConfiguredException())
+        val unavailable = errors.embeddingProviderUnavailable(ProviderUnavailableException())
+
+        assertThat(notConfigured.statusCode.value()).isEqualTo(503)
+        assertThat(notConfigured.body?.error).isEqualTo("embedding_provider_not_configured")
+        assertThat(unavailable.statusCode.value()).isEqualTo(503)
+        assertThat(unavailable.body?.error).isEqualTo("embedding_provider_unavailable")
+        assertThat(JacksonObjectMapperConfig().objectMapper().writeValueAsString(notConfigured.body))
+            .contains("embedding_provider_not_configured")
+        assertThatThrownBy {
+            JacksonObjectMapperConfig().objectMapper().readValue(
+                """{"q":"결제 취소 정책","embedding":[0.1]}""",
+                SemanticSearchRequest::class.java,
+            )
+        }
+            .isInstanceOf(UnrecognizedPropertyException::class.java)
+    }
+
+    @Test
     fun `hybrid search maps request to use case and returns fused arm scores with citation`() {
         hybridSearch.result = PagedResult(
             items = listOf(
@@ -445,6 +545,16 @@ private class FakeVectorSearchUseCase : VectorSearchUseCase {
     var result: PagedResult<VectorSearchMatch> = PagedResult(emptyList(), nextCursor = "next-vector-cursor")
 
     override fun vectorSearch(query: VectorSearchQuery): PagedResult<VectorSearchMatch> {
+        received = query
+        return result
+    }
+}
+
+private class FakeSemanticSearchUseCase : SemanticSearchUseCase {
+    var received: SemanticSearchQuery? = null
+    var result: PagedResult<VectorSearchMatch> = PagedResult(emptyList(), nextCursor = "next-semantic-cursor")
+
+    override fun semanticSearch(query: SemanticSearchQuery): PagedResult<VectorSearchMatch> {
         received = query
         return result
     }
