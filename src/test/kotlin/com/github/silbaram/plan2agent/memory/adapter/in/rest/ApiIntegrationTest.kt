@@ -366,6 +366,7 @@ class ApiIntegrationTest {
                     "iterationId" to otherIterationId,
                     "sourceIterationId" to "source-iteration-graph-api-other",
                     "label" to "Other graph iteration",
+                    "sourceReference" to sourceReference(otherIterationId, "iterations/graph-api-other"),
                 ),
             ),
         ).andExpect(status().isCreated())
@@ -451,7 +452,7 @@ class ApiIntegrationTest {
                     ),
                 ))
             },
-        ).andExpect(status().isBadRequest())
+        ).andExpect(status().isNotFound())
 
         postJson(
             "/api/graph/snapshots",
@@ -578,7 +579,7 @@ class ApiIntegrationTest {
         val application = Path.of("src/main/resources/application.yml").toFile().readText()
 
         assertThat(compose).contains(
-            "pgvector/pgvector",
+            "pgvector/pgvector:0.8.5-pg17-bookworm@sha256:d2ef61f42ef767baa5a1475393303cc235bcd92febd9d7014eddb48b41f3bad0",
             "POSTGRES_DB: p2a_artifact_store",
             "POSTGRES_USER: p2a",
             "POSTGRES_PASSWORD: p2a_local_password",
@@ -656,7 +657,7 @@ class ApiIntegrationTest {
         private const val LOCAL_TOKEN_HEADER = "X-P2A-Local-Token"
         private const val LOCAL_TOKEN = "local-api-test-token"
 
-        private val pgvectorImage = DockerImageName.parse("pgvector/pgvector:pg16")
+        private val pgvectorImage = DockerImageName.parse("pgvector/pgvector:0.8.5-pg17-bookworm@sha256:d2ef61f42ef767baa5a1475393303cc235bcd92febd9d7014eddb48b41f3bad0")
             .asCompatibleSubstituteFor("postgres")
 
         @JvmStatic
