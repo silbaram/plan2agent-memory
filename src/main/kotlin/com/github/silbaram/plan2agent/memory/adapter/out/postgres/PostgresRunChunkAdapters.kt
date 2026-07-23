@@ -17,6 +17,7 @@ import com.github.silbaram.plan2agent.memory.domain.DocumentId
 import com.github.silbaram.plan2agent.memory.domain.Embedding
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingSet
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingSetId
+import com.github.silbaram.plan2agent.memory.domain.EmbeddingSetScope
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingStorageType
 import com.github.silbaram.plan2agent.memory.domain.IterationId
 import com.github.silbaram.plan2agent.memory.domain.ProjectId
@@ -277,6 +278,10 @@ class PostgresEmbeddingSetStoreAdapter(
     private val json = PostgresJsonSupport(objectMapper)
 
     override fun resolveOrCreate(embeddingSet: EmbeddingSet): EmbeddingSet = metrics.recordWrite("embedding_set.resolve_or_create") {
+        require(embeddingSet.scope == EmbeddingSetScope.LEGACY) {
+            "EmbeddingSetStorePort resolves legacy embedding sets only"
+        }
+        requireNotNull(embeddingSet.projectId) { "Legacy EmbeddingSet projectId must not be null" }
         require(embeddingSet.embeddingDimension <= MAX_VECTOR_DIMENSION) {
             "EmbeddingSet embeddingDimension must be <= $MAX_VECTOR_DIMENSION for pgvector storage"
         }
@@ -289,7 +294,7 @@ class PostgresEmbeddingSetStoreAdapter(
         )?.let { return@recordWrite it }
 
         findById(embeddingSet.id)?.let { existing ->
-            if (existing.uniqueKey() != embeddingSet.uniqueKey()) {
+            if (existing.scope != EmbeddingSetScope.LEGACY || existing.uniqueKey() != embeddingSet.uniqueKey()) {
                 throw relationConflict(
                     "embedding set ${embeddingSet.id.value} already maps to ${existing.uniqueKey()}",
                 )
@@ -300,20 +305,23 @@ class PostgresEmbeddingSetStoreAdapter(
         jdbc.queryForObject(
             """
             INSERT INTO embedding_sets (
-                embedding_set_id, project_id, embedding_model, embedding_dimension,
-                embedding_version, distance_metric, storage_type, metadata, created_at, updated_at
+                embedding_set_id, project_id, scope, embedding_model, embedding_dimension,
+                embedding_version, distance_metric, storage_type, profile_fingerprint, profile_manifest,
+                metadata, created_at, updated_at
             ) VALUES (
-                :embeddingSetId, :projectId, :embeddingModel, :embeddingDimension,
-                :embeddingVersion, :distanceMetric, :storageType, CAST(:metadata AS jsonb),
+                :embeddingSetId, :projectId, 'LEGACY', :embeddingModel, :embeddingDimension,
+                :embeddingVersion, :distanceMetric, :storageType, NULL, NULL, CAST(:metadata AS jsonb),
                 :createdAt, NULL
             )
-            ON CONFLICT ON CONSTRAINT uq_embedding_sets_model_dimension_version_metric DO UPDATE SET
+            ON CONFLICT (embedding_model, embedding_dimension, embedding_version, distance_metric)
+                WHERE scope = 'LEGACY'
+            DO UPDATE SET
                 updated_at = embedding_sets.updated_at
             RETURNING *
             """.trimIndent(),
             MapSqlParameterSource()
                 .addValue("embeddingSetId", uuid(embeddingSet.id.value))
-                .addValue("projectId", uuid(embeddingSet.projectId.value))
+                .addValue("projectId", uuid(requireNotNull(embeddingSet.projectId).value))
                 .addValue("embeddingModel", embeddingSet.embeddingModel)
                 .addValue("embeddingDimension", embeddingSet.embeddingDimension)
                 .addValue("embeddingVersion", embeddingSet.embeddingVersion)
@@ -346,6 +354,7 @@ class PostgresEmbeddingSetStoreAdapter(
               AND embedding_dimension = :embeddingDimension
               AND embedding_version = :embeddingVersion
               AND distance_metric = :distanceMetric
+              AND scope = 'LEGACY'
             """.trimIndent(),
             MapSqlParameterSource()
                 .addValue("embeddingModel", embeddingModel)
@@ -492,6 +501,7 @@ class PostgresChunkEmbeddingStoreAdapter(
             dimension
         }
         byDimension[2]?.let { insertTypedVectors(it, tableName = "chunk_embedding_vectors_2", vectorType = "vector(2)") }
+        byDimension[384]?.let { insertTypedVectors(it, tableName = "chunk_embedding_vectors_384", vectorType = "vector(384)") }
         byDimension[1536]?.let {
             insertTypedVectors(it, tableName = "chunk_embedding_vectors_1536", vectorType = "vector(1536)")
         }
@@ -588,7 +598,10 @@ private fun embeddingSetMapper(json: PostgresJsonSupport): RowMapper<EmbeddingSe
     RowMapper { rs, _ ->
         EmbeddingSet(
             id = EmbeddingSetId(rs.getString("embedding_set_id")),
-            projectId = ProjectId(rs.getString("project_id")),
+            projectId = rs.getString("project_id")?.let(::ProjectId),
+            scope = embeddingSetScopeFromDbValue(rs.getString("scope")),
+            profileFingerprint = rs.getString("profile_fingerprint"),
+            profileManifest = rs.getString("profile_manifest"),
             embeddingModel = rs.getString("embedding_model"),
             embeddingDimension = rs.getInt("embedding_dimension"),
             embeddingVersion = rs.getString("embedding_version"),
@@ -639,6 +652,13 @@ private fun EmbeddingSet.uniqueKey(): String =
         embeddingVersion,
         distanceMetric.toDbValue(),
     ).joinToString(separator = ":")
+
+private fun embeddingSetScopeFromDbValue(value: String): EmbeddingSetScope =
+    when (value) {
+        "LEGACY" -> EmbeddingSetScope.LEGACY
+        "SERVER_GLOBAL" -> EmbeddingSetScope.SERVER_GLOBAL
+        else -> error("Unsupported embedding set scope: $value")
+    }
 
 private fun RunRecord.requireSameSourceScope(requested: RunRecord) {
     if (
