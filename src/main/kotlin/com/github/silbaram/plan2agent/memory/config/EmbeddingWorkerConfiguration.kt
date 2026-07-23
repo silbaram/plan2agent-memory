@@ -4,6 +4,7 @@ import com.github.silbaram.plan2agent.memory.application.worker.EmbeddingWorkerP
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.scheduling.annotation.EnableScheduling
+import java.time.Clock
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.ThreadFactory
@@ -11,6 +12,9 @@ import java.util.concurrent.ThreadFactory
 @Configuration(proxyBeanMethods = false)
 @EnableScheduling
 class EmbeddingWorkerConfiguration {
+    @Bean
+    fun embeddingWorkerClock(): Clock = Clock.systemUTC()
+
     @Bean(destroyMethod = "shutdown")
     fun embeddingWorkerExecutor(properties: EmbeddingWorkerProperties): ExecutorService =
         Executors.newFixedThreadPool(

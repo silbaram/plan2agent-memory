@@ -4,10 +4,12 @@ import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddin
 import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingProfileResolutionException
 import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingProfileResolver
 import com.github.silbaram.plan2agent.memory.application.port.out.DocumentChunkStorePort
+import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingProviderException
 import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingJobStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingPort
 import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingProviderState
 import com.github.silbaram.plan2agent.memory.application.port.out.ProviderContractViolationException
+import com.github.silbaram.plan2agent.memory.application.port.out.ProviderNotConfiguredException
 import com.github.silbaram.plan2agent.memory.domain.Embedding
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingJob
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingJobErrorCode
@@ -17,7 +19,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
-import java.time.Instant
+import java.time.Clock
 import java.util.UUID
 import java.util.concurrent.ExecutorService
 import kotlin.math.abs
@@ -37,6 +39,7 @@ class EmbeddingJobWorker(
     private val completionService: EmbeddingJobCompletionService,
     private val properties: EmbeddingWorkerProperties,
     private val workerExecutor: ExecutorService,
+    private val clock: Clock,
 ) {
     private val owner = "embedding-worker-${UUID.randomUUID()}"
 
@@ -48,7 +51,7 @@ class EmbeddingJobWorker(
             embeddingSetId = requireNotNull(activeTarget.embeddingSetId),
             batchSize = properties.claimBatchSize,
             owner = owner,
-            leaseUntil = Instant.now().plus(properties.leaseDuration),
+            leaseUntil = clock.instant().plus(properties.leaseDuration),
         )
 
         claimed
@@ -58,6 +61,7 @@ class EmbeddingJobWorker(
 
     private fun process(job: EmbeddingJob, expectedTarget: ActiveEmbeddingTarget) {
         if (!canInferFor(job, expectedTarget)) {
+            releaseClaim(job)
             return
         }
 
@@ -71,12 +75,26 @@ class EmbeddingJobWorker(
             return
         }
 
-        val result = embeddingPort.embedDocuments(listOf(chunk.content)).singleOrNull()
-            ?: throw ProviderContractViolationException()
-        if (result.target != expectedTarget) {
-            throw ProviderContractViolationException()
+        val result = try {
+            embeddingPort.embedDocuments(listOf(chunk.content)).singleOrNull()
+                ?: throw ProviderContractViolationException()
+        } catch (_: ProviderContractViolationException) {
+            releaseClaim(job)
+            return
+        } catch (failure: EmbeddingProviderException) {
+            handleProviderFailure(job, failure)
+            return
         }
-        validateEmbedding(result.embedding, expectedTarget)
+        if (result.target != expectedTarget) {
+            releaseClaim(job)
+            return
+        }
+        try {
+            validateEmbedding(result.embedding, expectedTarget)
+        } catch (_: ProviderContractViolationException) {
+            releaseClaim(job)
+            return
+        }
 
         try {
             completionService.saveEmbeddingAndMarkSucceeded(
@@ -115,6 +133,68 @@ class EmbeddingJobWorker(
         embeddingPort.providerState == EmbeddingProviderState.READY &&
             job.embeddingSetId == expectedTarget.embeddingSetId &&
             embeddingPort.activeEmbeddingTarget == expectedTarget
+
+    private fun handleProviderFailure(job: EmbeddingJob, failure: EmbeddingProviderException) {
+        if (failure is ProviderNotConfiguredException || embeddingPort.providerState != EmbeddingProviderState.READY) {
+            releaseClaim(job)
+            return
+        }
+
+        if (!failure.retryable) {
+            embeddingJobStore.markPermanentlyFailed(
+                jobId = job.id,
+                owner = owner,
+                leaseGeneration = job.leaseGeneration,
+                failure = providerFailure(EmbeddingJobErrorCode.PROVIDER_UNAVAILABLE, failure.message),
+            )
+            return
+        }
+
+        if (job.attemptCount >= properties.maxAttempts) {
+            embeddingJobStore.markPermanentlyFailed(
+                jobId = job.id,
+                owner = owner,
+                leaseGeneration = job.leaseGeneration,
+                failure = EmbeddingJobFailure.fromUntrustedMessage(
+                    EmbeddingJobErrorCode.MAX_ATTEMPTS_EXHAUSTED,
+                    "Embedding provider remained unavailable after ${properties.maxAttempts} attempts",
+                ),
+            )
+            return
+        }
+
+        embeddingJobStore.markRetrying(
+            jobId = job.id,
+            owner = owner,
+            leaseGeneration = job.leaseGeneration,
+            failure = providerFailure(EmbeddingJobErrorCode.PROVIDER_UNAVAILABLE, failure.message),
+            nextAttemptAt = clock.instant().plus(retryDelay(job.attemptCount)),
+        )
+    }
+
+    private fun releaseClaim(job: EmbeddingJob) {
+        embeddingJobStore.releaseClaimToPending(job.id, owner, job.leaseGeneration)
+    }
+
+    private fun providerFailure(code: EmbeddingJobErrorCode, message: String?): EmbeddingJobFailure =
+        EmbeddingJobFailure.fromUntrustedMessage(code, message ?: "Embedding provider unavailable")
+
+    private fun retryDelay(attemptCount: Int): java.time.Duration {
+        var delay = properties.initialRetryDelay
+        var remainingDoublings = attemptCount - 1
+        val halfOfMaximum = properties.maxRetryDelay.dividedBy(2)
+
+        while (remainingDoublings > 0 && delay < properties.maxRetryDelay) {
+            delay = if (delay > halfOfMaximum) {
+                properties.maxRetryDelay
+            } else {
+                delay.multipliedBy(2)
+            }
+            remainingDoublings -= 1
+        }
+
+        return delay
+    }
 
     private fun validateEmbedding(embedding: Embedding, target: ActiveEmbeddingTarget) {
         val values = embedding.values

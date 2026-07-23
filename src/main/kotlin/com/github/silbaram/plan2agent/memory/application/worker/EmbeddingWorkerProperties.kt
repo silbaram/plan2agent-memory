@@ -10,11 +10,24 @@ data class EmbeddingWorkerProperties(
     val claimBatchSize: Int = 16,
     val concurrency: Int = 1,
     val leaseDuration: Duration = Duration.ofMinutes(2),
+    val maxAttempts: Int = 5,
+    val initialRetryDelay: Duration = Duration.ofSeconds(5),
+    val maxRetryDelay: Duration = Duration.ofMinutes(5),
 ) {
     init {
         require(!pollDelay.isNegative && !pollDelay.isZero) { "Embedding worker pollDelay must be positive" }
         require(claimBatchSize > 0) { "Embedding worker claimBatchSize must be positive" }
         require(concurrency > 0) { "Embedding worker concurrency must be positive" }
         require(!leaseDuration.isNegative && !leaseDuration.isZero) { "Embedding worker leaseDuration must be positive" }
+        require(maxAttempts > 0) { "Embedding worker maxAttempts must be positive" }
+        require(!initialRetryDelay.isNegative && !initialRetryDelay.isZero) {
+            "Embedding worker initialRetryDelay must be positive"
+        }
+        require(!maxRetryDelay.isNegative && !maxRetryDelay.isZero) {
+            "Embedding worker maxRetryDelay must be positive"
+        }
+        require(initialRetryDelay <= maxRetryDelay) {
+            "Embedding worker initialRetryDelay must not exceed maxRetryDelay"
+        }
     }
 }

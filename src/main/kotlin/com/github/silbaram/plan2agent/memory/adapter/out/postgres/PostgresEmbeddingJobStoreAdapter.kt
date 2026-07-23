@@ -145,6 +145,7 @@ class PostgresEmbeddingJobStoreAdapter(
                 """
                 UPDATE embedding_jobs
                 SET status = 'pending',
+                    attempt_count = GREATEST(attempt_count - 1, 0),
                     next_attempt_at = now(),
                     lease_owner = NULL,
                     lease_expires_at = NULL,

@@ -82,6 +82,7 @@ import com.github.silbaram.plan2agent.memory.domain.TaskGraphId
 import com.github.silbaram.plan2agent.memory.domain.TaskId
 import com.github.silbaram.plan2agent.memory.domain.TaskStatus
 import com.github.silbaram.plan2agent.memory.domain.V2EmbeddingProfile
+import com.github.silbaram.plan2agent.memory.support.FakeEmbeddingFailure
 import com.github.silbaram.plan2agent.memory.support.FakeEmbeddingMode
 import com.github.silbaram.plan2agent.memory.support.FakeEmbeddingPort
 import org.assertj.core.api.Assertions.assertThat
@@ -101,8 +102,11 @@ import org.springframework.transaction.PlatformTransactionManager
 import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.utility.DockerImageName
 import java.nio.charset.StandardCharsets
+import java.time.Clock
 import java.sql.DriverManager
 import java.time.Instant
+import java.time.ZoneOffset
+import java.time.temporal.ChronoUnit
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.CountDownLatch
@@ -379,7 +383,7 @@ class PostgresStorageIntegrationTest {
             embeddingJobStore.releaseClaimToPending(claimed.id, "worker-a", claimed.leaseGeneration),
         )
         assertThat(released).extracting({ it.status }, { it.attemptCount })
-            .containsExactly(EmbeddingJobStatus.PENDING, 1)
+            .containsExactly(EmbeddingJobStatus.PENDING, 0)
         val claimedForRetry = embeddingJobStore.claimDue(1, "worker-a", current.plusSeconds(600)).single()
 
         val failure = EmbeddingJobFailure.fromUntrustedMessage(
@@ -402,7 +406,7 @@ class PostgresStorageIntegrationTest {
 
         val reclaimed = embeddingJobStore.claimDue(1, "worker-b", current.plusSeconds(600)).single()
         assertThat(reclaimed).extracting({ it.attemptCount }, { it.leaseGeneration })
-            .containsExactly(3, 3L)
+            .containsExactly(2, 3L)
         assertThat(
             embeddingJobStore.markPermanentlyFailed(
                 claimedForRetry.id,
@@ -497,7 +501,7 @@ class PostgresStorageIntegrationTest {
             )
             val reclaimed = embeddingJobStore.claimDue(1, "worker-a", current.plusSeconds(600)).single()
             assertThat(reclaimed).extracting({ it.attemptCount }, { it.leaseGeneration })
-                .containsExactly(2, 2L)
+                .containsExactly(1, 2L)
 
             assertThat(
                 embeddingJobStore.markSucceeded(firstClaim.id, "worker-a", firstClaim.leaseGeneration),
@@ -572,6 +576,193 @@ class PostgresStorageIntegrationTest {
             { it?.leaseOwner },
             { it?.leaseGeneration },
         ).containsExactly(EmbeddingJobStatus.RUNNING, "worker-a", currentClaim.leaseGeneration)
+    }
+
+    @Test
+    fun `expired same-owner reclaim fences the previous generation`() {
+        val fixture = saveFixture("embedding-job-expired-same-owner")
+        val embeddingSet = embeddingSetStore.resolveOrCreate(
+            embeddingSet(
+                scope = "embedding-job-expired-same-owner",
+                projectId = fixture.project.id,
+                model = "embedding-job-expired-same-owner-model",
+                version = "v1",
+            ),
+        )
+        val jobId = EmbeddingJobId(stableUuid("embedding-job-expired-same-owner"))
+        embeddingJobStore.enqueueMissing(
+            EnqueueEmbeddingJobCommand(jobId, fixture.chunk.id, embeddingSet.id, Instant.now().minusSeconds(1)),
+        )
+
+        val expiredClaim = embeddingJobStore.claimDue(1, "worker-a", Instant.now().minusSeconds(1)).single()
+        assertThat(embeddingJobStore.recoverExpiredLeases()).singleElement().extracting(
+            { it.status },
+            { it.attemptCount },
+            { it.leaseGeneration },
+        ).containsExactly(EmbeddingJobStatus.PENDING, 1, expiredClaim.leaseGeneration)
+
+        val currentClaim = embeddingJobStore.claimDue(1, "worker-a", Instant.now().plusSeconds(600)).single()
+        val failure = EmbeddingJobFailure.fromUntrustedMessage(
+            EmbeddingJobErrorCode.PROVIDER_UNAVAILABLE,
+            "provider unavailable",
+        )
+        assertThat(currentClaim).extracting({ it.attemptCount }, { it.leaseGeneration })
+            .containsExactly(2, expiredClaim.leaseGeneration + 1)
+        assertThat(embeddingJobStore.markSucceeded(jobId, "worker-a", expiredClaim.leaseGeneration)).isNull()
+        assertThat(
+            embeddingJobStore.markRetrying(
+                jobId,
+                "worker-a",
+                expiredClaim.leaseGeneration,
+                failure,
+                Instant.now().plusSeconds(5),
+            ),
+        ).isNull()
+        assertThat(embeddingJobStore.releaseClaimToPending(jobId, "worker-a", expiredClaim.leaseGeneration)).isNull()
+        assertThat(embeddingJobStore.findById(jobId)).isEqualTo(currentClaim)
+    }
+
+    @Test
+    fun `worker retries provider failures with deterministic backoff then exhausts attempts`() {
+        val fixture = saveFixture("embedding-worker-retry")
+        val activeEmbeddingSetId = ensurePersistedActiveEmbeddingTarget()
+        val jobId = EmbeddingJobId(stableUuid("embedding-worker-retry-job"))
+        val now = Instant.now().truncatedTo(ChronoUnit.MICROS)
+        embeddingJobStore.enqueueMissing(
+            EnqueueEmbeddingJobCommand(jobId, fixture.chunk.id, activeEmbeddingSetId, now.minusSeconds(1)),
+        )
+        val fake = FakeEmbeddingPort(
+            activeEmbeddingTarget = ActiveEmbeddingTarget(V2EmbeddingProfile.fixed, activeEmbeddingSetId),
+        ).fail(FakeEmbeddingMode.DOCUMENT, FakeEmbeddingFailure.RETRYABLE_UNAVAILABLE)
+        val executor = Executors.newSingleThreadExecutor()
+        val properties = EmbeddingWorkerProperties(
+            maxAttempts = 4,
+            initialRetryDelay = java.time.Duration.ofSeconds(5),
+            maxRetryDelay = java.time.Duration.ofSeconds(12),
+        )
+
+        try {
+            val worker = newEmbeddingWorker(fake, executor, properties, Clock.fixed(now, ZoneOffset.UTC))
+            worker.poll()
+            assertThat(embeddingJobStore.findById(jobId)).extracting(
+                { it?.status },
+                { it?.attemptCount },
+                { it?.nextAttemptAt },
+                { it?.lastError?.code },
+            ).containsExactly(
+                EmbeddingJobStatus.RETRYING,
+                1,
+                now.plusSeconds(5),
+                EmbeddingJobErrorCode.PROVIDER_UNAVAILABLE,
+            )
+
+            makeEmbeddingJobDue(jobId)
+            worker.poll()
+            assertThat(embeddingJobStore.findById(jobId)).extracting(
+                { it?.status },
+                { it?.attemptCount },
+                { it?.nextAttemptAt },
+            ).containsExactly(EmbeddingJobStatus.RETRYING, 2, now.plusSeconds(10))
+
+            makeEmbeddingJobDue(jobId)
+            worker.poll()
+            assertThat(embeddingJobStore.findById(jobId)).extracting(
+                { it?.status },
+                { it?.attemptCount },
+                { it?.nextAttemptAt },
+            ).containsExactly(EmbeddingJobStatus.RETRYING, 3, now.plusSeconds(12))
+
+            makeEmbeddingJobDue(jobId)
+            worker.poll()
+            assertThat(embeddingJobStore.findById(jobId)).extracting(
+                { it?.status },
+                { it?.attemptCount },
+                { it?.lastError?.code },
+                { it?.lastError?.message },
+            ).containsExactly(
+                EmbeddingJobStatus.PERMANENTLY_FAILED,
+                4,
+                EmbeddingJobErrorCode.MAX_ATTEMPTS_EXHAUSTED,
+                "Embedding provider remained unavailable after 4 attempts",
+            )
+        } finally {
+            executor.shutdownNow()
+            executor.awaitTermination(10, TimeUnit.SECONDS)
+        }
+    }
+
+    @Test
+    fun `worker holds jobs pending until provider recovery and releases contract failures`() {
+        val activeEmbeddingSetId = ensurePersistedActiveEmbeddingTarget()
+        EmbeddingProviderState.entries
+            .filter { it != EmbeddingProviderState.READY }
+            .forEach { state ->
+                val fixture = saveFixture("embedding-worker-provider-$state")
+                val jobId = EmbeddingJobId(stableUuid("embedding-worker-provider-$state"))
+                embeddingJobStore.enqueueMissing(
+                    EnqueueEmbeddingJobCommand(jobId, fixture.chunk.id, activeEmbeddingSetId, Instant.now().minusSeconds(1)),
+                )
+                val fake = FakeEmbeddingPort(
+                    activeEmbeddingTarget = ActiveEmbeddingTarget(V2EmbeddingProfile.fixed, activeEmbeddingSetId),
+                    providerState = state,
+                )
+                val executor = Executors.newSingleThreadExecutor()
+
+                try {
+                    val worker = newEmbeddingWorker(fake, executor)
+                    worker.poll()
+                    assertThat(embeddingJobStore.findById(jobId)).extracting(
+                        { it?.status },
+                        { it?.attemptCount },
+                        { it?.leaseOwner },
+                    ).containsExactly(EmbeddingJobStatus.PENDING, 0, null)
+                    assertThat(fake.requests).isEmpty()
+
+                    fake.providerState = EmbeddingProviderState.READY
+                    worker.poll()
+                    assertThat(embeddingJobStore.findById(jobId)).extracting(
+                        { it?.status },
+                        { it?.attemptCount },
+                    ).containsExactly(EmbeddingJobStatus.SUCCEEDED, 1)
+                } finally {
+                    executor.shutdownNow()
+                    executor.awaitTermination(10, TimeUnit.SECONDS)
+                }
+            }
+
+        val fixture = saveFixture("embedding-worker-contract-release")
+        val jobId = EmbeddingJobId(stableUuid("embedding-worker-contract-release-job"))
+        embeddingJobStore.enqueueMissing(
+            EnqueueEmbeddingJobCommand(jobId, fixture.chunk.id, activeEmbeddingSetId, Instant.now().minusSeconds(1)),
+        )
+        val fake = FakeEmbeddingPort(
+            activeEmbeddingTarget = ActiveEmbeddingTarget(V2EmbeddingProfile.fixed, activeEmbeddingSetId),
+        ).fail(FakeEmbeddingMode.DOCUMENT, FakeEmbeddingFailure.CONTRACT_VIOLATION)
+        val executor = Executors.newSingleThreadExecutor()
+
+        try {
+            val worker = newEmbeddingWorker(fake, executor)
+            worker.poll()
+            assertThat(embeddingJobStore.findById(jobId)).extracting(
+                { it?.status },
+                { it?.attemptCount },
+                { it?.leaseOwner },
+                { it?.leaseExpiresAt },
+                { it?.lastError },
+                { it?.leaseGeneration },
+            ).containsExactly(EmbeddingJobStatus.PENDING, 0, null, null, null, 1L)
+
+            fake.clearFailure(FakeEmbeddingMode.DOCUMENT)
+            worker.poll()
+            assertThat(embeddingJobStore.findById(jobId)).extracting(
+                { it?.status },
+                { it?.attemptCount },
+                { it?.leaseGeneration },
+            ).containsExactly(EmbeddingJobStatus.SUCCEEDED, 1, 2L)
+        } finally {
+            executor.shutdownNow()
+            executor.awaitTermination(10, TimeUnit.SECONDS)
+        }
     }
 
     @Test
@@ -1789,6 +1980,8 @@ class PostgresStorageIntegrationTest {
     private fun newEmbeddingWorker(
         embeddingPort: FakeEmbeddingPort,
         executor: java.util.concurrent.ExecutorService,
+        properties: EmbeddingWorkerProperties = EmbeddingWorkerProperties(),
+        clock: Clock = Clock.systemUTC(),
     ): EmbeddingJobWorker =
         EmbeddingJobWorker(
             embeddingPort = embeddingPort,
@@ -1799,10 +1992,19 @@ class PostgresStorageIntegrationTest {
                 chunkEmbeddingStore = chunkEmbeddingStore,
                 embeddingJobStore = embeddingJobStore,
                 transactionManager = transactionManager,
+                clock = clock,
             ),
-            properties = EmbeddingWorkerProperties(),
+            properties = properties,
             workerExecutor = executor,
+            clock = clock,
         )
+
+    private fun makeEmbeddingJobDue(jobId: EmbeddingJobId) {
+        jdbc.update(
+            "UPDATE embedding_jobs SET next_attempt_at = now() - INTERVAL '1 second' WHERE embedding_job_id = ?",
+            UUID.fromString(jobId.value),
+        )
+    }
 
     private fun tableNames(): Set<String> =
         strings(
