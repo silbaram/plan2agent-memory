@@ -6,6 +6,7 @@ import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactGraphS
 import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactQueryPort
 import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingProfileResolutionException
 import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingProfileResolver
+import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingTarget
 import com.github.silbaram.plan2agent.memory.application.port.out.ChunkEmbeddingStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.DocumentChunkStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.DocumentSnapshotStorePort
@@ -31,6 +32,9 @@ import com.github.silbaram.plan2agent.memory.application.usecase.SaveArtifactGra
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveDocumentChunksCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveDocumentSnapshotCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.WriteUseCaseService
+import com.github.silbaram.plan2agent.memory.application.worker.EmbeddingJobCompletionService
+import com.github.silbaram.plan2agent.memory.application.worker.EmbeddingJobWorker
+import com.github.silbaram.plan2agent.memory.application.worker.EmbeddingWorkerProperties
 import com.github.silbaram.plan2agent.memory.domain.ArtifactEdge
 import com.github.silbaram.plan2agent.memory.domain.ArtifactEdgeId
 import com.github.silbaram.plan2agent.memory.domain.ArtifactEdgeType
@@ -78,6 +82,8 @@ import com.github.silbaram.plan2agent.memory.domain.TaskGraphId
 import com.github.silbaram.plan2agent.memory.domain.TaskId
 import com.github.silbaram.plan2agent.memory.domain.TaskStatus
 import com.github.silbaram.plan2agent.memory.domain.V2EmbeddingProfile
+import com.github.silbaram.plan2agent.memory.support.FakeEmbeddingMode
+import com.github.silbaram.plan2agent.memory.support.FakeEmbeddingPort
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.assertj.core.groups.Tuple.tuple
@@ -91,17 +97,19 @@ import org.springframework.dao.DataAccessException
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.test.context.DynamicPropertyRegistry
 import org.springframework.test.context.DynamicPropertySource
+import org.springframework.transaction.PlatformTransactionManager
 import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.utility.DockerImageName
 import java.nio.charset.StandardCharsets
 import java.sql.DriverManager
 import java.time.Instant
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
-@SpringBootTest(properties = ["p2a.embedding.provider=none"])
+@SpringBootTest(properties = ["p2a.embedding.provider=none", "p2a.memory.embedding.worker.enabled=false"])
 class PostgresStorageIntegrationTest {
     @Autowired
     private lateinit var jdbc: JdbcTemplate
@@ -144,6 +152,9 @@ class PostgresStorageIntegrationTest {
 
     @Autowired
     private lateinit var embeddingJobStore: EmbeddingJobStorePort
+
+    @Autowired
+    private lateinit var transactionManager: PlatformTransactionManager
 
     @Autowired
     private lateinit var artifactQuery: ArtifactQueryPort
@@ -561,6 +572,180 @@ class PostgresStorageIntegrationTest {
             { it?.leaseOwner },
             { it?.leaseGeneration },
         ).containsExactly(EmbeddingJobStatus.RUNNING, "worker-a", currentClaim.leaseGeneration)
+    }
+
+    @Test
+    fun `ready worker processes only the exact active target and persists its 384 mirror`() {
+        val fixture = saveFixture("embedding-worker-process")
+        val activeEmbeddingSetId = ensurePersistedActiveEmbeddingTarget()
+        val foreignEmbeddingSet = embeddingSetStore.resolveOrCreate(
+            embeddingSet(
+                scope = "embedding-worker-foreign-target",
+                projectId = fixture.project.id,
+                model = "foreign-worker-model",
+                version = "v1",
+            ),
+        )
+        val activeJobId = EmbeddingJobId(stableUuid("embedding-worker-active-job"))
+        val foreignJobId = EmbeddingJobId(stableUuid("embedding-worker-foreign-job"))
+        embeddingJobStore.enqueueMissing(
+            EnqueueEmbeddingJobCommand(activeJobId, fixture.chunk.id, activeEmbeddingSetId, Instant.now().minusSeconds(1)),
+        )
+        embeddingJobStore.enqueueMissing(
+            EnqueueEmbeddingJobCommand(foreignJobId, fixture.chunk.id, foreignEmbeddingSet.id, Instant.now().minusSeconds(1)),
+        )
+        val fake = FakeEmbeddingPort(
+            activeEmbeddingTarget = ActiveEmbeddingTarget(V2EmbeddingProfile.fixed, activeEmbeddingSetId),
+        )
+        val executor = Executors.newSingleThreadExecutor()
+
+        try {
+            newEmbeddingWorker(fake, executor).poll()
+        } finally {
+            executor.shutdownNow()
+            executor.awaitTermination(10, TimeUnit.SECONDS)
+        }
+
+        assertThat(embeddingJobStore.findById(activeJobId)?.status).isEqualTo(EmbeddingJobStatus.SUCCEEDED)
+        assertThat(embeddingJobStore.findById(foreignJobId)?.status).isEqualTo(EmbeddingJobStatus.PENDING)
+        assertThat(fake.requests).singleElement().extracting({ it.mode }, { it.input })
+            .containsExactly(FakeEmbeddingMode.DOCUMENT, fixture.chunk.content)
+        assertThat(rowCount("chunk_embeddings")).isEqualTo(1)
+        assertThat(rowCount("chunk_embedding_vectors_384")).isEqualTo(1)
+    }
+
+    @Test
+    fun `worker reclaims an expired lease and processes it with a new generation`() {
+        val fixture = saveFixture("embedding-worker-reclaim")
+        val activeEmbeddingSetId = ensurePersistedActiveEmbeddingTarget()
+        val jobId = EmbeddingJobId(stableUuid("embedding-worker-reclaim-job"))
+        embeddingJobStore.enqueueMissing(
+            EnqueueEmbeddingJobCommand(jobId, fixture.chunk.id, activeEmbeddingSetId, Instant.now().minusSeconds(1)),
+        )
+        val crashedClaim = embeddingJobStore.claimDueForEmbeddingSet(
+            embeddingSetId = activeEmbeddingSetId,
+            batchSize = 1,
+            owner = "crashed-worker",
+            leaseUntil = Instant.now().minusSeconds(1),
+        ).single()
+        val fake = FakeEmbeddingPort(
+            activeEmbeddingTarget = ActiveEmbeddingTarget(V2EmbeddingProfile.fixed, activeEmbeddingSetId),
+        )
+        val executor = Executors.newSingleThreadExecutor()
+
+        try {
+            newEmbeddingWorker(fake, executor).poll()
+        } finally {
+            executor.shutdownNow()
+            executor.awaitTermination(10, TimeUnit.SECONDS)
+        }
+
+        assertThat(embeddingJobStore.findById(jobId)).extracting(
+            { it?.status },
+            { it?.attemptCount },
+            { it?.leaseGeneration },
+        ).containsExactly(EmbeddingJobStatus.SUCCEEDED, 2, crashedClaim.leaseGeneration + 1)
+        assertThat(fake.requests).singleElement().extracting { it.input }.isEqualTo(fixture.chunk.content)
+        assertThat(rowCount("chunk_embeddings")).isEqualTo(1)
+        assertThat(rowCount("chunk_embedding_vectors_384")).isEqualTo(1)
+    }
+
+    @Test
+    fun `stale completion rolls back its untyped and typed vector writes`() {
+        val fixture = saveFixture("embedding-worker-stale-completion")
+        val activeEmbeddingSetId = ensurePersistedActiveEmbeddingTarget()
+        val jobId = EmbeddingJobId(stableUuid("embedding-worker-stale-completion-job"))
+        embeddingJobStore.enqueueMissing(
+            EnqueueEmbeddingJobCommand(jobId, fixture.chunk.id, activeEmbeddingSetId, Instant.now().minusSeconds(1)),
+        )
+        val replacementClaim = AtomicReference<EmbeddingJob>()
+        val fake = FakeEmbeddingPort(
+            activeEmbeddingTarget = ActiveEmbeddingTarget(V2EmbeddingProfile.fixed, activeEmbeddingSetId),
+        ).beforeNextEmbed(FakeEmbeddingMode.DOCUMENT) {
+            jdbc.update(
+                "UPDATE embedding_jobs SET lease_expires_at = now() - INTERVAL '1 second' WHERE embedding_job_id = ?",
+                UUID.fromString(jobId.value),
+            )
+            embeddingJobStore.recoverExpiredLeases()
+            replacementClaim.set(
+                embeddingJobStore.claimDueForEmbeddingSet(
+                    embeddingSetId = activeEmbeddingSetId,
+                    batchSize = 1,
+                    owner = "replacement-worker",
+                    leaseUntil = Instant.now().plusSeconds(120),
+                ).single(),
+            )
+        }
+        val executor = Executors.newSingleThreadExecutor()
+
+        try {
+            newEmbeddingWorker(fake, executor).poll()
+        } finally {
+            executor.shutdownNow()
+            executor.awaitTermination(10, TimeUnit.SECONDS)
+        }
+
+        val currentClaim = requireNotNull(replacementClaim.get())
+        assertThat(embeddingJobStore.findById(jobId)).extracting(
+            { it?.status },
+            { it?.leaseOwner },
+            { it?.leaseGeneration },
+        ).containsExactly(EmbeddingJobStatus.RUNNING, "replacement-worker", currentClaim.leaseGeneration)
+        assertThat(currentClaim.leaseGeneration).isEqualTo(2L)
+        assertThat(rowCount("chunk_embeddings")).isZero()
+        assertThat(rowCount("chunk_embedding_vectors_384")).isZero()
+    }
+
+    @Test
+    fun `worker handles deleted and invalid chunks without creating vectors`() {
+        val deletedFixture = saveFixture("embedding-worker-deleted")
+        val activeEmbeddingSetId = ensurePersistedActiveEmbeddingTarget()
+        val deletedJobId = EmbeddingJobId(stableUuid("embedding-worker-deleted-job"))
+        embeddingJobStore.enqueueMissing(
+            EnqueueEmbeddingJobCommand(deletedJobId, deletedFixture.chunk.id, activeEmbeddingSetId, Instant.now().minusSeconds(1)),
+        )
+        val deletedChunkFake = FakeEmbeddingPort(
+            activeEmbeddingTarget = ActiveEmbeddingTarget(V2EmbeddingProfile.fixed, activeEmbeddingSetId),
+        ).beforeNextEmbed(FakeEmbeddingMode.DOCUMENT) {
+            jdbc.update("DELETE FROM document_chunks WHERE chunk_id = ?", UUID.fromString(deletedFixture.chunk.id.value))
+        }
+        val executor = Executors.newSingleThreadExecutor()
+
+        try {
+            newEmbeddingWorker(deletedChunkFake, executor).poll()
+        } finally {
+            executor.shutdownNow()
+            executor.awaitTermination(10, TimeUnit.SECONDS)
+        }
+
+        val invalidFixture = saveFixture("embedding-worker-invalid")
+        val invalidJobId = EmbeddingJobId(stableUuid("embedding-worker-invalid-job"))
+        embeddingJobStore.enqueueMissing(
+            EnqueueEmbeddingJobCommand(invalidJobId, invalidFixture.chunk.id, activeEmbeddingSetId, Instant.now().minusSeconds(1)),
+        )
+        jdbc.update("UPDATE document_chunks SET content = ' ' WHERE chunk_id = ?", UUID.fromString(invalidFixture.chunk.id.value))
+        val invalidChunkFake = FakeEmbeddingPort(
+            activeEmbeddingTarget = ActiveEmbeddingTarget(V2EmbeddingProfile.fixed, activeEmbeddingSetId),
+        )
+        val invalidExecutor = Executors.newSingleThreadExecutor()
+
+        try {
+            newEmbeddingWorker(invalidChunkFake, invalidExecutor).poll()
+            newEmbeddingWorker(invalidChunkFake, invalidExecutor).poll()
+        } finally {
+            invalidExecutor.shutdownNow()
+            invalidExecutor.awaitTermination(10, TimeUnit.SECONDS)
+        }
+
+        assertThat(embeddingJobStore.findById(deletedJobId)).isNull()
+        assertThat(embeddingJobStore.findById(invalidJobId)).extracting(
+            { it?.status },
+            { it?.lastError?.code },
+        ).containsExactly(EmbeddingJobStatus.PERMANENTLY_FAILED, EmbeddingJobErrorCode.CONTENT_INVALID)
+        assertThat(deletedChunkFake.requests).singleElement().extracting { it.input }.isEqualTo(deletedFixture.chunk.content)
+        assertThat(invalidChunkFake.requests).isEmpty()
+        assertThat(rowCount("chunk_embeddings")).isZero()
+        assertThat(rowCount("chunk_embedding_vectors_384")).isZero()
     }
 
     @Test
@@ -1600,6 +1785,24 @@ class PostgresStorageIntegrationTest {
 
     private fun ensurePersistedActiveEmbeddingTarget(): EmbeddingSetId =
         activeEmbeddingProfileResolver.resolveActiveV2EmbeddingSetId()
+
+    private fun newEmbeddingWorker(
+        embeddingPort: FakeEmbeddingPort,
+        executor: java.util.concurrent.ExecutorService,
+    ): EmbeddingJobWorker =
+        EmbeddingJobWorker(
+            embeddingPort = embeddingPort,
+            activeEmbeddingProfileResolver = activeEmbeddingProfileResolver,
+            documentChunkStore = documentChunkStore,
+            embeddingJobStore = embeddingJobStore,
+            completionService = EmbeddingJobCompletionService(
+                chunkEmbeddingStore = chunkEmbeddingStore,
+                embeddingJobStore = embeddingJobStore,
+                transactionManager = transactionManager,
+            ),
+            properties = EmbeddingWorkerProperties(),
+            workerExecutor = executor,
+        )
 
     private fun tableNames(): Set<String> =
         strings(

@@ -19,6 +19,17 @@ interface EmbeddingJobStorePort {
 
     fun claimDue(batchSize: Int, owner: String, leaseUntil: Instant): List<EmbeddingJob>
 
+    /**
+     * Claims only work for one exact embedding-set target. Workers must use this operation instead
+     * of claiming across all historical or future targets.
+     */
+    fun claimDueForEmbeddingSet(
+        embeddingSetId: EmbeddingSetId,
+        batchSize: Int,
+        owner: String,
+        leaseUntil: Instant,
+    ): List<EmbeddingJob>
+
     fun releaseClaimToPending(
         jobId: EmbeddingJobId,
         owner: String,

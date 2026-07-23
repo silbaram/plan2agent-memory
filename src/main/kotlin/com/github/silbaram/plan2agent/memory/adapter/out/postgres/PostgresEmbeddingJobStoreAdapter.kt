@@ -90,6 +90,51 @@ class PostgresEmbeddingJobStoreAdapter(
             )
         }
 
+    override fun claimDueForEmbeddingSet(
+        embeddingSetId: EmbeddingSetId,
+        batchSize: Int,
+        owner: String,
+        leaseUntil: Instant,
+    ): List<EmbeddingJob> =
+        metrics.recordWrite("embedding_job.claim_active_target") {
+            require(batchSize > 0) { "Embedding job batchSize must be positive" }
+            require(owner.isNotBlank()) { "Embedding job owner must not be blank" }
+            jdbc.query(
+                """
+                WITH next_job AS (
+                    SELECT embedding_job_id
+                    FROM embedding_jobs
+                    WHERE status IN ('pending', 'retrying')
+                      AND embedding_set_id = :embeddingSetId
+                      AND next_attempt_at <= now()
+                    ORDER BY next_attempt_at, created_at, embedding_job_id
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT :batchSize
+                )
+                UPDATE embedding_jobs AS job
+                SET status = 'running',
+                    attempt_count = job.attempt_count + 1,
+                    lease_owner = :owner,
+                    lease_generation = job.lease_generation + 1,
+                    lease_expires_at = :leaseUntil,
+                    last_error_code = NULL,
+                    last_error_message = NULL,
+                    started_at = COALESCE(job.started_at, now()),
+                    last_attempt_at = now(),
+                    updated_at = now()
+                FROM next_job
+                WHERE job.embedding_job_id = next_job.embedding_job_id
+                RETURNING job.*
+                """.trimIndent(),
+                MapSqlParameterSource()
+                    .addValue("embeddingSetId", uuid(embeddingSetId.value))
+                    .addValue("batchSize", batchSize)
+                    .addValue("owner", owner)
+                    .addValue("leaseUntil", Timestamp.from(leaseUntil)),
+                embeddingJobMapper(),
+            )
+        }
+
     override fun releaseClaimToPending(
         jobId: EmbeddingJobId,
         owner: String,
