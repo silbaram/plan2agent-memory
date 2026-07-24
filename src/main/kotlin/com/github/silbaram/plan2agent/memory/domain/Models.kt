@@ -322,11 +322,31 @@ data class EmbeddingJobFailure private constructor(
     companion object {
         const val MAX_MESSAGE_CHARACTERS: Int = 512
 
-        fun fromUntrustedMessage(code: EmbeddingJobErrorCode, message: String): EmbeddingJobFailure =
-            EmbeddingJobFailure(code, sanitizeMessage(message))
+        /**
+         * Provider exceptions may contain response bodies, credentials, local paths or chunk text.
+         * Persist only the stable message for the code; the original text is intentionally dropped.
+         */
+        fun fromUntrustedMessage(
+            code: EmbeddingJobErrorCode,
+            @Suppress("UNUSED_PARAMETER") message: String,
+        ): EmbeddingJobFailure =
+            EmbeddingJobFailure(code, stableMessage(code))
 
-        fun fromStoredMessage(code: EmbeddingJobErrorCode, message: String): EmbeddingJobFailure =
-            EmbeddingJobFailure(code, message)
+        /** Existing rows are read through the same safe projection before reaching APIs or logs. */
+        fun fromStoredMessage(
+            code: EmbeddingJobErrorCode,
+            @Suppress("UNUSED_PARAMETER") message: String,
+        ): EmbeddingJobFailure =
+            EmbeddingJobFailure(code, stableMessage(code))
+
+        fun stableMessage(code: EmbeddingJobErrorCode): String =
+            when (code) {
+                EmbeddingJobErrorCode.PROVIDER_UNAVAILABLE -> "Embedding provider is unavailable"
+                EmbeddingJobErrorCode.PROVIDER_CONTRACT_INVALID -> "Embedding provider output is invalid"
+                EmbeddingJobErrorCode.CONTENT_INVALID -> "Document chunk is invalid"
+                EmbeddingJobErrorCode.MAX_ATTEMPTS_EXHAUSTED -> "Embedding job retry limit was reached"
+                EmbeddingJobErrorCode.LEASE_EXPIRED -> "Embedding job lease expired"
+            }
 
         private fun sanitizeMessage(message: String): String {
             val sanitized = StringBuilder()

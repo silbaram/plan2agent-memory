@@ -1,5 +1,9 @@
 package com.github.silbaram.plan2agent.memory.config
 
+import com.github.silbaram.plan2agent.memory.application.observability.EmbeddingInferenceOperation
+import com.github.silbaram.plan2agent.memory.application.observability.EmbeddingJobOutcome
+import com.github.silbaram.plan2agent.memory.application.observability.EmbeddingObservability
+import com.github.silbaram.plan2agent.memory.application.observability.EmbeddingProviderInitializationOutcome
 import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingProfileResolutionException
 import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingProfileResolver
 import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingPort
@@ -7,14 +11,19 @@ import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingProvi
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingSetId
 import com.github.silbaram.plan2agent.memory.application.port.out.ProviderNotConfiguredException
 import com.github.silbaram.plan2agent.memory.domain.V2EmbeddingProfile
+import ch.qos.logback.classic.Logger
+import ch.qos.logback.classic.spi.ILoggingEvent
+import ch.qos.logback.core.read.ListAppender
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
 import org.springframework.ai.embedding.EmbeddingModel
 import org.springframework.boot.test.context.runner.ApplicationContextRunner
+import org.slf4j.LoggerFactory
 import java.net.URI
 import java.nio.file.Files
 import java.util.function.Supplier
+import java.util.concurrent.CopyOnWriteArrayList
 
 class EmbeddingProviderConfigurationTest {
     private val contextRunner = ApplicationContextRunner()
@@ -298,6 +307,57 @@ class EmbeddingProviderConfigurationTest {
     }
 
     @Test
+    fun `transformers lifecycle records only stable initialization outcomes across state transitions`() {
+        val readyMetrics = RecordingObservability()
+        val readyLifecycle = TransformersEmbeddingProviderLifecycle(
+            embeddingProperties = EmbeddingProperties(provider = EmbeddingProviderKind.TRANSFORMERS),
+            artifactVerifier = verifiedArtifacts(),
+            modelFactory = TransformersEmbeddingModelFactory {
+                TransformersEmbeddingModelSession { V2EmbeddingProfile.fixed.dimension }
+            },
+            activeEmbeddingProfileResolver = resolvedProfile(),
+            observability = readyMetrics,
+        )
+        try {
+            readyLifecycle.scheduleInitialization()
+            assertThat(awaitProviderState(readyLifecycle, EmbeddingProviderState.READY)).isTrue()
+            assertThat(readyMetrics.initializationOutcomes)
+                .containsExactly(EmbeddingProviderInitializationOutcome.READY)
+        } finally {
+            readyLifecycle.destroy()
+        }
+
+        val unavailableMetrics = RecordingObservability()
+        val logger = LoggerFactory.getLogger(TransformersEmbeddingProviderLifecycle::class.java) as Logger
+        val logAppender = ListAppender<ILoggingEvent>().also { it.start() }
+        logger.addAppender(logAppender)
+        val unavailableLifecycle = TransformersEmbeddingProviderLifecycle(
+            embeddingProperties = EmbeddingProperties(provider = EmbeddingProviderKind.TRANSFORMERS),
+            artifactVerifier = verifiedArtifacts(),
+            modelFactory = TransformersEmbeddingModelFactory {
+                throw IllegalStateException("body={credential=must-not-leak} file:///private/model.onnx")
+            },
+            activeEmbeddingProfileResolver = resolvedProfile(),
+            observability = unavailableMetrics,
+        )
+        try {
+            unavailableLifecycle.scheduleInitialization()
+            assertThat(awaitProviderState(unavailableLifecycle, EmbeddingProviderState.UNAVAILABLE)).isTrue()
+            assertThat(unavailableMetrics.initializationOutcomes)
+                .containsExactly(EmbeddingProviderInitializationOutcome.UNAVAILABLE)
+            assertThat(logAppender.list.map(ILoggingEvent::getFormattedMessage))
+                .contains("Embedding provider initialization failed")
+                .noneMatch { message ->
+                    message.contains("credential=must-not-leak") || message.contains("file:///private/model.onnx")
+                }
+        } finally {
+            unavailableLifecycle.destroy()
+            logger.detachAppender(logAppender)
+            logAppender.stop()
+        }
+    }
+
+    @Test
     fun `runtime binding rejects profile overrides`() {
         contextRunner
             .withPropertyValues(
@@ -331,6 +391,15 @@ class EmbeddingProviderConfigurationTest {
     private fun resolvedProfile(): ActiveEmbeddingProfileResolver =
         ActiveEmbeddingProfileResolver { RESOLVED_EMBEDDING_SET_ID }
 
+    private fun verifiedArtifacts(): TransformersArtifactVerifier =
+        TransformersArtifactVerifier { _, profile ->
+            TransformersEmbeddingArtifacts(
+                modelArtifactUri = URI.create("file:/verified/model.onnx"),
+                tokenizerArtifactUri = URI.create("file:/verified/tokenizer.json"),
+                modelOutputName = profile.modelOutputName,
+            )
+        }
+
     private fun awaitProviderState(
         lifecycle: TransformersEmbeddingProviderLifecycle,
         expectedState: EmbeddingProviderState,
@@ -346,5 +415,19 @@ class EmbeddingProviderConfigurationTest {
 
     private companion object {
         val RESOLVED_EMBEDDING_SET_ID = EmbeddingSetId("10d2d6cc-a2d8-4c4d-a7ab-3443a29533b5")
+    }
+
+    private class RecordingObservability : EmbeddingObservability {
+        val initializationOutcomes = CopyOnWriteArrayList<EmbeddingProviderInitializationOutcome>()
+
+        override fun recordProviderInitialization(outcome: EmbeddingProviderInitializationOutcome) {
+            initializationOutcomes += outcome
+        }
+
+        override fun recordJobOutcome(outcome: EmbeddingJobOutcome) = Unit
+
+        override fun <T> recordInference(operation: EmbeddingInferenceOperation, block: () -> T): T = block()
+
+        override fun refreshJobStatusCounts() = Unit
     }
 }

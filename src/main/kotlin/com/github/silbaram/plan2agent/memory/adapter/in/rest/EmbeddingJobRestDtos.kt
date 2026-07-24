@@ -6,6 +6,7 @@ import com.github.silbaram.plan2agent.memory.application.usecase.MAX_EMBEDDING_J
 import com.github.silbaram.plan2agent.memory.domain.DocumentChunkId
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingJob
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingJobErrorCode
+import com.github.silbaram.plan2agent.memory.domain.EmbeddingJobFailure
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingJobStatus
 import java.time.Instant
 
@@ -57,7 +58,7 @@ fun EmbeddingJob.toResponse(): EmbeddingJobResponse =
         nextAttemptAt = nextAttemptAt,
         leaseExpiresAt = leaseExpiresAt,
         lastErrorCode = lastError?.code?.toRestCode(),
-        sanitizedLastErrorMessage = lastError?.code?.sanitizedMessage(),
+        sanitizedLastErrorMessage = lastError?.code?.let(EmbeddingJobFailure::stableMessage),
         createdAt = createdAt,
         updatedAt = updatedAt,
         completedAt = completedAt,
@@ -72,16 +73,3 @@ private fun parseEmbeddingJobStatus(value: String): EmbeddingJobStatus =
 
 private fun EmbeddingJobErrorCode.toRestCode(): String =
     name.lowercase()
-
-/**
- * Never echo provider exception text to this unauthenticated operational endpoint. The stable
- * code preserves the actionable failure class while avoiding chunk content, credentials and paths.
- */
-private fun EmbeddingJobErrorCode.sanitizedMessage(): String =
-    when (this) {
-        EmbeddingJobErrorCode.PROVIDER_UNAVAILABLE -> "Embedding provider is unavailable"
-        EmbeddingJobErrorCode.PROVIDER_CONTRACT_INVALID -> "Embedding provider output is invalid"
-        EmbeddingJobErrorCode.CONTENT_INVALID -> "Document chunk is invalid"
-        EmbeddingJobErrorCode.MAX_ATTEMPTS_EXHAUSTED -> "Embedding job retry limit was reached"
-        EmbeddingJobErrorCode.LEASE_EXPIRED -> "Embedding job lease expired"
-    }

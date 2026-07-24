@@ -690,8 +690,20 @@ class ApiIntegrationTest {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.status").value("UP"))
 
+        getWithoutToken("/actuator/health/liveness")
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.status").value("UP"))
+
+        getWithoutToken("/actuator/health/readiness")
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.status").value("UP"))
+
         getWithoutToken("/actuator/metrics")
             .andExpect(status().isOk())
+
+        getWithoutToken("/actuator/metrics/p2a.embedding.provider.state")
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.name").value("p2a.embedding.provider.state"))
     }
 
     private fun saveSyncFixture(fixture: ApiFixture) {

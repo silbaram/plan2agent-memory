@@ -1,6 +1,9 @@
 package com.github.silbaram.plan2agent.memory.application.worker
 
 import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingTarget
+import com.github.silbaram.plan2agent.memory.application.observability.EmbeddingInferenceOperation
+import com.github.silbaram.plan2agent.memory.application.observability.EmbeddingJobOutcome
+import com.github.silbaram.plan2agent.memory.application.observability.EmbeddingObservability
 import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingProfileResolutionException
 import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingProfileResolver
 import com.github.silbaram.plan2agent.memory.application.port.out.DocumentChunkStorePort
@@ -19,6 +22,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
+import org.slf4j.LoggerFactory
 import java.time.Clock
 import java.util.UUID
 import java.util.concurrent.ExecutorService
@@ -40,23 +44,28 @@ class EmbeddingJobWorker(
     private val properties: EmbeddingWorkerProperties,
     private val workerExecutor: ExecutorService,
     private val clock: Clock,
+    private val observability: EmbeddingObservability = EmbeddingObservability.noop,
 ) {
     private val owner = "embedding-worker-${UUID.randomUUID()}"
 
     @Scheduled(fixedDelayString = "\${p2a.memory.embedding.worker.poll-delay:1s}")
     fun poll() {
-        embeddingJobStore.recoverExpiredLeases()
-        val activeTarget = currentActiveTarget() ?: return
-        val claimed = embeddingJobStore.claimDueForEmbeddingSet(
-            embeddingSetId = requireNotNull(activeTarget.embeddingSetId),
-            batchSize = properties.claimBatchSize,
-            owner = owner,
-            leaseUntil = clock.instant().plus(properties.leaseDuration),
-        )
+        try {
+            embeddingJobStore.recoverExpiredLeases()
+            val activeTarget = currentActiveTarget() ?: return
+            val claimed = embeddingJobStore.claimDueForEmbeddingSet(
+                embeddingSetId = requireNotNull(activeTarget.embeddingSetId),
+                batchSize = properties.claimBatchSize,
+                owner = owner,
+                leaseUntil = clock.instant().plus(properties.leaseDuration),
+            )
 
-        claimed
-            .map { job -> workerExecutor.submit { process(job, activeTarget) } }
-            .forEach { future -> future.get() }
+            claimed
+                .map { job -> workerExecutor.submit { process(job, activeTarget) } }
+                .forEach { future -> future.get() }
+        } finally {
+            observability.refreshJobStatusCounts()
+        }
     }
 
     private fun process(job: EmbeddingJob, expectedTarget: ActiveEmbeddingTarget) {
@@ -76,8 +85,10 @@ class EmbeddingJobWorker(
         }
 
         val result = try {
-            embeddingPort.embedDocuments(listOf(chunk.content)).singleOrNull()
-                ?: throw ProviderContractViolationException()
+            observability.recordInference(EmbeddingInferenceOperation.DOCUMENT) {
+                embeddingPort.embedDocuments(listOf(chunk.content)).singleOrNull()
+                    ?: throw ProviderContractViolationException()
+            }
         } catch (_: ProviderContractViolationException) {
             releaseClaim(job)
             return
@@ -103,6 +114,7 @@ class EmbeddingJobWorker(
                 embedding = result.embedding,
                 owner = owner,
             )
+            observability.recordJobOutcome(EmbeddingJobOutcome.SUCCEEDED)
         } catch (_: StaleEmbeddingJobCompletionException) {
             // Another generation owns this job. The completion service has already rolled back its vector writes.
         } catch (failure: DataIntegrityViolationException) {
@@ -141,43 +153,59 @@ class EmbeddingJobWorker(
         }
 
         if (!failure.retryable) {
-            embeddingJobStore.markPermanentlyFailed(
+            val transitioned = embeddingJobStore.markPermanentlyFailed(
                 jobId = job.id,
                 owner = owner,
                 leaseGeneration = job.leaseGeneration,
-                failure = providerFailure(EmbeddingJobErrorCode.PROVIDER_UNAVAILABLE, failure.message),
+                failure = providerFailure(EmbeddingJobErrorCode.PROVIDER_UNAVAILABLE),
             )
+            if (transitioned != null) {
+                observability.recordJobOutcome(EmbeddingJobOutcome.PERMANENTLY_FAILED)
+            }
+            logProviderFailure(EmbeddingJobOutcome.PERMANENTLY_FAILED)
             return
         }
 
         if (job.attemptCount >= properties.maxAttempts) {
-            embeddingJobStore.markPermanentlyFailed(
+            val transitioned = embeddingJobStore.markPermanentlyFailed(
                 jobId = job.id,
                 owner = owner,
                 leaseGeneration = job.leaseGeneration,
-                failure = EmbeddingJobFailure.fromUntrustedMessage(
-                    EmbeddingJobErrorCode.MAX_ATTEMPTS_EXHAUSTED,
-                    "Embedding provider remained unavailable after ${properties.maxAttempts} attempts",
-                ),
+                failure = EmbeddingJobFailure.fromUntrustedMessage(EmbeddingJobErrorCode.MAX_ATTEMPTS_EXHAUSTED, ""),
             )
+            if (transitioned != null) {
+                observability.recordJobOutcome(EmbeddingJobOutcome.PERMANENTLY_FAILED)
+            }
+            logProviderFailure(EmbeddingJobOutcome.PERMANENTLY_FAILED)
             return
         }
 
-        embeddingJobStore.markRetrying(
+        val transitioned = embeddingJobStore.markRetrying(
             jobId = job.id,
             owner = owner,
             leaseGeneration = job.leaseGeneration,
-            failure = providerFailure(EmbeddingJobErrorCode.PROVIDER_UNAVAILABLE, failure.message),
+            failure = providerFailure(EmbeddingJobErrorCode.PROVIDER_UNAVAILABLE),
             nextAttemptAt = clock.instant().plus(retryDelay(job.attemptCount)),
         )
+        if (transitioned != null) {
+            observability.recordJobOutcome(EmbeddingJobOutcome.RETRYING)
+        }
+        logProviderFailure(EmbeddingJobOutcome.RETRYING)
     }
 
     private fun releaseClaim(job: EmbeddingJob) {
         embeddingJobStore.releaseClaimToPending(job.id, owner, job.leaseGeneration)
     }
 
-    private fun providerFailure(code: EmbeddingJobErrorCode, message: String?): EmbeddingJobFailure =
-        EmbeddingJobFailure.fromUntrustedMessage(code, message ?: "Embedding provider unavailable")
+    private fun providerFailure(code: EmbeddingJobErrorCode): EmbeddingJobFailure =
+        EmbeddingJobFailure.fromUntrustedMessage(code, "")
+
+    private fun logProviderFailure(outcome: EmbeddingJobOutcome) {
+        logger.atWarn()
+            .addKeyValue("event", "embedding_job_provider_failure")
+            .addKeyValue("outcome", outcome.name.lowercase())
+            .log("Embedding job provider failure")
+    }
 
     private fun retryDelay(attemptCount: Int): java.time.Duration {
         var delay = properties.initialRetryDelay
@@ -208,18 +236,19 @@ class EmbeddingJobWorker(
     }
 
     private fun markInvalidChunk(job: EmbeddingJob) {
-        embeddingJobStore.markPermanentlyFailed(
+        val transitioned = embeddingJobStore.markPermanentlyFailed(
             jobId = job.id,
             owner = owner,
             leaseGeneration = job.leaseGeneration,
-            failure = EmbeddingJobFailure.fromUntrustedMessage(
-                EmbeddingJobErrorCode.CONTENT_INVALID,
-                "Document chunk is invalid",
-            ),
+            failure = EmbeddingJobFailure.fromUntrustedMessage(EmbeddingJobErrorCode.CONTENT_INVALID, ""),
         )
+        if (transitioned != null) {
+            observability.recordJobOutcome(EmbeddingJobOutcome.PERMANENTLY_FAILED)
+        }
     }
 
     private companion object {
         const val NORMALIZATION_TOLERANCE = 0.001
+        val logger = LoggerFactory.getLogger(EmbeddingJobWorker::class.java)
     }
 }

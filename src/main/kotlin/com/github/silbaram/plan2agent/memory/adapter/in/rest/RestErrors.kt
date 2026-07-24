@@ -65,8 +65,33 @@ class RestExceptionHandler {
         ResponseEntity.status(status).body(
             RestErrorResponse(
                 error = code,
-                message = exception.message ?: status.reasonPhrase,
+                message = safeMessage(code, status, exception),
                 status = status.value(),
             ),
         )
+
+    /**
+     * API errors can be caused by provider exceptions and malformed input. Do not reflect exception
+     * messages because they can contain raw provider bodies, credentials, local paths or content.
+     */
+    private fun safeMessage(code: String, status: HttpStatus, exception: Exception): String =
+        when (code) {
+            "embedding_provider_not_configured" -> "Embedding provider is not configured"
+            "embedding_provider_unavailable" -> "Embedding provider is unavailable"
+            "auth_error" -> "Authentication failed"
+            "not_found" -> "Requested resource was not found"
+            else -> exception.message
+                ?.takeIf { message -> message.isSafeForApi() }
+                ?: status.reasonPhrase
+        }
+
+    private fun String.isSafeForApi(): Boolean =
+        isNotBlank() && SENSITIVE_ERROR_TEXT.containsMatchIn(this).not()
+
+    private companion object {
+        /** Blocks common provider response, credential, stack-trace and filesystem disclosures. */
+        val SENSITIVE_ERROR_TEXT = Regex(
+            pattern = "(?i)(?:[\\r\\n]|credential|password|authorization|bearer\\s+|token[=:]|file:|/private/|/users/|/home/|\\bat\\s+[^\\s]+\\([^)]*:\\d+\\))",
+        )
+    }
 }

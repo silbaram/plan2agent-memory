@@ -2,6 +2,10 @@
 
 package com.github.silbaram.plan2agent.memory.adapter.out.postgres
 
+import com.github.silbaram.plan2agent.memory.application.observability.EmbeddingInferenceOperation
+import com.github.silbaram.plan2agent.memory.application.observability.EmbeddingJobOutcome
+import com.github.silbaram.plan2agent.memory.application.observability.EmbeddingObservability
+import com.github.silbaram.plan2agent.memory.application.observability.EmbeddingProviderInitializationOutcome
 import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactGraphStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactQueryPort
 import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingProfileResolutionException
@@ -650,9 +654,16 @@ class PostgresStorageIntegrationTest {
             initialRetryDelay = java.time.Duration.ofSeconds(5),
             maxRetryDelay = java.time.Duration.ofSeconds(12),
         )
+        val observability = RecordingEmbeddingObservability()
 
         try {
-            val worker = newEmbeddingWorker(fake, executor, properties, Clock.fixed(now, ZoneOffset.UTC))
+            val worker = newEmbeddingWorker(
+                fake,
+                executor,
+                properties,
+                Clock.fixed(now, ZoneOffset.UTC),
+                observability,
+            )
             worker.poll()
             assertThat(embeddingJobStore.findById(jobId)).extracting(
                 { it?.status },
@@ -693,8 +704,18 @@ class PostgresStorageIntegrationTest {
                 EmbeddingJobStatus.PERMANENTLY_FAILED,
                 4,
                 EmbeddingJobErrorCode.MAX_ATTEMPTS_EXHAUSTED,
-                "Embedding provider remained unavailable after 4 attempts",
+                "Embedding job retry limit was reached",
             )
+            assertThat(observability.jobOutcomes).containsExactly(
+                EmbeddingJobOutcome.RETRYING,
+                EmbeddingJobOutcome.RETRYING,
+                EmbeddingJobOutcome.RETRYING,
+                EmbeddingJobOutcome.PERMANENTLY_FAILED,
+            )
+            assertThat(observability.inferenceOperations)
+                .containsOnly(EmbeddingInferenceOperation.DOCUMENT)
+                .hasSize(4)
+            assertThat(observability.statusRefreshCount).isEqualTo(4)
         } finally {
             executor.shutdownNow()
             executor.awaitTermination(10, TimeUnit.SECONDS)
@@ -2155,6 +2176,7 @@ class PostgresStorageIntegrationTest {
         executor: java.util.concurrent.ExecutorService,
         properties: EmbeddingWorkerProperties = EmbeddingWorkerProperties(),
         clock: Clock = Clock.systemUTC(),
+        observability: EmbeddingObservability = EmbeddingObservability.noop,
     ): EmbeddingJobWorker =
         EmbeddingJobWorker(
             embeddingPort = embeddingPort,
@@ -2170,7 +2192,29 @@ class PostgresStorageIntegrationTest {
             properties = properties,
             workerExecutor = executor,
             clock = clock,
+            observability = observability,
         )
+
+    private class RecordingEmbeddingObservability : EmbeddingObservability {
+        val jobOutcomes = mutableListOf<EmbeddingJobOutcome>()
+        val inferenceOperations = mutableListOf<EmbeddingInferenceOperation>()
+        var statusRefreshCount = 0
+
+        override fun recordProviderInitialization(outcome: EmbeddingProviderInitializationOutcome) = Unit
+
+        override fun recordJobOutcome(outcome: EmbeddingJobOutcome) {
+            jobOutcomes += outcome
+        }
+
+        override fun <T> recordInference(operation: EmbeddingInferenceOperation, block: () -> T): T {
+            inferenceOperations += operation
+            return block()
+        }
+
+        override fun refreshJobStatusCounts() {
+            statusRefreshCount += 1
+        }
+    }
 
     private fun makeEmbeddingJobDue(jobId: EmbeddingJobId) {
         jdbc.update(

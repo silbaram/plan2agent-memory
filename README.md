@@ -145,7 +145,7 @@ curl -H 'X-P2A-Local-Token: local-dev-token' \
 ```json
 {
   "error": "auth_error",
-  "message": "Missing or invalid local API token",
+  "message": "Authentication failed",
   "status": 401
 }
 ```
@@ -533,6 +533,13 @@ Keyword, semantic, hybrid hit는 모두 `lineage`, `sourceIds`, `sourceReference
 
 - `p2a.memory.search.calls`, `p2a.memory.search.duration`
 - `p2a.memory.write.calls`, `p2a.memory.write.duration`
+- `p2a.embedding.provider.state` — `state=not_configured|initializing|ready|unavailable` one-hot gauge
+- `p2a.embedding.provider.initialization` — `outcome=ready|unavailable|not_configured` counter
+- `p2a.embedding.jobs` — `status=pending|running|retrying|succeeded|permanently_failed` durable backlog gauge
+- `p2a.embedding.jobs.outcomes` — `outcome=succeeded|retrying|permanently_failed` counter
+- `p2a.embedding.inference` — `operation=query|document`, `outcome=succeeded|not_configured|unavailable|contract_invalid` latency timer
+
+embedding custom metric의 tag는 위 고정 enum만 사용합니다. query text, chunk/job ID, content, provider 응답 body, credential, file path는 tag·metric name·structured log에 넣지 않습니다. provider가 `UNAVAILABLE`이어도 기본 `/actuator/health/liveness`, `/actuator/health/readiness`를 DOWN으로 만들지 않으며, semantic/hybrid만 `embedding_provider_unavailable` 503으로 구분해 반환합니다.
 
 ## Idempotency와 versioning
 
