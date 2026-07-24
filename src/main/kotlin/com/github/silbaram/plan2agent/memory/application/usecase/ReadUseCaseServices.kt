@@ -95,16 +95,25 @@ class ReadUseCaseService(
         validateMetadataFilters(query.metadataFilters, "HybridSearchQuery")
         validateOptionalCursor(query.cursor, "HybridSearchQuery")
 
-        val vectorMatches = semanticSearchUseCase.semanticSearch(query.toSemanticSearchQuery()).items
+        val activeEmbeddingSetId = semanticSearchUseCase.activeEmbeddingSetId()
+        val requestFingerprint = SearchRequestCursor.hybridFingerprint(query, activeEmbeddingSetId)
+        val continuationKey = query.cursor?.let { SearchRequestCursor.decode(it, requestFingerprint) }
+        val vectorMatches = semanticSearchUseCase.semanticSearch(
+            query.toSemanticSearchQuery(),
+            activeEmbeddingSetId,
+        ).items
         val keywordMatches = keywordSearchPort.search(query.toKeywordSearchQuery()).items
 
         val fused = fuseByReciprocalRank(keywordMatches, vectorMatches, query.rrfK)
-        val afterCursor = query.cursor?.let(::decodeHybridCursor)
+        val afterCursor = continuationKey?.let(::decodeHybridCursor)
             ?.let { cursor -> fused.filter { it.isAfter(cursor) } }
             ?: fused
         val pageItems = afterCursor.take(query.limit)
         val nextCursor = if (afterCursor.size > query.limit) {
-            encodeHybridCursor(requireNotNull(pageItems.lastOrNull()).toHybridCursor())
+            SearchRequestCursor.encode(
+                requestFingerprint,
+                encodeHybridCursor(requireNotNull(pageItems.lastOrNull()).toHybridCursor()),
+            )
         } else {
             null
         }

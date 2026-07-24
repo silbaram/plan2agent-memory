@@ -9,6 +9,7 @@ import com.github.silbaram.plan2agent.memory.application.port.out.ProviderNotCon
 import com.github.silbaram.plan2agent.memory.application.port.out.ProviderUnavailableException
 import com.github.silbaram.plan2agent.memory.application.port.out.VectorSearchPort
 import com.github.silbaram.plan2agent.memory.domain.Embedding
+import com.github.silbaram.plan2agent.memory.domain.EmbeddingSetId
 import com.github.silbaram.plan2agent.memory.domain.VectorSearchMatch
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
@@ -21,7 +22,32 @@ class SemanticSearchUseCaseService(
     @Transactional(readOnly = true)
     override fun semanticSearch(query: SemanticSearchQuery): PagedResult<VectorSearchMatch> {
         validateQuery(query)
+        return semanticSearch(query, requireReadyTarget())
+    }
+
+    override fun activeEmbeddingSetId(): EmbeddingSetId =
+        requireNotNull(requireReadyTarget().embeddingSetId) { "Active embedding set must be available" }
+
+    @Transactional(readOnly = true)
+    override fun semanticSearch(
+        query: SemanticSearchQuery,
+        expectedActiveEmbeddingSetId: EmbeddingSetId,
+    ): PagedResult<VectorSearchMatch> {
         val target = requireReadyTarget()
+        require(target.embeddingSetId == expectedActiveEmbeddingSetId) {
+            "active embedding target changed during search"
+        }
+        return semanticSearch(query, target)
+    }
+
+    private fun semanticSearch(
+        query: SemanticSearchQuery,
+        target: ActiveEmbeddingTarget,
+    ): PagedResult<VectorSearchMatch> {
+        validateQuery(query)
+        val activeEmbeddingSetId = requireNotNull(target.embeddingSetId) { "Active embedding set must be available" }
+        val requestFingerprint = SearchRequestCursor.semanticFingerprint(query, activeEmbeddingSetId)
+        val continuationKey = query.cursor?.let { SearchRequestCursor.decode(it, requestFingerprint) }
         val embedding = embedQuery(query.query)
 
         if (embedding.target != target || !isUsableEmbedding(embedding.embedding, target)) {
@@ -30,7 +56,7 @@ class SemanticSearchUseCaseService(
 
         return vectorSearchPort.search(
             ActiveVectorSearchQuery(
-                embeddingSetId = requireNotNull(target.embeddingSetId) { "Active embedding set must be available" },
+                embeddingSetId = activeEmbeddingSetId,
                 embedding = embedding.embedding,
                 projectId = query.projectId,
                 iterationId = query.iterationId,
@@ -40,9 +66,15 @@ class SemanticSearchUseCaseService(
                 runId = query.runId,
                 metadataFilters = query.metadataFilters,
                 limit = query.limit,
-                cursor = query.cursor,
+                cursor = continuationKey,
             ),
         )
+            .let { result ->
+                PagedResult(
+                    items = result.items,
+                    nextCursor = result.nextCursor?.let { SearchRequestCursor.encode(requestFingerprint, it) },
+                )
+            }
     }
 
     private fun validateQuery(query: SemanticSearchQuery) {
