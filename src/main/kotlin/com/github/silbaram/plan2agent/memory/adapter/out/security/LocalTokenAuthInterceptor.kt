@@ -5,6 +5,7 @@ import com.github.silbaram.plan2agent.memory.config.LocalSecurityProperties
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.servlet.http.HttpServletResponse
 import org.springframework.stereotype.Component
+import org.springframework.util.AntPathMatcher
 import org.springframework.web.servlet.HandlerInterceptor
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer
@@ -15,6 +16,8 @@ import java.nio.charset.StandardCharsets
 class LocalTokenAuthInterceptor(
     private val properties: LocalSecurityProperties,
 ) : HandlerInterceptor {
+    private val pathMatcher = AntPathMatcher()
+
     override fun preHandle(
         request: HttpServletRequest,
         response: HttpServletResponse,
@@ -36,7 +39,7 @@ class LocalTokenAuthInterceptor(
     private fun isExcluded(request: HttpServletRequest): Boolean {
         val contextPath = request.contextPath.orEmpty()
         val requestPath = request.requestURI.removePrefix(contextPath)
-        return requestPath in properties.excludedPaths
+        return properties.excludedPaths.any { excludedPath -> pathMatcher.match(excludedPath, requestPath) }
     }
 }
 

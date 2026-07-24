@@ -17,6 +17,7 @@ import org.springframework.jdbc.core.namedparam.MapSqlParameterSource
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
 import org.springframework.stereotype.Repository
 import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 import java.sql.ResultSet
 import java.sql.Timestamp
 import java.time.Instant
@@ -288,7 +289,7 @@ class PostgresEmbeddingJobStoreAdapter(
 
     override fun findPage(query: FindEmbeddingJobsQuery): PagedResult<EmbeddingJob> =
         metrics.recordSearch("embedding_job.page") {
-            val cursor = query.cursor?.let(::decodeCursor)
+            val cursor = query.cursor?.let { decodeCursor(it, query) }
             val conditions = mutableListOf<String>()
             val params = MapSqlParameterSource().addValue("limitPlusOne", query.limit + 1)
 
@@ -323,7 +324,7 @@ class PostgresEmbeddingJobStoreAdapter(
                 params,
                 embeddingJobMapper(),
             )
-            rows.toPagedResult(query.limit)
+            rows.toPagedResult(query)
         }
 
     override fun retryFailed(jobId: EmbeddingJobId): EmbeddingJob? =
@@ -438,13 +439,20 @@ private fun embeddingJobErrorCodeFromDbValue(value: String): EmbeddingJobErrorCo
 private data class EmbeddingJobCursor(
     val createdAt: Instant,
     val id: UUID,
+    val filterFingerprint: String,
 )
 
-private fun List<EmbeddingJob>.toPagedResult(limit: Int): PagedResult<EmbeddingJob> {
-    val pageItems = take(limit)
-    val nextCursor = if (size > limit) {
+private fun List<EmbeddingJob>.toPagedResult(query: FindEmbeddingJobsQuery): PagedResult<EmbeddingJob> {
+    val pageItems = take(query.limit)
+    val nextCursor = if (size > query.limit) {
         val last = requireNotNull(pageItems.lastOrNull())
-        encodeCursor(EmbeddingJobCursor(last.createdAt, uuid(last.id.value)))
+        encodeCursor(
+            EmbeddingJobCursor(
+                createdAt = last.createdAt,
+                id = uuid(last.id.value),
+                filterFingerprint = query.filterFingerprint(),
+            ),
+        )
     } else {
         null
     }
@@ -453,18 +461,47 @@ private fun List<EmbeddingJob>.toPagedResult(limit: Int): PagedResult<EmbeddingJ
 
 private fun encodeCursor(cursor: EmbeddingJobCursor): String =
     Base64.getUrlEncoder().withoutPadding().encodeToString(
-        "${cursor.createdAt}|${cursor.id}".toByteArray(StandardCharsets.UTF_8),
+        "${EMBEDDING_JOB_CURSOR_VERSION}|${cursor.createdAt}|${cursor.id}|${cursor.filterFingerprint}"
+            .toByteArray(StandardCharsets.UTF_8),
     )
 
-private fun decodeCursor(cursor: String): EmbeddingJobCursor =
+private fun decodeCursor(cursor: String, query: FindEmbeddingJobsQuery): EmbeddingJobCursor =
     try {
         val decoded = String(Base64.getUrlDecoder().decode(cursor), StandardCharsets.UTF_8)
         val parts = decoded.split('|')
-        require(parts.size == 2) { "Embedding job cursor has an invalid format" }
-        EmbeddingJobCursor(Instant.parse(parts[0]), UUID.fromString(parts[1]))
+        require(parts.size == 4 && parts[0] == EMBEDDING_JOB_CURSOR_VERSION) {
+            "Embedding job cursor has an invalid format"
+        }
+        val parsed = EmbeddingJobCursor(
+            createdAt = Instant.parse(parts[1]),
+            id = UUID.fromString(parts[2]),
+            filterFingerprint = parts[3],
+        )
+        require(parsed.filterFingerprint == query.filterFingerprint()) {
+            "Embedding job cursor does not match current filters"
+        }
+        parsed
     } catch (failure: IllegalArgumentException) {
+        if (failure.message == "Embedding job cursor does not match current filters") {
+            throw failure
+        }
+        throw IllegalArgumentException("Embedding job cursor is invalid", failure)
+    } catch (failure: RuntimeException) {
         throw IllegalArgumentException("Embedding job cursor is invalid", failure)
     }
+
+private fun FindEmbeddingJobsQuery.filterFingerprint(): String {
+    val canonical = buildString {
+        append("statuses=")
+        append(statuses.map(EmbeddingJobStatus::toDbValue).sorted().joinToString(","))
+        append("&chunkId=")
+        append(chunkId?.value.orEmpty())
+    }
+    val bytes = MessageDigest.getInstance("SHA-256").digest(canonical.toByteArray(StandardCharsets.UTF_8))
+    return bytes.joinToString(separator = "") { byte -> "%02x".format(byte) }
+}
+
+private const val EMBEDDING_JOB_CURSOR_VERSION = "v1"
 
 private fun <T> NamedParameterJdbcTemplate.queryOne(
     sql: String,

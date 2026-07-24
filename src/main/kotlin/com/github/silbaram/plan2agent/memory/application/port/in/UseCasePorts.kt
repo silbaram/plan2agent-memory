@@ -17,12 +17,15 @@ import com.github.silbaram.plan2agent.memory.application.usecase.SaveTaskGraphCo
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveTasksCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.SemanticSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.VectorSearchQuery
+import com.github.silbaram.plan2agent.memory.application.port.out.FindEmbeddingJobsQuery
 import com.github.silbaram.plan2agent.memory.domain.ArtifactSummary
 import com.github.silbaram.plan2agent.memory.domain.ArtifactNode
 import com.github.silbaram.plan2agent.memory.domain.ArtifactTrace
 import com.github.silbaram.plan2agent.memory.domain.DocumentChunk
 import com.github.silbaram.plan2agent.memory.domain.DocumentSnapshot
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingSetId
+import com.github.silbaram.plan2agent.memory.domain.EmbeddingJob
+import com.github.silbaram.plan2agent.memory.domain.EmbeddingJobId
 import com.github.silbaram.plan2agent.memory.domain.HybridSearchMatch
 import com.github.silbaram.plan2agent.memory.domain.Iteration
 import com.github.silbaram.plan2agent.memory.domain.KeywordSearchMatch
@@ -87,6 +90,15 @@ interface SemanticSearchUseCase {
 
 interface VectorSearchUseCase {
     fun vectorSearch(query: VectorSearchQuery): PagedResult<VectorSearchMatch>
+}
+
+/** Read and recovery boundary for localhost-only embedding job operations. */
+interface EmbeddingJobManagementUseCase {
+    fun findEmbeddingJobs(query: FindEmbeddingJobsQuery): PagedResult<EmbeddingJob>
+
+    fun findEmbeddingJob(jobId: EmbeddingJobId): EmbeddingJob
+
+    fun retryEmbeddingJob(jobId: EmbeddingJobId): EmbeddingJob
 }
 
 interface HybridSearchUseCase {

@@ -572,6 +572,96 @@ class ApiIntegrationTest {
     }
 
     @Test
+    fun `embedding job APIs list detail and retry only sanitized operational state`() {
+        val firstPending = saveEmbeddingJobFixture("embedding-jobs-first-pending")
+        val secondPending = saveEmbeddingJobFixture("embedding-jobs-second-pending")
+        val permanentlyFailed = saveEmbeddingJobFixture("embedding-jobs-permanently-failed")
+        val running = saveEmbeddingJobFixture("embedding-jobs-running")
+        val retrying = saveEmbeddingJobFixture("embedding-jobs-retrying")
+        val succeeded = saveEmbeddingJobFixture("embedding-jobs-succeeded")
+
+        updateEmbeddingJobStatus(
+            permanentlyFailed,
+            "permanently_failed",
+            "raw chunk content with token=private-token at file:///Users/private/models/model.onnx",
+        )
+        updateEmbeddingJobStatus(running, "running")
+        updateEmbeddingJobStatus(retrying, "retrying")
+        updateEmbeddingJobStatus(succeeded, "succeeded")
+
+        val firstPage = getWithoutToken("/api/embedding-jobs?status=pending&limit=1")
+            .andExpect(status().isOk())
+            .andReturnJson()
+        assertThat(firstPage["items"].size()).isEqualTo(1)
+        val firstPageJobId = firstPage["items"].single()["jobId"].asText()
+        val pendingCursor = firstPage["nextCursor"].asText()
+        assertThat(pendingCursor).isNotBlank()
+
+        val secondPage = getWithoutToken("/api/embedding-jobs?status=pending&limit=1&cursor=$pendingCursor")
+            .andExpect(status().isOk())
+            .andReturnJson()
+        assertThat(secondPage["items"].single()["jobId"].asText()).isNotEqualTo(firstPageJobId)
+        assertThat(setOf(firstPending.jobId, secondPending.jobId)).contains(firstPageJobId)
+
+        getWithoutToken("/api/embedding-jobs?status=retrying&limit=1&cursor=$pendingCursor")
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.error").value("validation_error"))
+        getWithoutToken("/api/embedding-jobs?status=pending&chunkId=${firstPending.chunkId}&limit=1&cursor=$pendingCursor")
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.error").value("validation_error"))
+
+        val chunkFiltered = getWithoutToken("/api/embedding-jobs?chunkId=${permanentlyFailed.chunkId}")
+            .andExpect(status().isOk())
+            .andReturnJson()
+        assertThat(chunkFiltered["items"].single()["jobId"].asText()).isEqualTo(permanentlyFailed.jobId)
+
+        getWithoutToken("/api/embedding-jobs?status=unsupported")
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.error").value("validation_error"))
+        getWithoutToken("/api/embedding-jobs?limit=201")
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.error").value("validation_error"))
+
+        val detail = getWithoutToken("/api/embedding-jobs/${permanentlyFailed.jobId}")
+            .andExpect(status().isOk())
+            .andReturnJson()
+        assertThat(detail["jobId"].asText()).isEqualTo(permanentlyFailed.jobId)
+        assertThat(detail["status"].asText()).isEqualTo("permanently_failed")
+        assertThat(detail["lastErrorCode"].asText()).isEqualTo("content_invalid")
+        assertThat(detail["sanitizedLastErrorMessage"].asText()).isEqualTo("Document chunk is invalid")
+        assertThat(detail.toString())
+            .doesNotContain("private-token", "file:///Users/private", "raw chunk content")
+        assertThat(detail.has("leaseOwner")).isFalse()
+        assertThat(detail.has("content")).isFalse()
+
+        val retried = postWithoutToken("/api/embedding-jobs/${permanentlyFailed.jobId}/retry")
+            .andExpect(status().isOk())
+            .andReturnJson()
+        assertThat(retried["status"].asText()).isEqualTo("pending")
+        assertThat(retried["attemptCount"].asInt()).isZero()
+        assertThat(retried["nextAttemptAt"].asText()).isNotBlank()
+        assertThat(retried["leaseExpiresAt"].isNull).isTrue()
+        assertThat(retried["lastErrorCode"].isNull).isTrue()
+        assertThat(retried["sanitizedLastErrorMessage"].isNull).isTrue()
+
+        postWithoutToken("/api/embedding-jobs/${permanentlyFailed.jobId}/retry")
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.status").value("pending"))
+        postWithoutToken("/api/embedding-jobs/${running.jobId}/retry")
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.status").value("running"))
+        postWithoutToken("/api/embedding-jobs/${retrying.jobId}/retry")
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.status").value("retrying"))
+        postWithoutToken("/api/embedding-jobs/${succeeded.jobId}/retry")
+            .andExpect(status().isConflict())
+            .andExpect(jsonPath("$.error").value("conflict"))
+        postWithoutToken("/api/embedding-jobs/${uuid("embedding-job-missing")}/retry")
+            .andExpect(status().isNotFound())
+            .andExpect(jsonPath("$.error").value("not_found"))
+    }
+
+    @Test
     fun `compose smoke path is configured and actuator health reports database connectivity`() {
         val compose = Path.of("compose.yaml").toFile().readText()
         val application = Path.of("src/main/resources/application.yml").toFile().readText()
@@ -581,7 +671,7 @@ class ApiIntegrationTest {
             "POSTGRES_DB: p2a_artifact_store",
             "POSTGRES_USER: p2a",
             "POSTGRES_PASSWORD: p2a_local_password",
-            "\"5432:5432\"",
+            "\"127.0.0.1:5432:5432\"",
             "pg_isready -U p2a -d p2a_artifact_store",
         )
         assertThat(application).contains(
@@ -614,6 +704,67 @@ class ApiIntegrationTest {
         postJson("/api/document-chunks/bulk", fixture.chunksBody()).andExpect(status().isCreated())
     }
 
+    private fun saveEmbeddingJobFixture(scope: String): EmbeddingJobFixture {
+        val fixture = ApiFixture(scope)
+        saveSyncFixture(fixture)
+        val jobId = requireNotNull(
+            jdbc.queryForObject(
+                "SELECT embedding_job_id::text FROM embedding_jobs WHERE chunk_id = ?",
+                String::class.java,
+                UUID.fromString(fixture.chunkId),
+            ),
+        )
+        return EmbeddingJobFixture(jobId = jobId, chunkId = fixture.chunkId)
+    }
+
+    private fun updateEmbeddingJobStatus(
+        job: EmbeddingJobFixture,
+        status: String,
+        errorMessage: String? = null,
+    ) {
+        val sql = when (status) {
+            "running" ->
+                """
+                UPDATE embedding_jobs
+                SET status = 'running', attempt_count = 1, next_attempt_at = now(),
+                    lease_owner = 'api-integration-test', lease_expires_at = now() + interval '5 minutes',
+                    last_error_code = NULL, last_error_message = NULL, completed_at = NULL, updated_at = now()
+                WHERE embedding_job_id = ?
+                """.trimIndent()
+            "retrying" ->
+                """
+                UPDATE embedding_jobs
+                SET status = 'retrying', attempt_count = 2, next_attempt_at = now() + interval '1 minute',
+                    lease_owner = NULL, lease_expires_at = NULL,
+                    last_error_code = 'provider_unavailable', last_error_message = 'Provider unavailable',
+                    completed_at = NULL, updated_at = now()
+                WHERE embedding_job_id = ?
+                """.trimIndent()
+            "succeeded" ->
+                """
+                UPDATE embedding_jobs
+                SET status = 'succeeded', attempt_count = 1, next_attempt_at = now(),
+                    lease_owner = NULL, lease_expires_at = NULL,
+                    last_error_code = NULL, last_error_message = NULL, completed_at = now(), updated_at = now()
+                WHERE embedding_job_id = ?
+                """.trimIndent()
+            "permanently_failed" ->
+                """
+                UPDATE embedding_jobs
+                SET status = 'permanently_failed', attempt_count = 3, next_attempt_at = now(),
+                    lease_owner = NULL, lease_expires_at = NULL,
+                    last_error_code = 'content_invalid', last_error_message = ?, completed_at = now(), updated_at = now()
+                WHERE embedding_job_id = ?
+                """.trimIndent()
+            else -> error("Unsupported embedding job test status: $status")
+        }
+        if (status == "permanently_failed") {
+            jdbc.update(sql, requireNotNull(errorMessage), UUID.fromString(job.jobId))
+        } else {
+            jdbc.update(sql, UUID.fromString(job.jobId))
+        }
+    }
+
     private fun getWithoutToken(path: String) =
         mockMvc.perform(getRequest(path).accept(MediaType.APPLICATION_JSON))
 
@@ -631,6 +782,12 @@ class ApiIntegrationTest {
                 .contentType(MediaType.APPLICATION_JSON)
                 .accept(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(body)),
+        )
+
+    private fun postWithoutToken(path: String) =
+        mockMvc.perform(
+            postRequest(path)
+                .accept(MediaType.APPLICATION_JSON),
         )
 
     private fun org.springframework.test.web.servlet.ResultActions.expectCreatedJson(): JsonNode =
@@ -699,6 +856,11 @@ class ApiIntegrationTest {
 }
 
 class ApiPgVectorContainer(imageName: DockerImageName) : PostgreSQLContainer<ApiPgVectorContainer>(imageName)
+
+private data class EmbeddingJobFixture(
+    val jobId: String,
+    val chunkId: String,
+)
 
 private data class ApiFixture(
     val scope: String,

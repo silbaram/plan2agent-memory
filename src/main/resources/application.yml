@@ -48,6 +48,7 @@ p2a:
       - /api/**
     excluded-paths:
       - /api/health
+      - /api/embedding-jobs/**
       - /actuator/health
       - /actuator/metrics
       - /actuator/metrics/**
