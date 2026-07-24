@@ -22,6 +22,7 @@ import com.github.silbaram.plan2agent.memory.domain.ArtifactNode
 import com.github.silbaram.plan2agent.memory.domain.ArtifactTrace
 import com.github.silbaram.plan2agent.memory.domain.DocumentChunk
 import com.github.silbaram.plan2agent.memory.domain.DocumentSnapshot
+import com.github.silbaram.plan2agent.memory.domain.EmbeddingSetId
 import com.github.silbaram.plan2agent.memory.domain.HybridSearchMatch
 import com.github.silbaram.plan2agent.memory.domain.Iteration
 import com.github.silbaram.plan2agent.memory.domain.KeywordSearchMatch
@@ -69,6 +70,19 @@ interface KeywordSearchUseCase {
 
 interface SemanticSearchUseCase {
     fun semanticSearch(query: SemanticSearchQuery): PagedResult<VectorSearchMatch>
+
+    /** Internal handoff for hybrid search so its fingerprint and semantic arm use one exact target. */
+    fun activeEmbeddingSetId(): EmbeddingSetId =
+        throw UnsupportedOperationException("Active embedding target is not available")
+
+    /**
+     * Searches only when the active target remains the one used to bind the caller's cursor.
+     */
+    fun semanticSearch(
+        query: SemanticSearchQuery,
+        expectedActiveEmbeddingSetId: EmbeddingSetId,
+    ): PagedResult<VectorSearchMatch> =
+        throw UnsupportedOperationException("Active embedding target cannot be pinned")
 }
 
 interface VectorSearchUseCase {

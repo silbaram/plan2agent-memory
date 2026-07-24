@@ -11,8 +11,11 @@ import com.github.silbaram.plan2agent.memory.application.port.`in`.KeywordSearch
 import com.github.silbaram.plan2agent.memory.application.port.`in`.SemanticSearchUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.TraceArtifactGraphUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.VectorSearchUseCase
+import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingTarget
+import com.github.silbaram.plan2agent.memory.application.port.out.ActiveVectorSearchQuery
 import com.github.silbaram.plan2agent.memory.application.port.out.ProviderNotConfiguredException
 import com.github.silbaram.plan2agent.memory.application.port.out.ProviderUnavailableException
+import com.github.silbaram.plan2agent.memory.application.port.out.VectorSearchPort
 import com.github.silbaram.plan2agent.memory.application.usecase.FindArtifactsQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.DEFAULT_RRF_K
 import com.github.silbaram.plan2agent.memory.application.usecase.GraphNodeSearchQuery
@@ -21,6 +24,7 @@ import com.github.silbaram.plan2agent.memory.application.usecase.HybridSearchQue
 import com.github.silbaram.plan2agent.memory.application.usecase.KeywordSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.PagedResult
 import com.github.silbaram.plan2agent.memory.application.usecase.SemanticSearchQuery
+import com.github.silbaram.plan2agent.memory.application.usecase.SemanticSearchUseCaseService
 import com.github.silbaram.plan2agent.memory.application.usecase.VectorSearchQuery
 import com.github.silbaram.plan2agent.memory.domain.ArtifactSummary
 import com.github.silbaram.plan2agent.memory.domain.ArtifactNode
@@ -32,6 +36,7 @@ import com.github.silbaram.plan2agent.memory.domain.DistanceMetric
 import com.github.silbaram.plan2agent.memory.domain.DocumentChunkId
 import com.github.silbaram.plan2agent.memory.domain.DocumentId
 import com.github.silbaram.plan2agent.memory.domain.Embedding
+import com.github.silbaram.plan2agent.memory.domain.EmbeddingSetId
 import com.github.silbaram.plan2agent.memory.domain.HybridSearchArm
 import com.github.silbaram.plan2agent.memory.domain.HybridSearchMatch
 import com.github.silbaram.plan2agent.memory.domain.IterationId
@@ -46,7 +51,9 @@ import com.github.silbaram.plan2agent.memory.domain.SourceRunId
 import com.github.silbaram.plan2agent.memory.domain.SourceTaskGraphId
 import com.github.silbaram.plan2agent.memory.domain.SourceTaskId
 import com.github.silbaram.plan2agent.memory.domain.TaskId
+import com.github.silbaram.plan2agent.memory.domain.V2EmbeddingProfile
 import com.github.silbaram.plan2agent.memory.domain.VectorSearchMatch
+import com.github.silbaram.plan2agent.memory.support.FakeEmbeddingPort
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
@@ -454,6 +461,44 @@ class QueryRestControllerTest {
             )
         }
             .isInstanceOf(UnrecognizedPropertyException::class.java)
+    }
+
+    @Test
+    fun `semantic request-bound cursor failures return validation error responses`() {
+        val boundSemanticSearch = SemanticSearchUseCaseService(
+            FakeEmbeddingPort(
+                activeEmbeddingTarget = ActiveEmbeddingTarget(
+                    profile = V2EmbeddingProfile.fixed,
+                    embeddingSetId = EmbeddingSetId("active-v2-set"),
+                ),
+            ),
+            object : VectorSearchPort {
+                override fun search(query: VectorSearchQuery): PagedResult<VectorSearchMatch> = PagedResult(emptyList())
+
+                override fun search(query: ActiveVectorSearchQuery): PagedResult<VectorSearchMatch> = PagedResult(emptyList())
+            },
+        )
+        val strictController = QueryRestController(
+            findArtifactsUseCase = findArtifacts,
+            keywordSearchUseCase = keywordSearch,
+            semanticSearchUseCase = boundSemanticSearch,
+            vectorSearchUseCase = vectorSearch,
+            hybridSearchUseCase = hybridSearch,
+            findArtifactGraphNodesUseCase = findGraphNodes,
+            traceArtifactGraphUseCase = traceGraph,
+        )
+        val mockMvc = MockMvcBuilders.standaloneSetup(strictController)
+            .setControllerAdvice(RestExceptionHandler())
+            .setMessageConverters(MappingJackson2HttpMessageConverter(JacksonObjectMapperConfig().objectMapper()))
+            .build()
+
+        mockMvc.perform(
+            post("/api/search/semantic")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""{"q":"decision","cursor":"legacy-unbound-cursor"}"""),
+        )
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.error").value("validation_error"))
     }
 
     @Test

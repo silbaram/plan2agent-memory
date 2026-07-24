@@ -36,6 +36,7 @@ class SemanticSearchUseCaseServiceTest {
     fun `embeds q and searches the exact active target with every retrieval filter`() {
         val queryEmbedding = List(V2EmbeddingProfile.fixed.dimension) { index -> if (index == 0) 1f else 0f }
         embeddingPort.configureEmbedding(FakeEmbeddingMode.QUERY, "결제 취소 정책", queryEmbedding)
+        vectorSearch.result = PagedResult(emptyList(), nextCursor = "raw-vector-cursor")
         val query = SemanticSearchQuery(
             query = "결제 취소 정책",
             projectId = ProjectId("project-1"),
@@ -46,7 +47,6 @@ class SemanticSearchUseCaseServiceTest {
             runId = RunId("run-1"),
             metadataFilters = mapOf("phase" to "gate-d"),
             limit = 5,
-            cursor = "semantic-cursor",
         )
 
         val result = service.semanticSearch(query)
@@ -64,10 +64,58 @@ class SemanticSearchUseCaseServiceTest {
                 runId = query.runId,
                 metadataFilters = query.metadataFilters,
                 limit = query.limit,
-                cursor = query.cursor,
+                cursor = null,
             ),
         )
-        assertThat(result).isEqualTo(vectorSearch.result)
+        assertThat(result.items).isEqualTo(vectorSearch.result.items)
+        assertThat(
+            SearchRequestCursor.decode(
+                requireNotNull(result.nextCursor),
+                SearchRequestCursor.semanticFingerprint(query, requireNotNull(target.embeddingSetId)),
+            ),
+        ).isEqualTo("raw-vector-cursor")
+    }
+
+    @Test
+    fun `rejects legacy unbound cursors before provider inference`() {
+        assertThatThrownBy {
+            service.semanticSearch(SemanticSearchQuery(query = "결제 취소 정책", cursor = "raw-vector-cursor"))
+        }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessage("cursor has invalid format")
+
+        assertThat(embeddingPort.requests).isEmpty()
+        assertThat(vectorSearch.activeQuery).isNull()
+    }
+
+    @Test
+    fun `rejects a cursor bound to different semantic request before provider inference`() {
+        val originalQuery = SemanticSearchQuery(query = "결제 취소 정책")
+        val cursor = SearchRequestCursor.encode(
+            SearchRequestCursor.semanticFingerprint(originalQuery, requireNotNull(target.embeddingSetId)),
+            "raw-vector-cursor",
+        )
+
+        assertThatThrownBy {
+            service.semanticSearch(SemanticSearchQuery(query = "다른 정책", cursor = cursor))
+        }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessage("cursor does not match this request")
+
+        assertThat(embeddingPort.requests).isEmpty()
+        assertThat(vectorSearch.activeQuery).isNull()
+    }
+
+    @Test
+    fun `fails closed when a pinned active target no longer matches`() {
+        assertThatThrownBy {
+            service.semanticSearch(SemanticSearchQuery(query = "결제 취소 정책"), EmbeddingSetId("changed-active-set"))
+        }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessage("active embedding target changed during search")
+
+        assertThat(embeddingPort.requests).isEmpty()
+        assertThat(vectorSearch.activeQuery).isNull()
     }
 
     @Test

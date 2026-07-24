@@ -429,6 +429,48 @@ class ReadUseCaseServiceTest {
     }
 
     @Test
+    fun `hybrid cursor permits page limit and metadata ordering changes but rejects fusion changes`() {
+        val firstChunk = DocumentChunkId(uuid(17))
+        val secondChunk = DocumentChunkId(uuid(18))
+        val thirdChunk = DocumentChunkId(uuid(19))
+        keywordSearch.result = PagedResult(
+            items = listOf(
+                keywordMatch(firstChunk, score = 3.0),
+                keywordMatch(secondChunk, score = 2.0),
+                keywordMatch(thirdChunk, score = 1.0),
+            ),
+        )
+        vectorSearch.activeResult = PagedResult(emptyList())
+        val query = HybridSearchQuery(
+            query = "decision",
+            metadataFilters = linkedMapOf("phase" to "gate-d", "owner" to "memory"),
+            candidateLimit = 3,
+            limit = 1,
+        )
+
+        val firstPage = service.hybridSearch(query)
+        val secondPage = service.hybridSearch(
+            query.copy(
+                metadataFilters = linkedMapOf("owner" to "memory", "phase" to "gate-d"),
+                limit = 2,
+                cursor = requireNotNull(firstPage.nextCursor),
+            ),
+        )
+
+        assertThat(secondPage.items.map { it.chunkId }).containsExactly(secondChunk, thirdChunk)
+        assertThatThrownBy {
+            service.hybridSearch(query.copy(rrfK = 61, cursor = requireNotNull(firstPage.nextCursor)))
+        }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessage("cursor does not match this request")
+        assertThatThrownBy {
+            service.hybridSearch(query.copy(candidateLimit = 4, cursor = requireNotNull(firstPage.nextCursor)))
+        }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessage("cursor does not match this request")
+    }
+
+    @Test
     fun `hybrid search rejects malformed cursor`() {
         assertThatThrownBy {
             service.hybridSearch(
