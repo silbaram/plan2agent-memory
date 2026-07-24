@@ -6,7 +6,6 @@ import com.github.silbaram.plan2agent.memory.application.port.`in`.TraceArtifact
 import com.github.silbaram.plan2agent.memory.application.port.`in`.HybridSearchUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.KeywordSearchUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.SemanticSearchUseCase
-import com.github.silbaram.plan2agent.memory.application.port.`in`.VectorSearchUseCase
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.RequestBody
@@ -20,7 +19,6 @@ class QueryRestController(
     private val findArtifactsUseCase: FindArtifactsUseCase,
     private val keywordSearchUseCase: KeywordSearchUseCase,
     private val semanticSearchUseCase: SemanticSearchUseCase,
-    private val vectorSearchUseCase: VectorSearchUseCase,
     private val hybridSearchUseCase: HybridSearchUseCase,
     private val findArtifactGraphNodesUseCase: FindArtifactGraphNodesUseCase,
     private val traceArtifactGraphUseCase: TraceArtifactGraphUseCase,
@@ -112,10 +110,6 @@ class QueryRestController(
         @RequestParam(required = false) maxDepth: Int?,
     ): ArtifactTraceResponse =
         traceArtifactGraphUseCase.traceGraph(graphTraceQuery(projectId, naturalKey, iterationId, direction, maxDepth)).toResponse()
-
-    @PostMapping("/search/vector")
-    fun vectorSearch(@RequestBody request: VectorSearchRequest): PagedResponse<VectorSearchResponse> =
-        vectorSearchUseCase.vectorSearch(request.toQuery()).toRestPage { it.toResponse() }
 
     @PostMapping("/search/semantic")
     fun semanticSearch(@RequestBody request: SemanticSearchRequest): PagedResponse<VectorSearchResponse> =

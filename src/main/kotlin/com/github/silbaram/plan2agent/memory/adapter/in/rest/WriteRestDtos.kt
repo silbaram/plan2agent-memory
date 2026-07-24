@@ -14,15 +14,10 @@ import com.github.silbaram.plan2agent.memory.domain.ArtifactRef
 import com.github.silbaram.plan2agent.memory.domain.ArtifactType
 import com.github.silbaram.plan2agent.memory.domain.CanonicalServerId
 import com.github.silbaram.plan2agent.memory.domain.ContentHash
-import com.github.silbaram.plan2agent.memory.domain.DistanceMetric
 import com.github.silbaram.plan2agent.memory.domain.DocumentChunk
 import com.github.silbaram.plan2agent.memory.domain.DocumentChunkId
 import com.github.silbaram.plan2agent.memory.domain.DocumentId
 import com.github.silbaram.plan2agent.memory.domain.DocumentSnapshot
-import com.github.silbaram.plan2agent.memory.domain.Embedding
-import com.github.silbaram.plan2agent.memory.domain.EmbeddingSet
-import com.github.silbaram.plan2agent.memory.domain.EmbeddingSetId
-import com.github.silbaram.plan2agent.memory.domain.EmbeddingStorageType
 import com.github.silbaram.plan2agent.memory.domain.Iteration
 import com.github.silbaram.plan2agent.memory.domain.IterationId
 import com.github.silbaram.plan2agent.memory.domain.IterationStatus
@@ -285,9 +280,6 @@ data class DocumentChunksBulkWriteRequest(
 
 data class DocumentChunkWriteRequest(
     val chunk: DocumentChunkRequest? = null,
-    val embeddingSet: EmbeddingSetRequest? = null,
-    val embedding: List<Float>? = null,
-    val embeddingHash: String? = null,
 )
 
 data class DocumentChunkRequest(
@@ -303,18 +295,6 @@ data class DocumentChunkRequest(
     val chunkHash: String? = null,
     val tokenEstimate: Int? = null,
     val sourceReference: SourceReferenceDto? = null,
-    val createdAt: Instant? = null,
-    val metadata: Map<String, String> = emptyMap(),
-)
-
-data class EmbeddingSetRequest(
-    val embeddingSetId: String? = null,
-    val projectId: String? = null,
-    val embeddingModel: String? = null,
-    val embeddingDimension: Int? = null,
-    val embeddingVersion: String? = null,
-    val distanceMetric: String? = null,
-    val storageType: String? = null,
     val createdAt: Instant? = null,
     val metadata: Map<String, String> = emptyMap(),
 )
@@ -604,20 +584,7 @@ private fun TaskWriteRequest.toDomain(): Task =
 
 private fun DocumentChunkWriteRequest.toDomain(documentId: DocumentId): DocumentChunkWrite {
     val chunk = requireNotNull(chunk) { "chunk is required" }.toDomain(documentId)
-    val hasEmbeddingSet = embeddingSet != null
-    val hasEmbedding = embedding != null
-    require(hasEmbeddingSet == hasEmbedding) { "embeddingSet and embedding must be supplied together" }
-    val embeddingValues = embedding?.let { values ->
-        require(values.isNotEmpty()) { "embedding must not be empty" }
-        require(values.all { it.isFinite() }) { "embedding values must be finite" }
-        Embedding(values)
-    }
-    return DocumentChunkWrite(
-        chunk = chunk,
-        embeddingSet = embeddingSet?.toDomain(defaultProjectId = chunk.projectId),
-        embedding = embeddingValues,
-        embeddingHash = embeddingHash?.trim()?.takeIf(String::isNotEmpty)?.let(::ContentHash),
-    )
+    return DocumentChunkWrite(chunk = chunk)
 }
 
 private fun DocumentChunkRequest.toDomain(documentId: DocumentId): DocumentChunk =
@@ -635,19 +602,6 @@ private fun DocumentChunkRequest.toDomain(documentId: DocumentId): DocumentChunk
         chunkHash = ContentHash(requireText(chunkHash, "chunkHash")),
         tokenEstimate = tokenEstimate,
         sourceReference = sourceReference.toDomainSourceReference(),
-        createdAt = createdAt ?: Instant.now(),
-        metadata = metadata,
-    )
-
-private fun EmbeddingSetRequest.toDomain(defaultProjectId: ProjectId): EmbeddingSet =
-    EmbeddingSet(
-        id = EmbeddingSetId(requireText(embeddingSetId, "embeddingSetId")),
-        projectId = projectId?.trim()?.takeIf(String::isNotEmpty)?.let(::ProjectId) ?: defaultProjectId,
-        embeddingModel = requireText(embeddingModel, "embeddingModel"),
-        embeddingDimension = requireNotNull(embeddingDimension) { "embeddingDimension is required" },
-        embeddingVersion = requireText(embeddingVersion, "embeddingVersion"),
-        distanceMetric = parseRequiredEnum(distanceMetric ?: DistanceMetric.COSINE.name, "distanceMetric"),
-        storageType = parseRequiredEnum(storageType ?: EmbeddingStorageType.VECTOR_INDEX.name, "storageType"),
         createdAt = createdAt ?: Instant.now(),
         metadata = metadata,
     )

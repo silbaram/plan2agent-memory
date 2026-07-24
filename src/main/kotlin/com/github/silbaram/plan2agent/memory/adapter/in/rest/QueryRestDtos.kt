@@ -10,13 +10,10 @@ import com.github.silbaram.plan2agent.memory.application.usecase.GraphTraceQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.KeywordSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.PagedResult
 import com.github.silbaram.plan2agent.memory.application.usecase.SemanticSearchQuery
-import com.github.silbaram.plan2agent.memory.application.usecase.VectorSearchQuery
 import com.github.silbaram.plan2agent.memory.domain.ArtifactSummary
 import com.github.silbaram.plan2agent.memory.domain.ArtifactType
 import com.github.silbaram.plan2agent.memory.domain.CanonicalServerId
 import com.github.silbaram.plan2agent.memory.domain.ContentHash
-import com.github.silbaram.plan2agent.memory.domain.DistanceMetric
-import com.github.silbaram.plan2agent.memory.domain.Embedding
 import com.github.silbaram.plan2agent.memory.domain.HybridSearchArm
 import com.github.silbaram.plan2agent.memory.domain.HybridSearchMatch
 import com.github.silbaram.plan2agent.memory.domain.IterationId
@@ -73,23 +70,6 @@ data class KeywordSearchRequest(
 /** Public semantic-search contract deliberately omits client-provided vector metadata. */
 data class SemanticSearchRequest(
     val q: String? = null,
-    val projectId: String? = null,
-    val iterationId: String? = null,
-    val artifactType: String? = null,
-    val sourcePath: String? = null,
-    val taskId: String? = null,
-    val runId: String? = null,
-    val metadataFilters: Map<String, String> = emptyMap(),
-    val limit: Int? = null,
-    val cursor: String? = null,
-)
-
-data class VectorSearchRequest(
-    val embedding: List<Float>? = null,
-    val embeddingModel: String? = null,
-    val embeddingDimension: Int? = null,
-    val embeddingVersion: String? = null,
-    val distanceMetric: String? = null,
     val projectId: String? = null,
     val iterationId: String? = null,
     val artifactType: String? = null,
@@ -280,31 +260,6 @@ fun SemanticSearchRequest.toQuery(): SemanticSearchQuery =
         limit = limit ?: DEFAULT_SEARCH_LIMIT,
         cursor = cursor.normalizedCursor(),
     )
-
-fun VectorSearchRequest.toQuery(): VectorSearchQuery {
-    val embeddingValues = requireNotNull(embedding) { "embedding is required" }
-    require(embeddingValues.isNotEmpty()) { "embedding must not be empty" }
-    require(embeddingValues.all { it.isFinite() }) { "embedding values must be finite" }
-    val dimension = requireNotNull(embeddingDimension) { "embeddingDimension is required" }
-    require(dimension > 0) { "embeddingDimension must be positive" }
-    require(embeddingValues.size == dimension) { "embeddingDimension must match embedding size" }
-    return VectorSearchQuery(
-        embedding = Embedding(embeddingValues),
-        embeddingModel = requireText(embeddingModel, "embeddingModel"),
-        embeddingDimension = dimension,
-        embeddingVersion = requireText(embeddingVersion, "embeddingVersion"),
-        distanceMetric = parseOptionalEnum<DistanceMetric>(distanceMetric, "distanceMetric") ?: DistanceMetric.COSINE,
-        projectId = projectId.toOptionalId(::ProjectId),
-        iterationId = iterationId.toOptionalId(::IterationId),
-        artifactType = parseOptionalEnum<ArtifactType>(artifactType, "artifactType"),
-        sourcePath = sourcePath?.trim()?.takeIf(String::isNotEmpty),
-        taskId = taskId.toOptionalId(::TaskId),
-        runId = runId.toOptionalId(::RunId),
-        metadataFilters = metadataFilters.validateMetadataFilters("metadataFilters"),
-        limit = limit ?: DEFAULT_SEARCH_LIMIT,
-        cursor = cursor.normalizedCursor(),
-    )
-}
 
 fun HybridSearchRequest.toQuery(): HybridSearchQuery {
     val resolvedLimit = limit ?: DEFAULT_SEARCH_LIMIT
