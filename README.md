@@ -15,7 +15,7 @@ Plan2Agent Memory Server는 로컬 P2A 산출물을 관계형으로 저장하고
 
 ### PostgreSQL 시작
 
-`compose.yaml`은 `pgvector/pgvector:pg17` 기반 PostgreSQL을 시작합니다.
+`compose.yaml`은 `pgvector/pgvector:pg17` 기반 PostgreSQL을 시작합니다. 이 reference Compose의 host port는 `127.0.0.1:5432`에만 bind되므로 LAN이나 public interface로 DB를 공개하지 않습니다.
 
 ```bash
 docker compose up -d postgres
@@ -88,7 +88,7 @@ P2A_LOCAL_TOKEN=local-dev-token \
 ./gradlew bootRun
 ```
 
-`P2A_LOCAL_TOKEN`이 비어 있으면 `/api/**`도 인증 없이 열립니다. 값이 있으면 `/api/health`, `/actuator/health`, `/actuator/metrics`를 제외한 `/api/**` 요청에 `X-P2A-Local-Token` header가 필요합니다. Header 이름은 `P2A_LOCAL_TOKEN_HEADER`로 바꿀 수 있습니다.
+`P2A_LOCAL_TOKEN`이 비어 있으면 `/api/**`도 인증 없이 열립니다. 값이 있으면 `/api/health`, `/api/embedding-jobs/**`, `/actuator/health`, `/actuator/metrics`를 제외한 `/api/**` 요청에 `X-P2A-Local-Token` header가 필요합니다. embedding job API는 reference Docker의 localhost binding을 접근 경계로 사용하며, LAN·public reverse proxy·port forwarding으로 노출하면 안 됩니다. Header 이름은 `P2A_LOCAL_TOKEN_HEADER`로 바꿀 수 있습니다.
 
 ### Health check
 
@@ -128,6 +128,7 @@ TESTCONTAINERS_RYUK_DISABLED=true \
 인증 제외:
 
 - `/api/health`
+- `/api/embedding-jobs/**` (localhost-only embedding 작업 운영 API)
 - `/actuator/health`
 - `/actuator/metrics`
 - `/actuator/metrics/**`
@@ -151,7 +152,7 @@ curl -H 'X-P2A-Local-Token: local-dev-token' \
 
 ## REST API 명세
 
-Base URL은 기본 실행 기준 `http://localhost:8080`입니다. 인증이 켜져 있다면 `/api/health`를 제외한 `/api/**` 요청에 `X-P2A-Local-Token` header를 포함해야 합니다.
+Base URL은 기본 실행 기준 `http://localhost:8080`입니다. 인증이 켜져 있다면 `/api/health`와 localhost-only `/api/embedding-jobs/**`를 제외한 `/api/**` 요청에 `X-P2A-Local-Token` header를 포함해야 합니다.
 
 ### Endpoint 요약
 
@@ -168,6 +169,9 @@ Base URL은 기본 실행 기준 `http://localhost:8080`입니다. 인증이 켜
 | `GET` | `/api/search/keyword` | RAG/history lookup을 위한 keyword 검색을 수행합니다. | 필요 |
 | `POST` | `/api/search/semantic` | q 텍스트를 서버 embedding으로 semantic 검색합니다. | 필요 |
 | `POST` | `/api/search/hybrid` | q 텍스트의 keyword와 server-managed semantic 후보를 RRF로 융합합니다. | 필요 |
+| `GET` | `/api/embedding-jobs` | embedding 작업을 status/chunk filter와 cursor로 조회합니다. | 불필요 (localhost-only) |
+| `GET` | `/api/embedding-jobs/{jobId}` | embedding 작업의 sanitized 운영 상태를 조회합니다. | 불필요 (localhost-only) |
+| `POST` | `/api/embedding-jobs/{jobId}/retry` | permanently failed 작업을 pending으로 재등록합니다. | 불필요 (localhost-only) |
 | `GET` | `/api/health` | 간단한 API health check입니다. | 불필요 |
 | `GET` | `/actuator/health` | Spring Actuator health check입니다. | 불필요 |
 | `GET` | `/actuator/metrics` | Micrometer metric 목록을 조회합니다. | 불필요 |
@@ -490,6 +494,27 @@ q 텍스트에서 keyword 후보와 server-managed semantic 후보를 각각 조
 | Response | 포함 정보 |
 | --- | --- |
 | `PagedResponse<HybridSearchResponse>` | `items` 안의 `content`, RRF `score`, `matchReason`, `keyword`, `vector`, `lineage`, `sourceIds`, `sourceReference`, `citation`, `metadata`; 다음 페이지가 있을 때만 채워지는 opaque `nextCursor` |
+
+### `GET /api/embedding-jobs`
+
+headless 로컬 운영자가 embedding 작업을 진단하는 localhost-only API입니다. `status`는 `pending`, `running`, `retrying`, `succeeded`, `permanently_failed` 중 하나 이상을 반복 또는 comma-separated로 전달할 수 있고, `chunkId`와 함께 좁힐 수 있습니다. `limit`의 기본값은 `50`, 최대값은 `200`입니다.
+
+응답은 `createdAt DESC`, `jobId DESC`로 고정 정렬됩니다. `nextCursor`에는 마지막 row의 두 정렬 key와 `status`/`chunkId` filter fingerprint가 포함되므로 다른 filter로 재사용하면 `400 validation_error`를 반환합니다.
+
+```text
+GET /api/embedding-jobs?status=permanently_failed&limit=50
+GET /api/embedding-jobs?status=pending&status=retrying&chunkId=<chunk-id>
+```
+
+### `GET /api/embedding-jobs/{jobId}`
+
+작업 ID의 상세 상태를 반환합니다. 응답 field는 `jobId`, `chunkId`, `embeddingSetId`, `status`, `attemptCount`, `nextAttemptAt`, `leaseExpiresAt`, `lastErrorCode`, `sanitizedLastErrorMessage`, `createdAt`, `updatedAt`, `completedAt`입니다. 원본 chunk content, lease owner, provider credential, raw exception/stack trace, file URI 또는 전체 path는 반환하지 않습니다. 오류 text 대신 stable error code와 일반화된 sanitized message만 노출합니다.
+
+### `POST /api/embedding-jobs/{jobId}/retry`
+
+`permanently_failed` 작업은 `pending`으로 되돌리고 `attemptCount=0`, `nextAttemptAt=now`, lease fields=`null`로 초기화합니다. 이미 `pending`, `running`, `retrying`인 작업은 같은 현재 상태를 성공 응답으로 반환하므로 중복 호출에 idempotent합니다. `succeeded` 작업은 기존 embedding을 덮어쓰지 않도록 `409 conflict`, 없는 job은 `404 not_found`입니다.
+
+이 세 API는 v2에서 local token이나 Spring Security를 요구하지 않습니다. reference Compose의 `127.0.0.1` host binding이 전제이며, localhost 밖의 접근이 필요해지면 관리자 인증을 먼저 도입해야 합니다.
 
 ### Search citation
 

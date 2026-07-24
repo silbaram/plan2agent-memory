@@ -7,7 +7,7 @@ data class LocalSecurityProperties(
     val token: String? = null,
     val headerName: String = "X-P2A-Local-Token",
     val protectedPaths: List<String> = listOf("/api/**"),
-    val excludedPaths: List<String> = listOf("/api/health", "/actuator/health"),
+    val excludedPaths: List<String> = listOf("/api/health", "/api/embedding-jobs/**", "/actuator/health"),
 ) {
     init {
         require(headerName.isNotBlank()) { "p2a.security.header-name must not be blank" }

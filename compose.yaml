@@ -7,7 +7,7 @@ services:
       POSTGRES_USER: p2a
       POSTGRES_PASSWORD: p2a_local_password
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - p2a-artifact-store-postgres-data:/var/lib/postgresql/data
     healthcheck:
