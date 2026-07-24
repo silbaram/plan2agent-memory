@@ -1,4 +1,7 @@
+import org.gradle.api.GradleException
 import org.gradle.api.tasks.wrapper.Wrapper
+import org.gradle.api.tasks.testing.Test
+import org.gradle.language.base.plugins.LifecycleBasePlugin
 
 plugins {
     kotlin("jvm") version "2.2.21"
@@ -46,7 +49,58 @@ tasks.withType<Test> {
     useJUnitPlatform()
 }
 
+val onnxVerificationTest by sourceSets.creating {
+    compileClasspath += sourceSets.main.get().output
+    runtimeClasspath += output + compileClasspath
+}
+
+configurations.named(onnxVerificationTest.implementationConfigurationName) {
+    extendsFrom(configurations.testImplementation.get())
+}
+
+configurations.named(onnxVerificationTest.runtimeOnlyConfigurationName) {
+    extendsFrom(configurations.testRuntimeOnly.get())
+}
+
+tasks.named<Test>("test") {
+    useJUnitPlatform {
+        excludeTags("onnx-verification")
+    }
+}
+
+tasks.register<Test>("onnxVerificationTest") {
+    group = LifecycleBasePlugin.VERIFICATION_GROUP
+    description = """
+        Runs the opt-in, network-free verification against operator-provided local ONNX artifacts.
+        Requires P2A_ONNX_MODEL_URI and P2A_ONNX_TOKENIZER_URI file URI values whose bytes match
+        the pinned V2 SHA-256 checksums. Example: P2A_ONNX_MODEL_URI=file:///path/model.onnx
+        P2A_ONNX_TOKENIZER_URI=file:///path/tokenizer.json ./gradlew onnxVerificationTest
+    """.trimIndent()
+    testClassesDirs = onnxVerificationTest.output.classesDirs
+    classpath = onnxVerificationTest.runtimeClasspath
+    shouldRunAfter(tasks.named<Test>("test"))
+    useJUnitPlatform {
+        includeTags("onnx-verification")
+    }
+    doFirst {
+        val missing = ONNX_VERIFICATION_ENVIRONMENT_NAMES.filter { System.getenv(it).isNullOrBlank() }
+        if (missing.isNotEmpty()) {
+            throw GradleException(
+                "onnxVerificationTest requires ${missing.joinToString()} as file URI values. " +
+                    "Set P2A_ONNX_MODEL_URI=file:///path/model.onnx and " +
+                    "P2A_ONNX_TOKENIZER_URI=file:///path/tokenizer.json; " +
+                    "the task validates both against the pinned V2 SHA-256 checksums.",
+            )
+        }
+    }
+}
+
 tasks.named<Wrapper>("wrapper") {
     gradleVersion = "9.1.0"
     distributionType = Wrapper.DistributionType.BIN
 }
+
+private val ONNX_VERIFICATION_ENVIRONMENT_NAMES = listOf(
+    "P2A_ONNX_MODEL_URI",
+    "P2A_ONNX_TOKENIZER_URI",
+)
