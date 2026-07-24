@@ -15,7 +15,7 @@ Plan2Agent Memory Server는 로컬 P2A 산출물을 관계형으로 저장하고
 
 ### PostgreSQL 시작
 
-`compose.yaml`은 `pgvector/pgvector:pg17` 기반 PostgreSQL을 시작합니다. 이 reference Compose의 host port는 `127.0.0.1:5432`에만 bind되므로 LAN이나 public interface로 DB를 공개하지 않습니다.
+`compose.yaml`은 정확히 `pgvector/pgvector:0.8.5-pg17-bookworm@sha256:d2ef61f42ef767baa5a1475393303cc235bcd92febd9d7014eddb48b41f3bad0` 이미지를 사용합니다. digest를 생략하거나 tag만 바꾸지 마세요. 이 reference Compose의 host port는 `127.0.0.1:5432`에만 bind되므로 LAN이나 public interface로 DB를 공개하지 않습니다.
 
 ```bash
 docker compose up -d postgres
@@ -29,9 +29,9 @@ docker compose up -d postgres
 - Port: `5432`
 - JDBC URL: `jdbc:postgresql://localhost:5432/p2a_artifact_store`
 
-DB schema의 유일한 변경 경로는 `src/main/resources/db/migration/V*.sql` Flyway migration입니다. 현재 스키마는 빈 DB에서 시작하는 단일 V1 baseline이며, 이전 V1~V7 history가 있는 DB와 호환되지 않으므로 이 버전을 처음 배포할 때 DB를 완전히 초기화해야 합니다. JPA/Hibernate DDL 생성과 Spring `schema.sql` 초기화는 비활성화되어 있으며, 환경변수나 profile이 `create`, `update`, `create-drop`, 표준 JPA schema generation 또는 `spring.sql.init.mode`를 활성화하면 애플리케이션은 persistence bean 초기화 전에 기동을 중단합니다. 이후 테이블의 `CREATE`, `ALTER`, `DROP`은 새 versioned SQL migration으로만 반영합니다.
+DB schema의 유일한 변경 경로는 `src/main/resources/db/migration/V*.sql` Flyway migration입니다. 빈 DB에는 현재 `V1__create_artifact_store_schema.sql`, `V2__add_server_global_embedding_profiles.sql`, `V3__add_embedding_jobs.sql`의 V1~V3 chain이 순서대로 적용됩니다. 같은 version 번호가 있더라도 현재 V1 checksum/schema를 validate하지 못하는 과거 DB history는 호환되는 것으로 가정하지 마세요. 필요한 data를 백업하고 reset한 뒤 현재 server가 V1~V3를 적용하게 해야 합니다. JPA/Hibernate DDL 생성과 Spring `schema.sql` 초기화는 비활성화되어 있으며, 환경변수나 profile이 `create`, `update`, `create-drop`, 표준 JPA schema generation 또는 `spring.sql.init.mode`를 활성화하면 애플리케이션은 persistence bean 초기화 전에 기동을 중단합니다. 이후 테이블의 `CREATE`, `ALTER`, `DROP`은 새 versioned SQL migration으로만 반영합니다.
 
-### 단일 V1 baseline 전환을 위한 전체 초기화
+### 현재 Flyway V1~V3 chain 전환을 위한 전체 초기화
 
 이 절차는 Memory DB의 테이블, Flyway history, 검색 인덱스와 저장 데이터를 모두 삭제합니다. 기존 서버와 쓰기 요청을 먼저 중지하고, 필요한 데이터는 백업한 뒤 실행합니다. 초기화 후에는 이 repository의 최신 서버만 시작해야 합니다.
 
@@ -60,7 +60,7 @@ ON SCHEMA public
 TO p2a;
 ```
 
-최신 서버가 정상 기동한 뒤 Flyway 적용 이력이 V1 한 건인지 확인합니다.
+최신 서버가 정상 기동한 뒤 Flyway 적용 이력이 V1~V3의 성공한 세 건이고 최신 version이 `3`인지 확인합니다.
 
 ```sql
 SELECT installed_rank, version, description, success
@@ -68,7 +68,7 @@ FROM flyway_schema_history
 ORDER BY installed_rank;
 ```
 
-결과에는 성공한 version `1` migration 한 건만 있어야 합니다.
+결과에는 성공한 version `1`, `2`, `3` migration이 순서대로 있어야 하며, 최신 version은 `3`이어야 합니다.
 
 ### 애플리케이션 실행
 
@@ -88,7 +88,79 @@ P2A_LOCAL_TOKEN=local-dev-token \
 ./gradlew bootRun
 ```
 
-`P2A_LOCAL_TOKEN`이 비어 있으면 `/api/**`도 인증 없이 열립니다. 값이 있으면 `/api/health`, `/api/embedding-jobs/**`, `/actuator/health`, `/actuator/metrics`를 제외한 `/api/**` 요청에 `X-P2A-Local-Token` header가 필요합니다. embedding job API는 reference Docker의 localhost binding을 접근 경계로 사용하며, LAN·public reverse proxy·port forwarding으로 노출하면 안 됩니다. Header 이름은 `P2A_LOCAL_TOKEN_HEADER`로 바꿀 수 있습니다.
+`P2A_LOCAL_TOKEN`이 비어 있으면 `/api/**`도 인증 없이 열립니다. 값이 있으면 `/api/health`, `/api/embedding-jobs/**`, `/actuator/health`, `/actuator/metrics`를 제외한 `/api/**` 요청에 `X-P2A-Local-Token` header가 필요합니다. Header 이름은 `P2A_LOCAL_TOKEN_HEADER`로 바꿀 수 있습니다.
+
+### 로컬 embedding provider 운영
+
+기본값은 `P2A_EMBEDDING_PROVIDER=none`입니다. 이 모드에서는 ONNX 모델을 열거나 내려받지 않고 서버가 기동합니다. artifact 저장, keyword search, durable job 관리는 계속 가능하지만 semantic/hybrid search는 `503 embedding_provider_not_configured`을 반환합니다. 이미 만들어진 embedding job은 provider가 준비될 때까지 pending 상태로 남습니다.
+
+`P2A_EMBEDDING_PROVIDER=transformers`는 operator가 제공한 두 개의 로컬 `file:` URI를 사용합니다. 애플리케이션은 ready event 뒤 백그라운드에서 artifact byte checksum을 확인하고 Spring AI/ONNX runtime을 warm-up합니다. 따라서 artifact가 없거나 checksum이 맞지 않거나 native model 초기화가 실패해도 기본 liveness/readiness가 DOWN으로 바뀌지는 않지만 provider는 `unavailable`이며 semantic/hybrid search는 `503 embedding_provider_unavailable`을 반환합니다.
+
+고정 V2 artifact 계약은 다음과 같습니다. URI, provider 종류, worker tuning은 이 manifest/fingerprint의 일부가 아닙니다.
+
+| 항목 | 고정값 |
+| --- | --- |
+| Profile fingerprint | `sha256:0bc822ab3bf2558f89838b6dd617e0f656098ceb809f9a6d33359e0e5889e3e5` |
+| Model | `intfloat/multilingual-e5-small` |
+| Revision | `d1d99a1efae6779390caba937d92c54b5bc70e51` |
+| Model output / dimension / distance | `last_hidden_state` / `384` / cosine |
+| ONNX model SHA-256 | `ca456c06b3a9505ddfd9131408916dd79290368331e7d76bb621f1cba6bc8665` |
+| Tokenizer SHA-256 | `0b44a9d7b51c3c62626640cda0e2c2f70fdacdc25bbbd68038369d14ebdf4c39` |
+| Input contract | `passage: ` document prefix, `query: ` query prefix; 512-token attention-mask mean pooling and L2 normalization |
+
+operator는 artifact의 실제 bytes를 먼저 검증하고, repository에 model을 넣거나 서버가 인터넷에서 model을 받도록 구성하지 않습니다. macOS에서는 다음처럼 확인할 수 있습니다.
+
+```bash
+shasum -a 256 /absolute/path/model.onnx
+shasum -a 256 /absolute/path/tokenizer.json
+```
+
+checksum이 표의 값과 각각 일치하면 transformers provider를 시작합니다. 두 URI 모두 absolute local file URI여야 합니다.
+
+```bash
+SERVER_ADDRESS=127.0.0.1 \
+P2A_EMBEDDING_PROVIDER=transformers \
+P2A_EMBEDDING_MODEL_ARTIFACT_URI=file:///absolute/path/model.onnx \
+P2A_EMBEDDING_TOKENIZER_ARTIFACT_URI=file:///absolute/path/tokenizer.json \
+./gradlew bootRun
+```
+
+provider를 고치는 동안에는 `none`으로 기동해도 안전합니다. transformers artifact/configuration을 수정한 뒤 서버를 재시작하면 durable queue가 다시 사용됩니다. 매 worker poll마다 만료된 `running` lease는 `pending`으로 복구되고, provider가 ready가 된 뒤에만 job을 claim합니다. 따라서 provider가 `none`, `initializing`, 또는 `unavailable`인 동안에는 작업을 claim하거나 attempt를 소모하지 않습니다.
+
+### ONNX opt-in 검증
+
+실제 pinned ONNX artifact로 Spring AI의 tokenizer/pooling 결과를 독립 ONNX probe와 대조하려면 operator가 동일한 로컬 file URI를 제공해야 합니다.
+
+```bash
+P2A_ONNX_MODEL_URI=file:///absolute/path/model.onnx \
+P2A_ONNX_TOKENIZER_URI=file:///absolute/path/tokenizer.json \
+./gradlew onnxVerificationTest
+```
+
+이 task는 URI가 없거나 pinned checksum과 다르면 실패합니다. 일반 `./gradlew test`는 `onnx-verification` tag를 제외합니다. mandatory CI가 이를 포함하지 않는 이유는 test 자체는 network-free이지만 검증 대상 artifact가 repository/CI에 포함되지 않은 operator-provided local file이고, CI가 model을 내려받거나 다른 bytes를 대체해서는 안 되기 때문입니다.
+
+### Worker tuning, reconciliation, recovery
+
+reference local capacity는 **4 vCPU, 8 GB RAM, 20 GB SSD**입니다. 이는 hard SLO가 아닌 운영 계획 기준입니다. Gradle daemon의 `gradle.properties` heap은 `-Xmx2g`로 설정되어 있으므로, Java build/test와 PostgreSQL/ONNX runtime이 같은 호스트에서 경쟁할 여유를 남겨야 합니다.
+
+| 환경 변수 | 기본값 | 운영 의미 |
+| --- | --- | --- |
+| `P2A_MEMORY_EMBEDDING_WORKER_ENABLED` | `true` | `false`면 worker와 reconciler를 모두 실행하지 않습니다. |
+| `P2A_MEMORY_EMBEDDING_WORKER_POLL_DELAY` | `1s` | durable job poll 주기입니다. |
+| `P2A_MEMORY_EMBEDDING_WORKER_CLAIM_BATCH_SIZE` | `16` | 한 poll에서 active set 대상으로 claim하는 최대 job 수입니다. |
+| `P2A_MEMORY_EMBEDDING_WORKER_CONCURRENCY` | `1` | 고정 worker executor thread 수입니다. CPU/memory 측정 없이 올리지 마세요. |
+| `P2A_MEMORY_EMBEDDING_WORKER_LEASE_DURATION` | `2m` | in-flight inference의 최악 시간을 넘도록 설정합니다. |
+| `P2A_MEMORY_EMBEDDING_WORKER_MAX_ATTEMPTS` | `5` | retryable provider failure의 terminal 전 최대 attempt 수입니다. |
+| `P2A_MEMORY_EMBEDDING_WORKER_INITIAL_RETRY_DELAY` | `5s` | retry backoff 시작값입니다. |
+| `P2A_MEMORY_EMBEDDING_WORKER_MAX_RETRY_DELAY` | `5m` | exponential retry backoff 상한입니다. |
+| `P2A_MEMORY_EMBEDDING_WORKER_BACKFILL_POLL_DELAY` | `1m` | 기존 chunk reconciliation 주기입니다. |
+| `P2A_MEMORY_EMBEDDING_WORKER_BACKFILL_BATCH_SIZE` | `500` | reconciliation 한 번에 scan하는 최대 chunk 수입니다. |
+
+reconciler는 startup 직후와 위 주기마다 structurally valid active V2 set을 기준으로 기존 chunk를 bounded batch로 훑습니다. 누락된 embedding job을 enqueue하고, 이미 generic 384-dimensional embedding은 있으나 typed vector mirror가 빠진 경우 mirror를 복구합니다. provider readiness에 의존하지 않으므로 degraded 상태에서도 coverage를 회복할 pending work를 남깁니다. active pointer가 없거나 partial/corrupt/mismatched면 fail closed로 아무 작업도 하지 않습니다.
+
+coverage는 active set별로 `eligibleTotal = pending + running + retrying + succeeded + permanentlyFailed + missing`으로 계산됩니다. 이 내부 reconciler coverage는 아직 REST endpoint가 아니므로, 로컬 operator는 아래 job API에서 backlog 상태를 진단합니다. `missing` 상태는 다음 reconciliation pass가 보완합니다.
+
+job이 오래 `running`이면 lease 만료 후 다음 poll에서 자동으로 pending으로 복구됩니다. `permanently_failed`는 provider/artifact 문제를 먼저 고친 후에만 재시도하세요. 재시도 API는 성공한 embedding을 덮어쓰지 않습니다.
 
 ### Health check
 
@@ -102,7 +174,7 @@ curl http://localhost:8080/actuator/metrics
 
 ### 테스트 실행
 
-통합 테스트는 Testcontainers로 `pgvector/pgvector:pg16` PostgreSQL을 시작합니다.
+통합 테스트는 Testcontainers로 Compose와 같은 digest-pinned `pgvector/pgvector:0.8.5-pg17-bookworm@sha256:d2ef61f42ef767baa5a1475393303cc235bcd92febd9d7014eddb48b41f3bad0` PostgreSQL을 시작합니다.
 
 ```bash
 ./gradlew test
@@ -150,9 +222,13 @@ curl -H 'X-P2A-Local-Token: local-dev-token' \
 }
 ```
 
+`/api/embedding-jobs/**`는 의도적으로 local token을 우회하는 no-auth 운영 API이며, 현재 Spring Security나 source-IP 검사를 구현하지 않습니다. 여기서 말하는 localhost-only는 배포 경계입니다. `compose.yaml`의 `127.0.0.1` bind는 PostgreSQL에만 적용되므로, Boot server도 `SERVER_ADDRESS=127.0.0.1`로 bind하거나 동등한 loopback firewall/private network 경계를 적용해야 합니다. LAN, public reverse proxy, port forwarding에 이 endpoint를 노출하지 마세요.
+
+localhost 밖에서 embedding 작업 관리가 필요해지면 먼저 별도로 승인된 변경으로 Spring Security 기반 admin authentication/authorization을 추가해야 합니다. 그때까지 no-auth job endpoint를 원격 운영용 API로 사용하지 않습니다.
+
 ## REST API 명세
 
-Base URL은 기본 실행 기준 `http://localhost:8080`입니다. 인증이 켜져 있다면 `/api/health`와 localhost-only `/api/embedding-jobs/**`를 제외한 `/api/**` 요청에 `X-P2A-Local-Token` header를 포함해야 합니다.
+Base URL은 기본 실행 기준 `http://localhost:8080`입니다. 인증이 켜져 있다면 `/api/health`와 local deployment boundary 안의 no-auth `/api/embedding-jobs/**`를 제외한 `/api/**` 요청에 `X-P2A-Local-Token` header를 포함해야 합니다.
 
 ### Endpoint 요약
 
@@ -267,7 +343,7 @@ Iteration을 프로젝트에 연결해 등록 또는 upsert합니다.
 
 Task graph JSON과 graph metadata를 저장합니다.
 
-`projectId`/`iterationId`/`sourceTaskGraphId`가 같은 graph는 하나의 logical graph로 취급합니다. 같은 source identity와 `graphHash`를 다시 보내면 기존 응답을 그대로 반환하고, hash가 달라지면 canonical `taskGraphId`는 유지한 채 최신 graph JSON과 metadata를 갱신합니다. source identity가 다르면 hash가 같아도 별도 graph로 저장합니다. 이미 다른 source identity에 연결된 canonical ID를 보내면 `409 conflict`로 거부합니다. 클라이언트는 이후 `/api/tasks/bulk`의 `graphId`와 `tasks[].taskGraphId`에 응답의 canonical ID를 사용해야 합니다. 단일 V1 baseline은 `sourceTaskGraphId`를 처음부터 필수 source identity로 생성합니다.
+`projectId`/`iterationId`/`sourceTaskGraphId`가 같은 graph는 하나의 logical graph로 취급합니다. 같은 source identity와 `graphHash`를 다시 보내면 기존 응답을 그대로 반환하고, hash가 달라지면 canonical `taskGraphId`는 유지한 채 최신 graph JSON과 metadata를 갱신합니다. source identity가 다르면 hash가 같아도 별도 graph로 저장합니다. 이미 다른 source identity에 연결된 canonical ID를 보내면 `409 conflict`로 거부합니다. 클라이언트는 이후 `/api/tasks/bulk`의 `graphId`와 `tasks[].taskGraphId`에 응답의 canonical ID를 사용해야 합니다. 이 source identity 규칙은 Flyway migration version과 무관한 API contract입니다.
 
 | Request field | 필수 | 설명 |
 | --- | --- | --- |
@@ -506,6 +582,20 @@ GET /api/embedding-jobs?status=permanently_failed&limit=50
 GET /api/embedding-jobs?status=pending&status=retrying&chunkId=<chunk-id>
 ```
 
+로컬 diagnose/retry 순서는 다음과 같습니다.
+
+```bash
+# terminal failure와 대기 중인 work를 분리해 조회합니다.
+curl 'http://127.0.0.1:8080/api/embedding-jobs?status=permanently_failed&limit=50'
+curl 'http://127.0.0.1:8080/api/embedding-jobs?status=pending&status=retrying&limit=50'
+
+# 위 응답의 jobId 한 건을 상세 조회한 뒤, 원인을 수정한 경우에만 재시도합니다.
+curl 'http://127.0.0.1:8080/api/embedding-jobs/<job-id>'
+curl -X POST 'http://127.0.0.1:8080/api/embedding-jobs/<job-id>/retry'
+```
+
+상세 응답의 `lastErrorCode`는 `provider_unavailable`, `provider_contract_invalid`, `content_invalid`, `max_attempts_exhausted`, `lease_expired` 중 하나입니다. file URI, raw exception, provider credential, chunk content는 의도적으로 반환되지 않습니다. `provider_unavailable` 또는 `max_attempts_exhausted`는 artifact/provider와 worker settings를 먼저 고치고 재시도하고, `content_invalid`은 source chunk를 정정한 새 write 뒤 처리하세요.
+
 ### `GET /api/embedding-jobs/{jobId}`
 
 작업 ID의 상세 상태를 반환합니다. 응답 field는 `jobId`, `chunkId`, `embeddingSetId`, `status`, `attemptCount`, `nextAttemptAt`, `leaseExpiresAt`, `lastErrorCode`, `sanitizedLastErrorMessage`, `createdAt`, `updatedAt`, `completedAt`입니다. 원본 chunk content, lease owner, provider credential, raw exception/stack trace, file URI 또는 전체 path는 반환하지 않습니다. 오류 text 대신 stable error code와 일반화된 sanitized message만 노출합니다.
@@ -514,7 +604,7 @@ GET /api/embedding-jobs?status=pending&status=retrying&chunkId=<chunk-id>
 
 `permanently_failed` 작업은 `pending`으로 되돌리고 `attemptCount=0`, `nextAttemptAt=now`, lease fields=`null`로 초기화합니다. 이미 `pending`, `running`, `retrying`인 작업은 같은 현재 상태를 성공 응답으로 반환하므로 중복 호출에 idempotent합니다. `succeeded` 작업은 기존 embedding을 덮어쓰지 않도록 `409 conflict`, 없는 job은 `404 not_found`입니다.
 
-이 세 API는 v2에서 local token이나 Spring Security를 요구하지 않습니다. reference Compose의 `127.0.0.1` host binding이 전제이며, localhost 밖의 접근이 필요해지면 관리자 인증을 먼저 도입해야 합니다.
+이 세 API는 v2에서 local token이나 Spring Security를 요구하지 않습니다. 이 no-auth 예외는 위의 localhost-only deployment boundary에서만 허용됩니다. 원격 접근은 future Spring Security admin API가 별도 승인·구현되기 전까지 지원하지 않습니다.
 
 ### Search citation
 
@@ -559,13 +649,23 @@ embedding custom metric의 tag는 위 고정 enum만 사용합니다. query text
 
 `embedding_sets`와 `chunk_embeddings`는 서버가 관리하는 persisted vector data입니다. 기존 row는 제거된 REST 요청 형식으로 덮어쓰거나 삭제하지 않으며, 새 chunk의 embedding은 durable job worker가 활성 set에 추가합니다.
 
-새 embedding model 또는 version으로 전환할 때는 새 `embedding_sets` row와 새 `chunk_embeddings` row를 추가해 점진 전환과 비교 평가가 가능하게 합니다.
+V2는 완전히 비어 있는 profile state에서만 고정 V2 immutable set을 bootstrap합니다. 그 이후에는 V2 active pointer를 바꾸는 REST API나 application service가 없습니다. operator나 client가 pointer를 직접 바꾸거나 기존 set의 model/version/manifest를 수정해서는 안 됩니다.
+
+새 embedding model 또는 version은 현재 V2의 pointer switch가 아닙니다. 미래 model 변경은 새 immutable set, backfill, 평가, cutover를 명시한 **별도로 승인된 Plan2Agent iteration**으로만 진행해야 합니다. 이 문서는 그런 future iteration의 API/service를 정의하거나 승인하지 않습니다.
 
 `embeddingDimension`이 2 또는 1536인 legacy embedding은 고정 차원 보조 테이블에도 보존됩니다. active semantic search는 서버가 선택한 active embedding set으로 범위를 제한합니다.
 
 ### Breaking client migration
 
-`POST /api/document-chunks/bulk`에서 `embeddingSet`, `embedding`, `embeddingHash`를 제거했습니다. `POST /api/search/vector`도 제거되며 해당 path는 `404`입니다. 클라이언트는 chunk-only bulk payload를 보내고 text `q`가 필요한 검색은 `/api/search/semantic` 또는 `/api/search/hybrid`를 사용해야 합니다. semantic/hybrid 요청에 이전 vector/model/dimension/version/metric field를 보내면 validation error입니다.
+`POST /api/document-chunks/bulk`에서 client embedding인 `embeddingSet`, `embedding`, `embeddingHash`를 제거했습니다. `POST /api/search/vector`도 제거되며 해당 path는 `404`입니다. 클라이언트는 chunk-only bulk payload를 보내고 text `q`가 필요한 검색은 `/api/search/semantic` 또는 `/api/search/hybrid`를 사용해야 합니다. semantic/hybrid request는 `q`만으로 server-managed embedding을 요청하며, 이전 vector/model/dimension/version/metric field를 보내면 validation error입니다.
+
+각 client repository는 server rollout과 분리된 follow-up Plan2Agent task에서 다음 endpoint inventory/update를 완료해야 합니다.
+
+1. source, generated client, integration test, fixture, README/API example에서 `/api/document-chunks/bulk`, `/api/search/vector`, `/api/search/semantic`, `/api/search/hybrid`와 `embeddingSet`, `embedding`, `embeddingHash`, `embeddingModel`, `embeddingDimension`, `embeddingVersion`, `distanceMetric`를 검색해 call site와 owner를 inventory로 기록합니다.
+2. bulk writer는 chunk-only schema로 변경하고 client-side embedding 생성, model metadata 전달, vector serialization을 제거합니다.
+3. vector search caller는 목적에 맞게 `POST /api/search/semantic` 또는 `POST /api/search/hybrid`의 `q` request로 옮기고, `/api/search/vector` 404를 compatibility fallback으로 취급하지 않습니다.
+4. request/response types, mocks, fixtures, API docs, contract/integration tests를 함께 갱신해 unknown legacy field가 보내지지 않음을 검증합니다.
+5. Plan2Agent task의 inventory 각 항목에 변경 call site와 실행한 client verification을 연결한 뒤에만 migration을 close합니다. 이 server task는 client source를 변경하지 않습니다.
 
 ## Path 처리
 
@@ -609,7 +709,7 @@ embedding custom metric의 tag는 위 고정 enum만 사용합니다. query text
 - 서버는 P2A harness를 실행하지 않습니다.
 - 서버는 agent를 실행하지 않습니다.
 - 서버는 외부 AI API를 호출하지 않습니다.
-- 서버는 embedding을 생성하지 않습니다.
+- 서버는 configured local provider가 있을 때만 server-managed embedding을 생성하며, client embedding 값을 받지 않습니다.
 - 서버 내장 웹 UI는 제공하지 않습니다.
 - status, diff, push, pull, conflict resolution, history UX는 P2A GUI/CLI가 담당합니다.
 
