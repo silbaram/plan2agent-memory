@@ -1,6 +1,8 @@
 package com.github.silbaram.plan2agent.memory.application.usecase
 
 import com.github.silbaram.plan2agent.memory.application.port.`in`.SemanticSearchUseCase
+import com.github.silbaram.plan2agent.memory.application.observability.EmbeddingInferenceOperation
+import com.github.silbaram.plan2agent.memory.application.observability.EmbeddingObservability
 import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingTarget
 import com.github.silbaram.plan2agent.memory.application.port.out.ActiveVectorSearchQuery
 import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingPort
@@ -18,6 +20,7 @@ import org.springframework.transaction.annotation.Transactional
 class SemanticSearchUseCaseService(
     private val embeddingPort: EmbeddingPort,
     private val vectorSearchPort: VectorSearchPort,
+    private val observability: EmbeddingObservability = EmbeddingObservability.noop,
 ) : SemanticSearchUseCase {
     @Transactional(readOnly = true)
     override fun semanticSearch(query: SemanticSearchQuery): PagedResult<VectorSearchMatch> {
@@ -106,15 +109,18 @@ class SemanticSearchUseCaseService(
         }
     }
 
-    private fun embedQuery(query: String) = try {
-        embeddingPort.embedQuery(query)
-    } catch (failure: ProviderNotConfiguredException) {
-        throw failure
-    } catch (failure: ProviderUnavailableException) {
-        throw failure
-    } catch (failure: RuntimeException) {
-        throw ProviderUnavailableException(cause = failure)
-    }
+    private fun embedQuery(query: String) =
+        observability.recordInference(EmbeddingInferenceOperation.QUERY) {
+            try {
+                embeddingPort.embedQuery(query)
+            } catch (failure: ProviderNotConfiguredException) {
+                throw failure
+            } catch (failure: ProviderUnavailableException) {
+                throw failure
+            } catch (failure: RuntimeException) {
+                throw ProviderUnavailableException(cause = failure)
+            }
+        }
 
     private fun isUsableEmbedding(embedding: Embedding, target: ActiveEmbeddingTarget): Boolean =
         embedding.values.size == target.profile.dimension && embedding.values.all { it.isFinite() }

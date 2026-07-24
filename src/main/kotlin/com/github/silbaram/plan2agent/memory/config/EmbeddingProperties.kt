@@ -2,6 +2,7 @@ package com.github.silbaram.plan2agent.memory.config
 
 import com.github.silbaram.plan2agent.memory.adapter.out.embedding.NoConfiguredEmbeddingProvider
 import com.github.silbaram.plan2agent.memory.adapter.out.embedding.LocalMultilingualE5OnnxEmbeddingAdapter
+import com.github.silbaram.plan2agent.memory.application.observability.EmbeddingObservability
 import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingProfileResolver
 import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingPort
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
@@ -10,6 +11,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties
 import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
+import org.springframework.beans.factory.ObjectProvider
 import java.net.URI
 
 @ConfigurationProperties(prefix = "p2a.embedding", ignoreUnknownFields = false)
@@ -67,12 +69,14 @@ class EmbeddingProviderConfiguration {
         artifactVerifier: TransformersArtifactVerifier,
         modelFactory: TransformersEmbeddingModelFactory,
         activeEmbeddingProfileResolver: ActiveEmbeddingProfileResolver,
+        observabilityProvider: ObjectProvider<EmbeddingObservability>,
     ): TransformersEmbeddingProviderLifecycle =
         TransformersEmbeddingProviderLifecycle(
             embeddingProperties,
             artifactVerifier,
             modelFactory,
             activeEmbeddingProfileResolver,
+            observability = observabilityProvider.ifAvailable ?: EmbeddingObservability.noop,
         )
 
     @Bean

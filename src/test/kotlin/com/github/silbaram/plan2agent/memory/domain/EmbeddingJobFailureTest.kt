@@ -15,4 +15,28 @@ class EmbeddingJobFailureTest {
         assertThat(failure.message).doesNotContain("\n", "\t")
         assertThat(failure.message.codePointCount(0, failure.message.length)).isLessThanOrEqualTo(512)
     }
+
+    @Test
+    fun `drops raw provider body credentials paths and chunk content before persistence`() {
+        val rawProviderFailure = """
+            HTTP 500 body={\"token\":\"credential-should-not-leak\"}
+            at file:///private/models/provider.onnx
+            chunk=결제 취소 정책 원문
+            at provider.Stack.method(Provider.kt:12)
+        """.trimIndent()
+
+        val untrusted = EmbeddingJobFailure.fromUntrustedMessage(
+            EmbeddingJobErrorCode.PROVIDER_UNAVAILABLE,
+            rawProviderFailure,
+        )
+        val stored = EmbeddingJobFailure.fromStoredMessage(
+            EmbeddingJobErrorCode.PROVIDER_UNAVAILABLE,
+            rawProviderFailure,
+        )
+
+        listOf(untrusted, stored).forEach { failure ->
+            assertThat(failure.message).isEqualTo("Embedding provider is unavailable")
+            assertThat(failure.message).doesNotContain("credential", "file:", "결제", "Stack")
+        }
+    }
 }

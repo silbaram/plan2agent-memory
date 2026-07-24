@@ -278,6 +278,16 @@ class PostgresEmbeddingJobStoreAdapter(
             )
         }
 
+    override fun countByStatus(): Map<EmbeddingJobStatus, Long> =
+        metrics.recordSearch("embedding_job.count_by_status") {
+            jdbc.query(
+                "SELECT status, COUNT(*) AS count FROM embedding_jobs GROUP BY status",
+                MapSqlParameterSource(),
+            ) { rs, _ ->
+                embeddingJobStatusFromDbValue(rs.getString("status")) to rs.getLong("count")
+            }.toMap()
+        }
+
     override fun findById(id: EmbeddingJobId): EmbeddingJob? =
         metrics.recordSearch("embedding_job.find") {
             jdbc.queryOne(

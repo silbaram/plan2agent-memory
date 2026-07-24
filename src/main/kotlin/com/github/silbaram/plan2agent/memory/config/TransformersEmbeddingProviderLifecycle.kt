@@ -3,6 +3,8 @@ package com.github.silbaram.plan2agent.memory.config
 import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingProfileResolver
 import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingProviderState
 import com.github.silbaram.plan2agent.memory.application.port.out.ProviderUnavailableException
+import com.github.silbaram.plan2agent.memory.application.observability.EmbeddingObservability
+import com.github.silbaram.plan2agent.memory.application.observability.EmbeddingProviderInitializationOutcome
 import com.github.silbaram.plan2agent.memory.adapter.out.embedding.LocalEmbeddingRuntime
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingSetId
 import com.github.silbaram.plan2agent.memory.domain.V2EmbeddingProfile
@@ -10,6 +12,7 @@ import org.springframework.ai.transformers.TransformersEmbeddingModel
 import org.springframework.boot.context.event.ApplicationReadyEvent
 import org.springframework.context.ApplicationListener
 import org.springframework.beans.factory.DisposableBean
+import org.slf4j.LoggerFactory
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Path
@@ -34,6 +37,7 @@ class TransformersEmbeddingProviderLifecycle(
     private val modelFactory: TransformersEmbeddingModelFactory,
     private val activeEmbeddingProfileResolver: ActiveEmbeddingProfileResolver,
     private val initializationExecutor: ExecutorService = newInitializationExecutor(),
+    private val observability: EmbeddingObservability = EmbeddingObservability.noop,
 ) : ApplicationListener<ApplicationReadyEvent>, DisposableBean, LocalEmbeddingRuntime {
     private val state = AtomicReference(EmbeddingProviderState.INITIALIZING)
     private val initializationScheduled = AtomicBoolean(false)
@@ -101,6 +105,7 @@ class TransformersEmbeddingProviderLifecycle(
             initializedModel.set(model)
             resolvedEmbeddingSetId.set(activeEmbeddingSetId)
             state.set(EmbeddingProviderState.READY)
+            observability.recordProviderInitialization(EmbeddingProviderInitializationOutcome.READY)
         } catch (failure: Throwable) {
             if (failure is VirtualMachineError) {
                 throw failure
@@ -113,10 +118,16 @@ class TransformersEmbeddingProviderLifecycle(
         initializedModel.set(null)
         resolvedEmbeddingSetId.set(null)
         state.set(EmbeddingProviderState.UNAVAILABLE)
+        observability.recordProviderInitialization(EmbeddingProviderInitializationOutcome.UNAVAILABLE)
+        logger.atWarn()
+            .addKeyValue("event", "embedding_provider_initialization_failed")
+            .addKeyValue("outcome", "unavailable")
+            .log("Embedding provider initialization failed")
     }
 
     companion object {
         private const val WARM_UP_DOCUMENT = "p2a transformers provider warm-up"
+        private val logger = LoggerFactory.getLogger(TransformersEmbeddingProviderLifecycle::class.java)
 
         private fun newInitializationExecutor(): ExecutorService =
             Executors.newSingleThreadExecutor(

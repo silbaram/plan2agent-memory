@@ -59,6 +59,12 @@ interface EmbeddingJobStorePort {
 
     fun recoverExpiredLeases(): List<EmbeddingJob>
 
+    /**
+     * Returns the current durable queue backlog grouped by its fixed domain status. Implementations
+     * must not derive metric dimensions from IDs, request content or other user supplied values.
+     */
+    fun countByStatus(): Map<EmbeddingJobStatus, Long> = emptyMap()
+
     fun findById(id: EmbeddingJobId): EmbeddingJob?
 
     fun findPage(query: FindEmbeddingJobsQuery): PagedResult<EmbeddingJob>
