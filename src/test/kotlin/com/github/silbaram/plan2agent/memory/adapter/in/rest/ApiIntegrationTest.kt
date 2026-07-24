@@ -146,8 +146,8 @@ class ApiIntegrationTest {
         assertThat(rowCount("tasks")).isEqualTo(1)
         assertThat(rowCount("runs")).isEqualTo(1)
         assertThat(rowCount("document_chunks")).isEqualTo(1)
-        assertThat(rowCount("embedding_sets")).isEqualTo(2)
-        assertThat(rowCount("chunk_embeddings")).isEqualTo(1)
+        assertThat(rowCount("embedding_sets")).isEqualTo(1)
+        assertThat(rowCount("chunk_embeddings")).isZero()
         assertThat(rowCount("embedding_jobs")).isEqualTo(1)
 
         val artifactLookup = getJson(
@@ -182,29 +182,8 @@ class ApiIntegrationTest {
             .isEqualTo("${fixture.sourcePath}#chunk-0")
         assertThat(keywordResults["nextCursor"].isNull).isTrue()
 
-        val vectorResults = postJson(
-            "/api/search/vector",
-            mapOf(
-                "embedding" to listOf(1.0f, 0.0f),
-                "embeddingModel" to fixture.embeddingModel,
-                "embeddingDimension" to 2,
-                "embeddingVersion" to fixture.embeddingVersion,
-                "distanceMetric" to "COSINE",
-                "projectId" to fixture.projectId,
-                "iterationId" to fixture.iterationId,
-                "taskId" to fixture.taskId,
-                "runId" to fixture.runId,
-                "metadataFilters" to emptyMap<String, String>(),
-                "limit" to 5,
-            ),
-        ).expectOkJson()
-        assertThat(vectorResults["items"].single()["chunkId"].asText()).isEqualTo(fixture.chunkId)
-        assertThat(vectorResults["items"].single()["distanceMetric"].asText()).isEqualTo("COSINE")
-        assertThat(vectorResults["items"].single()["embeddingModel"].asText()).isEqualTo(fixture.embeddingModel)
-        assertThat(vectorResults["items"].single()["sourceIds"]["sourceRunId"].asText()).isEqualTo(fixture.sourceRunId)
-        assertThat(vectorResults["items"].single()["citation"]["sourceReference"]["path"].asText())
-            .isEqualTo("${fixture.sourcePath}#chunk-0")
-        assertThat(vectorResults["nextCursor"].isNull).isTrue()
+        postJson("/api/search/vector", mapOf("embedding" to listOf(1.0f, 0.0f)))
+            .andExpect(status().isNotFound())
 
         val hybridProviderFailure = postJson(
             "/api/search/hybrid",
@@ -564,6 +543,35 @@ class ApiIntegrationTest {
     }
 
     @Test
+    fun `bulk chunk endpoint rejects removed client embedding fields`() {
+        listOf(
+            "embeddingSet" to emptyMap<String, String>(),
+            "embedding" to listOf(1.0f),
+            "embeddingHash" to "legacy-embedding-hash",
+        ).forEach { (field, value) ->
+            postJson(
+                "/api/document-chunks/bulk",
+                mapOf(
+                    "documentId" to uuid("removed-$field-document"),
+                    "chunks" to listOf(
+                        mapOf(
+                            "chunk" to emptyMap<String, String>(),
+                            field to value,
+                        ),
+                    ),
+                ),
+            )
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("validation_error"))
+        }
+        listOf("/api/search/semantic", "/api/search/hybrid").forEach { path ->
+            postJson(path, mapOf("q" to "decision", "embedding" to listOf(1.0f)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("validation_error"))
+        }
+    }
+
+    @Test
     fun `compose smoke path is configured and actuator health reports database connectivity`() {
         val compose = Path.of("compose.yaml").toFile().readText()
         val application = Path.of("src/main/resources/application.yml").toFile().readText()
@@ -702,7 +710,6 @@ private data class ApiFixture(
     val taskId: String = uuid("$scope-task")
     val runId: String = uuid("$scope-run")
     val chunkId: String = uuid("$scope-chunk")
-    val embeddingSetId: String = uuid("$scope-embedding-set")
     val sourceProjectId: String = "source-project-$scope"
     val sourceIterationId: String = "source-iteration-$scope"
     val sourceDocumentId: String = "source-document-$scope"
@@ -713,9 +720,6 @@ private data class ApiFixture(
     val documentHash: String = "document-hash-$scope"
     val graphHash: String = "task-graph-hash-$scope"
     val chunkHash: String = "chunk-hash-$scope"
-    val embeddingHash: String = "embedding-hash-$scope"
-    val embeddingModel: String = "text-embedding-api"
-    val embeddingVersion: String = "v1"
     val decisionNodeId: String = uuid("$scope-decision-node")
     val specSectionNodeId: String = uuid("$scope-spec-section-node")
     val taskGraphNodeId: String = uuid("$scope-task-node")
@@ -915,19 +919,6 @@ private data class ApiFixture(
                         "createdAt" to NOW,
                         "metadata" to mapOf("phase" to "gate-e", "kind" to "chunk"),
                     ),
-                    "embeddingSet" to mapOf(
-                        "embeddingSetId" to embeddingSetId,
-                        "projectId" to projectId,
-                        "embeddingModel" to embeddingModel,
-                        "embeddingDimension" to 2,
-                        "embeddingVersion" to embeddingVersion,
-                        "distanceMetric" to "COSINE",
-                        "storageType" to "VECTOR_INDEX",
-                        "createdAt" to NOW,
-                        "metadata" to emptyMap<String, String>(),
-                    ),
-                    "embedding" to listOf(1.0f, 0.0f),
-                    "embeddingHash" to embeddingHash,
                 ),
             ),
         )

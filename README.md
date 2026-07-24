@@ -2,7 +2,7 @@
 
 Plan2Agent Memory Server는 로컬 P2A 산출물을 관계형으로 저장하고 검색하기 위한 headless REST service입니다. 로컬 파일이 원본(source of truth)이고, 이 서버는 동기화된 artifact의 canonical ID, lineage, hash, relation, keyword/vector 검색 인덱스를 제공하는 보조 저장소입니다.
 
-서버는 P2A harness, agent, 외부 AI API를 실행하지 않습니다. Embedding 값은 외부 클라이언트가 생성해 주입하며, 서버는 받은 embedding을 `embedding_sets`와 `chunk_embeddings`에 저장하고 검색합니다.
+서버는 P2A harness나 agent를 실행하지 않습니다. Chunk 저장과 query text 검색에서 필요한 embedding 생성·작업 관리는 서버가 소유하며, 클라이언트는 embedding 값이나 embedding model metadata를 전송하지 않습니다.
 
 ## 로컬 실행
 
@@ -163,11 +163,11 @@ Base URL은 기본 실행 기준 `http://localhost:8080`입니다. 인증이 켜
 | `POST` | `/api/task-graphs` | task graph JSON과 graph metadata를 저장합니다. | 필요 |
 | `POST` | `/api/tasks/bulk` | task graph에 속한 task 목록을 bulk 저장합니다. | 필요 |
 | `POST` | `/api/runs` | task 실행 기록을 저장합니다. | 필요 |
-| `POST` | `/api/document-chunks/bulk` | 문서 chunk와 선택적 embedding을 bulk 저장합니다. | 필요 |
+| `POST` | `/api/document-chunks/bulk` | 문서 chunk를 bulk 저장하고 서버 embedding 작업을 enqueue합니다. | 필요 |
 | `GET` | `/api/artifacts` | 저장된 artifact를 filter 조건으로 조회합니다. | 필요 |
 | `GET` | `/api/search/keyword` | RAG/history lookup을 위한 keyword 검색을 수행합니다. | 필요 |
-| `POST` | `/api/search/vector` | 외부 query embedding으로 vector 검색을 수행합니다. | 필요 |
-| `POST` | `/api/search/hybrid` | keyword와 vector 후보를 RRF로 융합해 검색합니다. | 필요 |
+| `POST` | `/api/search/semantic` | q 텍스트를 서버 embedding으로 semantic 검색합니다. | 필요 |
+| `POST` | `/api/search/hybrid` | q 텍스트의 keyword와 server-managed semantic 후보를 RRF로 융합합니다. | 필요 |
 | `GET` | `/api/health` | 간단한 API health check입니다. | 불필요 |
 | `GET` | `/actuator/health` | Spring Actuator health check입니다. | 불필요 |
 | `GET` | `/actuator/metrics` | Micrometer metric 목록을 조회합니다. | 불필요 |
@@ -334,7 +334,7 @@ Task 실행 기록을 저장합니다.
 
 ### `POST /api/document-chunks/bulk`
 
-문서 chunk와 선택적 embedding을 저장합니다. `embeddingSet`과 `embedding`은 함께 제공해야 하며, 둘 중 하나만 있으면 validation error입니다.
+문서 chunk만 저장합니다. 서버는 저장 성공 후 활성 embedding 구성에 대한 durable embedding 작업을 enqueue합니다. 요청에는 `embeddingSet`, `embedding`, `embeddingHash`를 포함할 수 없으며, 제거된 field는 unknown-field validation error로 거부됩니다.
 
 | Request field | 필수 | 설명 |
 | --- | --- | --- |
@@ -352,23 +352,27 @@ Task 실행 기록을 저장합니다.
 | `chunks[].chunk.tokenEstimate` | 선택 | Token 추정치입니다. |
 | `chunks[].chunk.sourceReference` | 선택 | 원본 위치 참조 정보입니다. |
 | `chunks[].chunk.metadata` | 선택 | Chunk 확장 metadata입니다. |
-| `chunks[].embeddingSet` | 선택 | Embedding set 정보입니다. |
-| `chunks[].embedding` | 선택 | 외부 클라이언트가 생성한 vector입니다. |
-| `chunks[].embeddingHash` | 선택 | Embedding vector hash입니다. |
-
-| `embeddingSet` field | 필수 | 설명 |
-| --- | --- | --- |
-| `embeddingSetId` | 선택 | Canonical embedding set ID입니다. |
-| `projectId` | 필수 | 소속 project ID입니다. |
-| `embeddingModel` | 필수 | Embedding model 이름입니다. |
-| `embeddingDimension` | 필수 | Vector 차원입니다. |
-| `embeddingVersion` | 필수 | Embedding model/version 문자열입니다. |
-| `distanceMetric` | 필수 | `COSINE`, `L2`, `INNER_PRODUCT` 중 하나입니다. |
-| `storageType` | 필수 | `VECTOR_INDEX`, `INLINE`, `EXTERNAL` 중 하나입니다. |
 
 | Response | 포함 정보 |
 | --- | --- |
 | `DocumentChunkResponse[]` | 저장된 chunk 목록과 `chunkHash`, `lineage.taskId`, `lineage.runId`, `sourceReference` |
+
+```json
+{
+  "documentId": "<document-id>",
+  "chunks": [{
+    "chunk": {
+      "chunkId": "<chunk-id>",
+      "projectId": "<project-id>",
+      "artifactType": "DOCUMENT_SNAPSHOT",
+      "sourcePath": "docs/spec.md",
+      "chunkIndex": 0,
+      "content": "Chunk text",
+      "chunkHash": "sha256:..."
+    }
+  }]
+}
+```
 
 ### `GET /api/artifacts`
 
@@ -428,32 +432,26 @@ RAG/history lookup을 위한 deterministic lexical retrieval입니다.
 | --- | --- |
 | `PagedResponse<KeywordSearchResponse>` | `items` 안의 `content`, `score`, `matchReason`, `lineage`, `sourceIds`, `sourceReference`, `citation`, `metadata`; 다음 페이지가 있을 때만 채워지는 opaque `nextCursor` |
 
-### `POST /api/search/vector`
+### `POST /api/search/semantic`
 
-외부에서 받은 query embedding으로 pgvector 검색을 수행합니다.
+서버가 q 텍스트로 query embedding을 생성하고 현재 활성 embedding set만 검색합니다. 외부 query vector와 model/dimension/version/metric 입력은 지원하지 않습니다.
 
 | Request field | 필수 | 설명 |
 | --- | --- | --- |
-| `embedding` | 필수 | Query vector입니다. 비어 있으면 validation error입니다. |
-| `embeddingModel` | 필수 | 검색할 embedding model 이름입니다. |
-| `embeddingDimension` | 필수 | Vector 차원입니다. `embedding.size`와 같아야 합니다. |
-| `embeddingVersion` | 필수 | 검색할 embedding version입니다. |
-| `distanceMetric` | 선택 | 생략 시 `COSINE`입니다. |
-| `projectId` | 선택 | Project ID filter입니다. |
-| `iterationId` | 선택 | Iteration ID filter입니다. |
-| `artifactType` | 선택 | Artifact type filter입니다. |
-| `sourcePath` | 선택 | 정규화된 source path filter입니다. |
-| `taskId` | 선택 | Canonical task ID filter입니다. |
-| `runId` | 선택 | Canonical run ID filter입니다. |
+| `q` | 필수 | 검색 query text입니다. |
+| `projectId`, `iterationId`, `artifactType`, `sourcePath`, `taskId`, `runId` | 선택 | 활성 embedding set 검색에 적용할 filter입니다. |
 | `metadataFilters` | 선택 | Metadata key/value filter입니다. |
 | `limit` | 선택 | 최대 응답 개수입니다. |
-| `cursor` | 선택 | 이전 응답의 `nextCursor`입니다. 같은 filter와 함께 넘기면 다음 페이지를 keyset 방식으로 조회합니다. |
+| `cursor` | 선택 | 이전 응답의 request-bound `nextCursor`입니다. |
 
-| 검색 동작 | 설명 |
-| --- | --- |
-| Matching scope | 같은 `embeddingModel`, `embeddingDimension`, `embeddingVersion`, `distanceMetric` embedding set 안에서만 검색합니다. |
-| Dimension validation | 저장된 embedding set 차원과 요청 차원이 다르면 validation error입니다. |
-| Search mode | `embeddingDimension`이 2 또는 1536이면 고정 차원 보조 테이블(`chunk_embedding_vectors_2`, `chunk_embedding_vectors_1536`)과 HNSW 인덱스 대상 컬럼을 사용합니다. 그 외 차원은 기존 untyped vector 컬럼 경로를 사용합니다. |
+```json
+{
+  "q": "결제 취소 정책",
+  "projectId": "<project-id>",
+  "metadataFilters": {"kind": "decision"},
+  "limit": 20
+}
+```
 
 | Response | 포함 정보 |
 | --- | --- |
@@ -461,26 +459,31 @@ RAG/history lookup을 위한 deterministic lexical retrieval입니다.
 
 ### `POST /api/search/hybrid`
 
-Keyword 후보와 vector 후보를 각각 조회한 뒤 reciprocal rank fusion(RRF)으로 합쳐 반환합니다.
+q 텍스트에서 keyword 후보와 server-managed semantic 후보를 각각 조회한 뒤 reciprocal rank fusion(RRF)으로 합쳐 반환합니다.
 
 | Request field | 필수 | 설명 |
 | --- | --- | --- |
 | `q` | 필수 | Keyword query입니다. |
-| `embedding` | 필수 | Query vector입니다. 비어 있으면 validation error입니다. |
-| `embeddingModel` | 필수 | 검색할 embedding model 이름입니다. |
-| `embeddingDimension` | 필수 | Vector 차원입니다. `embedding.size`와 같아야 합니다. |
-| `embeddingVersion` | 필수 | 검색할 embedding version입니다. |
-| `distanceMetric` | 선택 | 생략 시 `COSINE`입니다. |
-| `projectId`, `iterationId`, `artifactType`, `sourcePath`, `taskId`, `runId` | 선택 | Keyword/vector 양쪽 후보 조회에 동일하게 적용되는 filter입니다. |
+| `projectId`, `iterationId`, `artifactType`, `sourcePath`, `taskId`, `runId` | 선택 | Keyword/semantic 양쪽 후보 조회에 동일하게 적용되는 filter입니다. |
 | `metadataFilters` | 선택 | Metadata key/value filter입니다. |
 | `rrfK` | 선택 | RRF 상수입니다. 기본값은 `60`입니다. |
 | `candidateLimit` | 선택 | 각 arm에서 가져올 후보 수입니다. 생략 시 `max(80, limit * 4)`입니다. |
 | `limit` | 선택 | 최종 응답 개수입니다. |
 | `cursor` | 선택 | 이전 응답의 `nextCursor`입니다. 같은 filter와 함께 넘기면 다음 fused 후보 페이지를 조회합니다. |
 
+```json
+{
+  "q": "결제 취소 정책",
+  "projectId": "<project-id>",
+  "rrfK": 60,
+  "candidateLimit": 80,
+  "limit": 20
+}
+```
+
 | 검색 동작 | 설명 |
 | --- | --- |
-| Fusion | 같은 chunk는 하나의 hit로 병합하고, keyword/vector arm별 rank와 원 score를 `keyword`, `vector`에 노출합니다. |
+| Fusion | 같은 chunk는 하나의 hit로 병합하고, keyword/semantic arm별 rank와 원 score를 `keyword`, `vector`에 노출합니다. |
 | Score | 최종 `score`는 RRF 점수입니다. Arm별 `score`는 각 검색 backend의 opaque 점수입니다. |
 | Cursor scope | Hybrid cursor는 현재 `candidateLimit` 안에서 만든 fused 후보 목록 기준입니다. 완전한 전역 pagination이 필요하면 `candidateLimit`을 충분히 크게 잡아야 합니다. |
 
@@ -490,7 +493,7 @@ Keyword 후보와 vector 후보를 각각 조회한 뒤 reciprocal rank fusion(R
 
 ### Search citation
 
-Keyword, vector, hybrid hit는 모두 `lineage`, `sourceIds`, `sourceReference`를 top-level로 유지하면서 같은 정보를 `citation` object로도 제공합니다. 클라이언트는 `citation.sourceReference.path`, `citation.lineage.chunkId`, `citation.sourceIds.sourceDocumentId`를 함께 사용해 검색 결과를 원본 산출물 위치와 연결할 수 있습니다.
+Keyword, semantic, hybrid hit는 모두 `lineage`, `sourceIds`, `sourceReference`를 top-level로 유지하면서 같은 정보를 `citation` object로도 제공합니다. 클라이언트는 `citation.sourceReference.path`, `citation.lineage.chunkId`, `citation.sourceIds.sourceDocumentId`를 함께 사용해 검색 결과를 원본 산출물 위치와 연결할 수 있습니다.
 
 ### Observability endpoints
 
@@ -522,13 +525,15 @@ Keyword, vector, hybrid hit는 모두 `lineage`, `sourceIds`, `sourceReference`�
 
 ### Chunk embedding
 
-같은 `chunkId`와 `embeddingSetId`에 같은 `embeddingHash`와 같은 vector가 반복 저장되면 idempotent하게 기존 row를 반환합니다.
-
-같은 `chunkId`와 `embeddingSetId`에 다른 `embeddingHash` 또는 다른 vector를 저장하려 하면 conflict입니다. 서버는 명시적 overwrite/update 정책 없이 기존 embedding을 덮어쓰지 않습니다.
+`embedding_sets`와 `chunk_embeddings`는 서버가 관리하는 persisted vector data입니다. 기존 row는 제거된 REST 요청 형식으로 덮어쓰거나 삭제하지 않으며, 새 chunk의 embedding은 durable job worker가 활성 set에 추가합니다.
 
 새 embedding model 또는 version으로 전환할 때는 새 `embedding_sets` row와 새 `chunk_embeddings` row를 추가해 점진 전환과 비교 평가가 가능하게 합니다.
 
-`embeddingDimension`이 2 또는 1536인 embedding은 legacy `chunk_embeddings.embedding`에 저장한 뒤 고정 차원 보조 테이블에도 복사됩니다. 이 보조 테이블에는 cosine, L2, inner-product용 HNSW 인덱스가 있으며, vector 검색 adapter는 해당 차원에서 보조 테이블을 우선 사용합니다. 다른 차원은 schema 확장 전까지 legacy untyped vector 경로를 유지합니다.
+`embeddingDimension`이 2 또는 1536인 legacy embedding은 고정 차원 보조 테이블에도 보존됩니다. active semantic search는 서버가 선택한 active embedding set으로 범위를 제한합니다.
+
+### Breaking client migration
+
+`POST /api/document-chunks/bulk`에서 `embeddingSet`, `embedding`, `embeddingHash`를 제거했습니다. `POST /api/search/vector`도 제거되며 해당 path는 `404`입니다. 클라이언트는 chunk-only bulk payload를 보내고 text `q`가 필요한 검색은 `/api/search/semantic` 또는 `/api/search/hybrid`를 사용해야 합니다. semantic/hybrid 요청에 이전 vector/model/dimension/version/metric field를 보내면 validation error입니다.
 
 ## Path 처리
 
@@ -543,7 +548,7 @@ Keyword, vector, hybrid hit는 모두 `lineage`, `sourceIds`, `sourceReference`�
 
 이 문서에서 `rawSourcePath`는 클라이언트가 보낸 원본 path를 의미합니다. REST payload에는 별도 top-level `rawSourcePath` field가 없고, `sourceReference.path`가 원본 path 역할을 합니다. 서버는 `sourceReference.path`를 DB 컬럼 `raw_source_path`에 보존합니다.
 
-문서와 chunk 응답의 `sourcePath`는 정규화된 path입니다. `/api/artifacts`, `/api/search/keyword`, `/api/search/vector`, `/api/search/hybrid`의 `sourcePath` filter도 `normalizedPath` 기준으로 비교됩니다. 클라이언트가 로컬 파일과 다시 매칭할 때는 `sourcePath`, `artifactType`, `contentHash`, `snapshotVersion`, `sourceReference`를 함께 사용해야 합니다.
+문서와 chunk 응답의 `sourcePath`는 정규화된 path입니다. `/api/artifacts`, `/api/search/keyword`, `/api/search/semantic`, `/api/search/hybrid`의 `sourcePath` filter도 `normalizedPath` 기준으로 비교됩니다. 클라이언트가 로컬 파일과 다시 매칭할 때는 `sourcePath`, `artifactType`, `contentHash`, `snapshotVersion`, `sourceReference`를 함께 사용해야 합니다.
 
 ## Error semantics
 

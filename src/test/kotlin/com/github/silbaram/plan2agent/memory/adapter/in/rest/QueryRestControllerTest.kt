@@ -10,7 +10,6 @@ import com.github.silbaram.plan2agent.memory.application.port.`in`.HybridSearchU
 import com.github.silbaram.plan2agent.memory.application.port.`in`.KeywordSearchUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.SemanticSearchUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.TraceArtifactGraphUseCase
-import com.github.silbaram.plan2agent.memory.application.port.`in`.VectorSearchUseCase
 import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingTarget
 import com.github.silbaram.plan2agent.memory.application.port.out.ActiveVectorSearchQuery
 import com.github.silbaram.plan2agent.memory.application.port.out.ProviderNotConfiguredException
@@ -35,7 +34,6 @@ import com.github.silbaram.plan2agent.memory.domain.ContentHash
 import com.github.silbaram.plan2agent.memory.domain.DistanceMetric
 import com.github.silbaram.plan2agent.memory.domain.DocumentChunkId
 import com.github.silbaram.plan2agent.memory.domain.DocumentId
-import com.github.silbaram.plan2agent.memory.domain.Embedding
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingSetId
 import com.github.silbaram.plan2agent.memory.domain.HybridSearchArm
 import com.github.silbaram.plan2agent.memory.domain.HybridSearchMatch
@@ -69,7 +67,6 @@ class QueryRestControllerTest {
     private val findArtifacts = FakeFindArtifactsUseCase()
     private val keywordSearch = FakeKeywordSearchUseCase()
     private val semanticSearch = FakeSemanticSearchUseCase()
-    private val vectorSearch = FakeVectorSearchUseCase()
     private val hybridSearch = FakeHybridSearchUseCase()
     private val findGraphNodes = FakeFindArtifactGraphNodesUseCase()
     private val traceGraph = FakeTraceArtifactGraphUseCase()
@@ -77,7 +74,6 @@ class QueryRestControllerTest {
         findArtifactsUseCase = findArtifacts,
         keywordSearchUseCase = keywordSearch,
         semanticSearchUseCase = semanticSearch,
-        vectorSearchUseCase = vectorSearch,
         hybridSearchUseCase = hybridSearch,
         findArtifactGraphNodesUseCase = findGraphNodes,
         traceArtifactGraphUseCase = traceGraph,
@@ -285,86 +281,6 @@ class QueryRestControllerTest {
     }
 
     @Test
-    fun `vector search validates embedding request and maps metadata filters`() {
-        vectorSearch.result = PagedResult(
-            items = listOf(
-                VectorSearchMatch(
-                    chunkId = RestTestIds.chunkId,
-                    documentId = RestTestIds.documentId,
-                    projectId = RestTestIds.projectId,
-                    iterationId = RestTestIds.iterationId,
-                    artifactType = ArtifactType.DOCUMENT_CHUNK,
-                    sourcePath = "runs/task.md",
-                    chunkIndex = 1,
-                    content = "similar content",
-                    score = 0.12,
-                    distanceMetric = DistanceMetric.COSINE,
-                    embeddingModel = "text-embedding-test",
-                    embeddingVersion = "v1",
-                    metadata = mapOf("sourceRunId" to "source-run", "sourceChunkId" to "source-chunk"),
-                    sourceReference = SourceReference(CanonicalServerId(RestTestIds.chunkId.value), "file:///repo/runs/task.md"),
-                ),
-            ),
-            nextCursor = "next-vector-cursor",
-        )
-
-        val response = controller.vectorSearch(
-            VectorSearchRequest(
-                embedding = listOf(0.1f, 0.2f),
-                embeddingModel = "text-embedding-test",
-                embeddingDimension = 2,
-                embeddingVersion = "v1",
-                distanceMetric = "cosine",
-                projectId = RestTestIds.projectId.value,
-                iterationId = RestTestIds.iterationId.value,
-                artifactType = "document_chunk",
-                sourcePath = "runs/task.md",
-                taskId = RestTestIds.taskId.value,
-                runId = RestTestIds.runId.value,
-                metadataFilters = mapOf("kind" to "gate-d"),
-                limit = 5,
-                cursor = "vector-cursor",
-            ),
-        )
-
-        assertThat(vectorSearch.received).isEqualTo(
-            VectorSearchQuery(
-                embedding = Embedding(listOf(0.1f, 0.2f)),
-                embeddingModel = "text-embedding-test",
-                embeddingDimension = 2,
-                embeddingVersion = "v1",
-                distanceMetric = DistanceMetric.COSINE,
-                projectId = RestTestIds.projectId,
-                iterationId = RestTestIds.iterationId,
-                artifactType = ArtifactType.DOCUMENT_CHUNK,
-                sourcePath = "runs/task.md",
-                taskId = RestTestIds.taskId,
-                runId = RestTestIds.runId,
-                metadataFilters = mapOf("kind" to "gate-d"),
-                limit = 5,
-                cursor = "vector-cursor",
-            ),
-        )
-        assertThat(response.items.single().embeddingModel).isEqualTo("text-embedding-test")
-        assertThat(response.items.single().sourceIds.sourceRunId).isEqualTo("source-run")
-        assertThat(response.items.single().citation.sourceReference?.uri).isEqualTo("file:///repo/runs/task.md")
-        assertThat(response.nextCursor).isEqualTo("next-vector-cursor")
-
-        assertThatThrownBy {
-            controller.vectorSearch(
-                VectorSearchRequest(
-                    embedding = listOf(0.1f, 0.2f),
-                    embeddingModel = "text-embedding-test",
-                    embeddingDimension = 3,
-                    embeddingVersion = "v1",
-                ),
-            )
-        }
-            .isInstanceOf(IllegalArgumentException::class.java)
-            .hasMessageContaining("embeddingDimension must match embedding size")
-    }
-
-    @Test
     fun `semantic search accepts text and filters only then preserves vector citation response`() {
         semanticSearch.result = PagedResult(
             items = listOf(
@@ -436,7 +352,7 @@ class QueryRestControllerTest {
     }
 
     @Test
-    fun `semantic and hybrid REST contracts expose stable provider 503 errors and reject client vectors`() {
+    fun `q-only search and chunk contracts reject removed client embedding fields`() {
         val errors = RestExceptionHandler()
         val notConfigured = errors.embeddingProviderNotConfigured(ProviderNotConfiguredException())
         val unavailable = errors.embeddingProviderUnavailable(ProviderUnavailableException())
@@ -447,20 +363,48 @@ class QueryRestControllerTest {
         assertThat(unavailable.body?.error).isEqualTo("embedding_provider_unavailable")
         assertThat(JacksonObjectMapperConfig().objectMapper().writeValueAsString(notConfigured.body))
             .contains("embedding_provider_not_configured")
-        assertThatThrownBy {
-            JacksonObjectMapperConfig().objectMapper().readValue(
-                """{"q":"결제 취소 정책","embedding":[0.1]}""",
-                SemanticSearchRequest::class.java,
-            )
+        val objectMapper = JacksonObjectMapperConfig().objectMapper()
+        val removedSearchFields = listOf(
+            "embedding" to "[0.1]",
+            "embeddingModel" to "\"legacy-model\"",
+            "embeddingDimension" to "384",
+            "embeddingVersion" to "\"legacy-version\"",
+            "distanceMetric" to "\"COSINE\"",
+        )
+        removedSearchFields.forEach { (field, value) ->
+            assertThatThrownBy {
+                objectMapper.readValue("""{"q":"결제 취소 정책","$field":$value}""", SemanticSearchRequest::class.java)
+            }.isInstanceOf(UnrecognizedPropertyException::class.java)
+            assertThatThrownBy {
+                objectMapper.readValue("""{"q":"결제 취소 정책","$field":$value}""", HybridSearchRequest::class.java)
+            }.isInstanceOf(UnrecognizedPropertyException::class.java)
         }
-            .isInstanceOf(UnrecognizedPropertyException::class.java)
-        assertThatThrownBy {
-            JacksonObjectMapperConfig().objectMapper().readValue(
-                """{"q":"결제 취소 정책","embedding":[0.1]}""",
-                HybridSearchRequest::class.java,
-            )
+        listOf(
+            "embeddingSet" to "{}",
+            "embedding" to "[0.1]",
+            "embeddingHash" to "\"legacy-hash\"",
+        ).forEach { (field, value) ->
+            assertThatThrownBy {
+                objectMapper.readValue(
+                    """{"documentId":"document","chunks":[{"chunk":{},"$field":$value}]}""",
+                    DocumentChunksBulkWriteRequest::class.java,
+                )
+            }.isInstanceOf(UnrecognizedPropertyException::class.java)
         }
-            .isInstanceOf(UnrecognizedPropertyException::class.java)
+    }
+
+    @Test
+    fun `removed vector endpoint has no replacement handler`() {
+        val mockMvc = MockMvcBuilders.standaloneSetup(controller)
+            .setControllerAdvice(RestExceptionHandler())
+            .setMessageConverters(MappingJackson2HttpMessageConverter(JacksonObjectMapperConfig().objectMapper()))
+            .build()
+
+        mockMvc.perform(
+            post("/api/search/vector")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""{"embedding":[0.1]}"""),
+        ).andExpect(status().isNotFound())
     }
 
     @Test
@@ -482,7 +426,6 @@ class QueryRestControllerTest {
             findArtifactsUseCase = findArtifacts,
             keywordSearchUseCase = keywordSearch,
             semanticSearchUseCase = boundSemanticSearch,
-            vectorSearchUseCase = vectorSearch,
             hybridSearchUseCase = hybridSearch,
             findArtifactGraphNodesUseCase = findGraphNodes,
             traceArtifactGraphUseCase = traceGraph,
@@ -622,16 +565,6 @@ private class FakeKeywordSearchUseCase : KeywordSearchUseCase {
     var result: PagedResult<KeywordSearchMatch> = PagedResult(emptyList(), nextCursor = "next-keyword-cursor")
 
     override fun keywordSearch(query: KeywordSearchQuery): PagedResult<KeywordSearchMatch> {
-        received = query
-        return result
-    }
-}
-
-private class FakeVectorSearchUseCase : VectorSearchUseCase {
-    var received: VectorSearchQuery? = null
-    var result: PagedResult<VectorSearchMatch> = PagedResult(emptyList(), nextCursor = "next-vector-cursor")
-
-    override fun vectorSearch(query: VectorSearchQuery): PagedResult<VectorSearchMatch> {
         received = query
         return result
     }
