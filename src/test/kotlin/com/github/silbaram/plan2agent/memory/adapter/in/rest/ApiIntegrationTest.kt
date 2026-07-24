@@ -34,6 +34,7 @@ import java.util.concurrent.TimeUnit
 @SpringBootTest(
     properties = [
         "p2a.security.token=local-api-test-token",
+        "p2a.memory.scheduling.enabled=false",
     ],
 )
 class ApiIntegrationTest {
@@ -436,6 +437,32 @@ class ApiIntegrationTest {
                 ))
             },
         ).andExpect(status().isBadRequest())
+    }
+
+    @Test
+    fun `graph snapshot fixtures stay isolated across successive replacements`() {
+        val fixtures = listOf(
+            ApiFixture("graph-api-first"),
+            ApiFixture("graph-api-second"),
+        )
+
+        fixtures.forEach { fixture ->
+            saveSyncFixture(fixture)
+            postJson("/api/graph/snapshots", fixture.graphSnapshotBody(includeStaleEvidence = true)).expectCreatedJson()
+            postJson("/api/graph/snapshots", fixture.graphSnapshotBody(includeStaleEvidence = false)).expectCreatedJson()
+
+            val nodes = getJson(
+                "/api/graph/nodes?projectId=${fixture.projectId}" +
+                    "&iterationId=${fixture.iterationId}&nodeKind=task&query=Graph&limit=5",
+            ).expectOkJson()
+            val node = nodes.single()
+            assertThat(node["naturalKey"].asText()).isEqualTo("task:${fixture.sourceTaskId}")
+            assertThat(node["projectId"].asText()).isEqualTo(fixture.projectId)
+            assertThat(node["iterationId"].asText()).isEqualTo(fixture.iterationId)
+        }
+
+        assertThat(rowCount("artifact_nodes")).isEqualTo(6)
+        assertThat(rowCount("artifact_edges")).isEqualTo(4)
     }
 
     @Test

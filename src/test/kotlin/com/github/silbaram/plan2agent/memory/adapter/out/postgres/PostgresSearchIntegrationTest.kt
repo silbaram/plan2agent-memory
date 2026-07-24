@@ -66,7 +66,7 @@ import java.sql.DriverManager
 import java.time.Instant
 import java.util.UUID
 
-@SpringBootTest
+@SpringBootTest(properties = ["p2a.memory.scheduling.enabled=false"])
 class PostgresSearchIntegrationTest {
     @Autowired
     private lateinit var jdbc: JdbcTemplate

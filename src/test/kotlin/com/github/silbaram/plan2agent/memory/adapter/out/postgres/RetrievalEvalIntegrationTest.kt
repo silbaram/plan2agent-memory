@@ -47,7 +47,7 @@ import java.time.Instant
 import java.util.UUID
 import kotlin.math.ln
 
-@SpringBootTest
+@SpringBootTest(properties = ["p2a.memory.scheduling.enabled=false"])
 class RetrievalEvalIntegrationTest {
     @Autowired
     private lateinit var jdbc: JdbcTemplate
