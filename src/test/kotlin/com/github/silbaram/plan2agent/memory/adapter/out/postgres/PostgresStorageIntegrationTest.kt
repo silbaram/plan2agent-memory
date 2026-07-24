@@ -121,7 +121,13 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
-@SpringBootTest(properties = ["p2a.embedding.provider=none", "p2a.memory.embedding.worker.enabled=false"])
+@SpringBootTest(
+    properties = [
+        "p2a.embedding.provider=none",
+        "p2a.memory.embedding.worker.enabled=false",
+        "p2a.memory.scheduling.enabled=false",
+    ],
+)
 class PostgresStorageIntegrationTest {
     @Autowired
     private lateinit var jdbc: JdbcTemplate

@@ -71,6 +71,7 @@ import java.util.concurrent.TimeUnit
         "p2a.security.token=fake-provider-v2-test-token",
         "p2a.embedding.provider=none",
         "p2a.memory.embedding.worker.enabled=false",
+        "p2a.memory.scheduling.enabled=false",
     ],
 )
 @Import(FakeProviderV2EndToEndIntegrationTest.FakeProviderConfiguration::class)
@@ -167,6 +168,7 @@ class FakeProviderV2EndToEndIntegrationTest {
         assertThat(rowCount("document_chunks")).isEqualTo(2L)
         assertThat(rowCount("embedding_jobs")).isEqualTo(2L)
 
+        makeEmbeddingJobsDue()
         runWorker(fakeEmbeddingPort)
         assertThat(jobStatuses()).containsOnly(EmbeddingJobStatus.SUCCEEDED.name.lowercase())
         assertThat(rowCount("chunk_embeddings")).isEqualTo(2L)
@@ -237,6 +239,7 @@ class FakeProviderV2EndToEndIntegrationTest {
         val ranking = koreanRankingFixture()
         ranking.installInto(fakeEmbeddingPort)
         saveRestFixture(fixture, ranking.documentsInExpectedRankOrder)
+        makeEmbeddingJobsDue()
 
         fakeEmbeddingPort.providerState = com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingProviderState.NOT_CONFIGURED
         postJson("/api/search/semantic", fixture.semanticRequest(ranking.query, limit = 1))
@@ -364,6 +367,10 @@ class FakeProviderV2EndToEndIntegrationTest {
 
     private fun jobStatuses(): List<String> =
         jdbc.query("SELECT status FROM embedding_jobs ORDER BY embedding_job_id") { row, _ -> row.getString("status") }
+
+    private fun makeEmbeddingJobsDue() {
+        jdbc.update("UPDATE embedding_jobs SET next_attempt_at = now() - INTERVAL '1 second'")
+    }
 
     private fun rowCount(table: String): Long =
         jdbc.queryForObject("SELECT count(*) FROM $table", Long::class.java) ?: 0L
