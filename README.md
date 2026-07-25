@@ -530,18 +530,20 @@ RAG/history lookup을 위한 deterministic lexical retrieval입니다.
 
 서버가 q 텍스트로 query embedding을 생성하고 현재 활성 embedding set만 검색합니다. 외부 query vector와 model/dimension/version/metric 입력은 지원하지 않습니다.
 
+`projectId` filter에는 P2A artifact의 사람용 source/display key가 아니라 Memory 서버의 canonical UUID를 전달해야 합니다. P2A 하네스에서는 `p2a memory status` 또는 `p2a memory push --dry-run`의 `canonical project ID` 출력으로 확인할 수 있고, JSON 출력에서는 `context.canonicalProjectId`를 사용합니다. 서버 API만 사용할 때는 `GET /api/artifacts` 응답의 `projectId`로 확인할 수 있습니다.
+
 | Request field | 필수 | 설명 |
 | --- | --- | --- |
 | `q` | 필수 | 검색 query text입니다. |
 | `projectId`, `iterationId`, `artifactType`, `sourcePath`, `taskId`, `runId` | 선택 | 활성 embedding set 검색에 적용할 filter입니다. |
-| `metadataFilters` | 선택 | Metadata key/value filter입니다. |
+| `metadataFilters` | 선택 | Metadata key/value filter입니다. 생략하거나 `null`을 보내면 빈 map으로 처리합니다. |
 | `limit` | 선택 | 최대 응답 개수입니다. |
 | `cursor` | 선택 | 이전 응답의 request-bound `nextCursor`입니다. |
 
 ```json
 {
   "q": "결제 취소 정책",
-  "projectId": "<project-id>",
+  "projectId": "<canonical-project-uuid>",
   "metadataFilters": {"kind": "decision"},
   "limit": 20
 }
@@ -559,7 +561,7 @@ q 텍스트에서 keyword 후보와 server-managed semantic 후보를 각각 조
 | --- | --- | --- |
 | `q` | 필수 | Keyword query입니다. |
 | `projectId`, `iterationId`, `artifactType`, `sourcePath`, `taskId`, `runId` | 선택 | Keyword/semantic 양쪽 후보 조회에 동일하게 적용되는 filter입니다. |
-| `metadataFilters` | 선택 | Metadata key/value filter입니다. |
+| `metadataFilters` | 선택 | Metadata key/value filter입니다. 생략하거나 `null`을 보내면 빈 map으로 처리합니다. |
 | `rrfK` | 선택 | RRF 상수입니다. 기본값은 `60`입니다. |
 | `candidateLimit` | 선택 | 각 arm에서 가져올 후보 수입니다. 생략 시 `max(80, limit * 4)`입니다. |
 | `limit` | 선택 | 최종 응답 개수입니다. |
@@ -568,7 +570,7 @@ q 텍스트에서 keyword 후보와 server-managed semantic 후보를 각각 조
 ```json
 {
   "q": "결제 취소 정책",
-  "projectId": "<project-id>",
+  "projectId": "<canonical-project-uuid>",
   "rrfK": 60,
   "candidateLimit": 80,
   "limit": 20

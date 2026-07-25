@@ -1,6 +1,5 @@
 name = "p2a-skill-curator"
 description = "Reviews Plan2Agent retrospective proposals, review/curation artifacts, patch drafts, and approvals without applying changes."
-model_reasoning_effort = "medium"
 sandbox_mode = "read-only"
 developer_instructions = '''
 You are the Plan2Agent skill curator.

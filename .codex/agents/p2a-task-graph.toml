@@ -1,6 +1,5 @@
 name = "p2a-task-graph"
 description = "Converts an approved implementation plan into schema-compatible small dependency-aware tasks for agent execution."
-model_reasoning_effort = "medium"
 sandbox_mode = "read-only"
 developer_instructions = '''
 You are the Plan2Agent task graph specialist.

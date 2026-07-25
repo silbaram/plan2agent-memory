@@ -12,19 +12,20 @@ This repository owns its Plan2Agent planning and development loop in-place.
 
 2. Convert approved planning artifacts into the iteration structure:
 
-   `node .plan2agent/scripts/p2a_iteration.mjs init --artifacts .plan2agent/artifacts/<project>`
+   `node .plan2agent/scripts/p2a.mjs iteration init --artifacts .plan2agent/artifacts/<project>`
 
 3. Develop from ready tasks and track execution:
 
-   - `node .plan2agent/scripts/p2a_execute.mjs plan|start|finish|status`
-   - `node .plan2agent/scripts/p2a_orchestrate.mjs plan|handoff`
-   - `node .plan2agent/scripts/p2a_proposals.mjs mine|review|curate|draft-patch|approve-draft|digest`
-   - `node .plan2agent/scripts/p2a_tasks.mjs ready|prompt|start|done`
-   - `node .plan2agent/scripts/p2a_runs.mjs start|verify|finish`
+   - `node .plan2agent/scripts/p2a.mjs info`
+   - `node .plan2agent/scripts/p2a.mjs execute plan|start|finish|status`
+   - `node .plan2agent/scripts/p2a.mjs orchestrate plan|handoff`
+   - `node .plan2agent/scripts/p2a.mjs proposals mine|review|curate|draft-patch|approve-draft|digest`
+   - `node .plan2agent/scripts/p2a.mjs tasks ready|prompt|start|done`
+   - `node .plan2agent/scripts/p2a.mjs runs start|verify|finish`
 
 4. Open the next iteration in this same project:
 
-   `node .plan2agent/scripts/p2a_iteration.mjs open|draft|context|promote-tasks`
+   `node .plan2agent/scripts/p2a.mjs iteration open|draft|context|promote-tasks`
 
 ## Storage policy
 
