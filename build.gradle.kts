@@ -72,7 +72,9 @@ tasks.register<Test>("onnxVerificationTest") {
     group = LifecycleBasePlugin.VERIFICATION_GROUP
     maxHeapSize = "2g"
     description = """
-        Runs the opt-in, network-free verification against operator-provided local ONNX artifacts.
+        Runs the opt-in verification against operator-provided local ONNX artifacts.
+        The model and tokenizer are never downloaded by this task, but a new DJL runtime cache can
+        require a one-time application-level native-runtime download before an offline operator run.
         Requires P2A_ONNX_MODEL_URI and P2A_ONNX_TOKENIZER_URI file URI values whose bytes match
         the pinned V2 SHA-256 checksums. Example: P2A_ONNX_MODEL_URI=file:///path/model.onnx
         P2A_ONNX_TOKENIZER_URI=file:///path/tokenizer.json ./gradlew onnxVerificationTest
