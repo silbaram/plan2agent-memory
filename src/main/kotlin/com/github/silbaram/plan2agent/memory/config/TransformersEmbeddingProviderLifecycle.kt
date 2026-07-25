@@ -1,6 +1,7 @@
 package com.github.silbaram.plan2agent.memory.config
 
 import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingProfileResolver
+import com.github.silbaram.plan2agent.memory.application.port.out.ActiveEmbeddingProfileResolutionException
 import com.github.silbaram.plan2agent.memory.application.port.out.EmbeddingProviderState
 import com.github.silbaram.plan2agent.memory.application.port.out.ProviderUnavailableException
 import com.github.silbaram.plan2agent.memory.application.observability.EmbeddingObservability
@@ -21,6 +22,7 @@ import java.util.HexFormat
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.ThreadFactory
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
@@ -83,7 +85,7 @@ class TransformersEmbeddingProviderLifecycle(
             if (failure is VirtualMachineError) {
                 throw failure
             }
-            transitionToUnavailable(failure)
+            transitionToUnavailable(failure, INITIALIZATION_SCHEDULING_FAILED)
         }
     }
 
@@ -94,6 +96,12 @@ class TransformersEmbeddingProviderLifecycle(
     }
 
     private fun initialize() {
+        val initializationStartedAt = System.nanoTime()
+        logger.atInfo()
+            .addKeyValue("event", INITIALIZATION_STARTED)
+            .addKeyValue("provider", PROVIDER_NAME)
+            .log("Embedding provider initialization started")
+
         try {
             val activeEmbeddingSetId = activeEmbeddingProfileResolver.resolveActiveV2EmbeddingSetId()
             val artifacts = artifactVerifier.verify(embeddingProperties, V2EmbeddingProfile.fixed)
@@ -104,6 +112,12 @@ class TransformersEmbeddingProviderLifecycle(
             }
             initializedModel.set(model)
             resolvedEmbeddingSetId.set(activeEmbeddingSetId)
+            logger.atInfo()
+                .addKeyValue("event", INITIALIZATION_READY)
+                .addKeyValue("provider", PROVIDER_NAME)
+                .addKeyValue("dimension", dimension)
+                .addKeyValue("durationMs", elapsedMillis(initializationStartedAt))
+                .log("Embedding provider initialization ready")
             state.set(EmbeddingProviderState.READY)
             observability.recordProviderInitialization(EmbeddingProviderInitializationOutcome.READY)
         } catch (failure: Throwable) {
@@ -114,19 +128,38 @@ class TransformersEmbeddingProviderLifecycle(
         }
     }
 
-    private fun transitionToUnavailable(@Suppress("UNUSED_PARAMETER") failure: Throwable) {
+    private fun transitionToUnavailable(failure: Throwable, reason: String = unavailableReason(failure)) {
         initializedModel.set(null)
         resolvedEmbeddingSetId.set(null)
+        logger.atWarn()
+            .addKeyValue("event", INITIALIZATION_UNAVAILABLE)
+            .addKeyValue("provider", PROVIDER_NAME)
+            .addKeyValue("reason", reason)
+            .log("Embedding provider initialization unavailable")
         state.set(EmbeddingProviderState.UNAVAILABLE)
         observability.recordProviderInitialization(EmbeddingProviderInitializationOutcome.UNAVAILABLE)
-        logger.atWarn()
-            .addKeyValue("event", "embedding_provider_initialization_failed")
-            .addKeyValue("outcome", "unavailable")
-            .log("Embedding provider initialization failed")
     }
+
+    private fun unavailableReason(failure: Throwable): String =
+        when (failure) {
+            is TransformersArtifactValidationException -> ARTIFACT_VALIDATION_FAILED
+            is ActiveEmbeddingProfileResolutionException -> ACTIVE_PROFILE_UNAVAILABLE
+            else -> MODEL_INITIALIZATION_FAILED
+        }
+
+    private fun elapsedMillis(initializationStartedAt: Long): Long =
+        TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - initializationStartedAt)
 
     companion object {
         private const val WARM_UP_DOCUMENT = "p2a transformers provider warm-up"
+        private const val PROVIDER_NAME = "transformers"
+        private const val INITIALIZATION_STARTED = "embedding_provider_initialization_started"
+        private const val INITIALIZATION_READY = "embedding_provider_initialization_ready"
+        private const val INITIALIZATION_UNAVAILABLE = "embedding_provider_initialization_unavailable"
+        private const val INITIALIZATION_SCHEDULING_FAILED = "initialization_scheduling_failed"
+        private const val ARTIFACT_VALIDATION_FAILED = "artifact_validation_failed"
+        private const val ACTIVE_PROFILE_UNAVAILABLE = "active_embedding_profile_unavailable"
+        private const val MODEL_INITIALIZATION_FAILED = "model_initialization_failed"
         private val logger = LoggerFactory.getLogger(TransformersEmbeddingProviderLifecycle::class.java)
 
         private fun newInitializationExecutor(): ExecutorService =
