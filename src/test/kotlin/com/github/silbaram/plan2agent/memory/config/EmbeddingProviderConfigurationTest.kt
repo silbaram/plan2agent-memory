@@ -308,6 +308,9 @@ class EmbeddingProviderConfigurationTest {
 
     @Test
     fun `transformers lifecycle records only stable initialization outcomes across state transitions`() {
+        val logger = LoggerFactory.getLogger(TransformersEmbeddingProviderLifecycle::class.java) as Logger
+        val logAppender = ListAppender<ILoggingEvent>().also { it.start() }
+        logger.addAppender(logAppender)
         val readyMetrics = RecordingObservability()
         val readyLifecycle = TransformersEmbeddingProviderLifecycle(
             embeddingProperties = EmbeddingProperties(provider = EmbeddingProviderKind.TRANSFORMERS),
@@ -323,14 +326,19 @@ class EmbeddingProviderConfigurationTest {
             assertThat(awaitProviderState(readyLifecycle, EmbeddingProviderState.READY)).isTrue()
             assertThat(readyMetrics.initializationOutcomes)
                 .containsExactly(EmbeddingProviderInitializationOutcome.READY)
+            assertThat(lifecycleLogValues(logAppender.list, "embedding_provider_initialization_started"))
+                .containsEntry("provider", "transformers")
+            val readyLogValues = lifecycleLogValues(logAppender.list, "embedding_provider_initialization_ready")
+            assertThat(readyLogValues)
+                .containsEntry("provider", "transformers")
+                .containsEntry("dimension", V2EmbeddingProfile.fixed.dimension.toString())
+                .containsKey("durationMs")
+            assertThat(readyLogValues.getValue("durationMs").toLong()).isGreaterThanOrEqualTo(0)
         } finally {
             readyLifecycle.destroy()
         }
 
         val unavailableMetrics = RecordingObservability()
-        val logger = LoggerFactory.getLogger(TransformersEmbeddingProviderLifecycle::class.java) as Logger
-        val logAppender = ListAppender<ILoggingEvent>().also { it.start() }
-        logger.addAppender(logAppender)
         val unavailableLifecycle = TransformersEmbeddingProviderLifecycle(
             embeddingProperties = EmbeddingProperties(provider = EmbeddingProviderKind.TRANSFORMERS),
             artifactVerifier = verifiedArtifacts(),
@@ -345,13 +353,48 @@ class EmbeddingProviderConfigurationTest {
             assertThat(awaitProviderState(unavailableLifecycle, EmbeddingProviderState.UNAVAILABLE)).isTrue()
             assertThat(unavailableMetrics.initializationOutcomes)
                 .containsExactly(EmbeddingProviderInitializationOutcome.UNAVAILABLE)
+            assertThat(lifecycleLogValues(logAppender.list, "embedding_provider_initialization_unavailable"))
+                .containsEntry("provider", "transformers")
+                .containsEntry("reason", "model_initialization_failed")
             assertThat(logAppender.list.map(ILoggingEvent::getFormattedMessage))
-                .contains("Embedding provider initialization failed")
                 .noneMatch { message ->
                     message.contains("credential=must-not-leak") || message.contains("file:///private/model.onnx")
                 }
+            assertThat(logAppender.list.flatMap { event -> event.keyValuePairs.map { it.value.toString() } })
+                .noneMatch { value ->
+                    value.contains("credential=must-not-leak") || value.contains("file:///private/model.onnx")
+                }
         } finally {
             unavailableLifecycle.destroy()
+            logger.detachAppender(logAppender)
+            logAppender.stop()
+        }
+    }
+
+    @Test
+    fun `transformers lifecycle logs artifact validation failures with a stable safe reason`() {
+        val logger = LoggerFactory.getLogger(TransformersEmbeddingProviderLifecycle::class.java) as Logger
+        val logAppender = ListAppender<ILoggingEvent>().also { it.start() }
+        logger.addAppender(logAppender)
+        val lifecycle = TransformersEmbeddingProviderLifecycle(
+            embeddingProperties = EmbeddingProperties(provider = EmbeddingProviderKind.TRANSFORMERS),
+            artifactVerifier = TransformersArtifactVerifier {
+                    _, _ -> throw TransformersArtifactValidationException()
+            },
+            modelFactory = TransformersEmbeddingModelFactory {
+                error("model factory must not be called when artifact validation fails")
+            },
+            activeEmbeddingProfileResolver = resolvedProfile(),
+        )
+        try {
+            lifecycle.scheduleInitialization()
+
+            assertThat(awaitProviderState(lifecycle, EmbeddingProviderState.UNAVAILABLE)).isTrue()
+            assertThat(lifecycleLogValues(logAppender.list, "embedding_provider_initialization_unavailable"))
+                .containsEntry("provider", "transformers")
+                .containsEntry("reason", "artifact_validation_failed")
+        } finally {
+            lifecycle.destroy()
             logger.detachAppender(logAppender)
             logAppender.stop()
         }
@@ -412,6 +455,19 @@ class EmbeddingProviderConfigurationTest {
         }
         return false
     }
+
+    private fun lifecycleLogValues(
+        events: List<ILoggingEvent>,
+        expectedEvent: String,
+    ): Map<String, String> =
+        events
+            .single { event ->
+                event.keyValuePairs.any { keyValue ->
+                    keyValue.key == "event" && keyValue.value == expectedEvent
+                }
+            }
+            .keyValuePairs
+            .associate { keyValue -> keyValue.key to keyValue.value.toString() }
 
     private companion object {
         val RESOLVED_EMBEDDING_SET_ID = EmbeddingSetId("10d2d6cc-a2d8-4c4d-a7ab-3443a29533b5")
