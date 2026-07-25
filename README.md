@@ -137,7 +137,21 @@ P2A_ONNX_TOKENIZER_URI=file:///absolute/path/tokenizer.json \
 ./gradlew onnxVerificationTest
 ```
 
-이 task는 URI가 없거나 pinned checksum과 다르면 실패합니다. 일반 `./gradlew test`는 `onnx-verification` tag를 제외합니다. mandatory CI가 이를 포함하지 않는 이유는 test 자체는 network-free이지만 검증 대상 artifact가 repository/CI에 포함되지 않은 operator-provided local file이고, CI가 model을 내려받거나 다른 bytes를 대체해서는 안 되기 때문입니다.
+이 task는 URI가 없거나 pinned checksum과 다르면 실패합니다. 일반 `./gradlew test`는 `onnx-verification` tag를 제외합니다. mandatory CI가 이를 포함하지 않는 이유는 검증 대상 artifact가 repository/CI에 포함되지 않은 operator-provided local file이고, CI가 model을 내려받거나 다른 bytes를 대체해서는 안 되기 때문입니다.
+
+#### 첫 실행 네이티브 런타임 준비
+
+`model.onnx`와 `tokenizer.json`은 위 URI에서만 읽으며 이 task가 내려받지 않습니다. 다만 Spring AI가 사용하는 DJL PyTorch engine은 비어 있는 플랫폼별 native-runtime cache에서 첫 model 초기화 시 `publish.djl.ai`의 native library를 내려받을 수 있습니다. Gradle의 `--offline`은 Gradle dependency resolution만 막으므로 이 애플리케이션 레벨 다운로드를 막지 않습니다.
+
+따라서 네트워크가 허용된 동일 OS·CPU·Java 환경에서 다음 최초 준비를 한 번 수행한 뒤, 이후 검증을 실행하세요. 이 과정은 model/tokenizer를 대체하거나 다운로드하지 않으며, 로그에 DJL native library download가 나타날 수 있습니다.
+
+```bash
+P2A_ONNX_MODEL_URI=file:///absolute/path/model.onnx \
+P2A_ONNX_TOKENIZER_URI=file:///absolute/path/tokenizer.json \
+./gradlew onnxVerificationTest
+```
+
+성공한 뒤에는 같은 artifact URI로 검증을 반복합니다. `--offline`을 붙여도 DJL cache가 비어 있으면 native library 다운로드가 다시 시도될 수 있으므로, air-gapped 환경에서는 먼저 해당 환경과 같은 platform/runtime 조합에서 native runtime cache를 준비해야 합니다. OS, CPU architecture, Java, Spring AI/DJL dependency를 바꾸거나 native cache를 지운 경우 이 최초 준비를 다시 수행합니다.
 
 ### Worker tuning, reconciliation, recovery
 
