@@ -70,6 +70,7 @@ tasks.named<Test>("test") {
 
 tasks.register<Test>("onnxVerificationTest") {
     group = LifecycleBasePlugin.VERIFICATION_GROUP
+    maxHeapSize = "2g"
     description = """
         Runs the opt-in, network-free verification against operator-provided local ONNX artifacts.
         Requires P2A_ONNX_MODEL_URI and P2A_ONNX_TOKENIZER_URI file URI values whose bytes match
