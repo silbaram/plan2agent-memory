@@ -50,13 +50,14 @@ class PostgresActiveEmbeddingBackfillStoreAdapter(
                                 AND typed_vector.chunk_embedding_id IS NULL
                                 AND vector_dims(chunk_embedding.embedding) = 384
                             )
-                        )
+                          )
                           AND (
                               CAST(:afterChunkId AS uuid) IS NULL
                               OR document_chunk.chunk_id > CAST(:afterChunkId AS uuid)
-                          )
+                        )
                         ORDER BY document_chunk.chunk_id
                         LIMIT :batchSize
+                        FOR UPDATE OF document_chunk SKIP LOCKED
                     ),
                     repaired AS (
                         INSERT INTO chunk_embedding_vectors_384 (chunk_embedding_id, embedding)
