@@ -1121,42 +1121,46 @@ class PostgresStorageIntegrationTest {
     }
 
     @Test
-    fun `concurrent active-set reconciliation creates one job per chunk`() {
+    fun `concurrent active-set reconciliation serializes candidates and creates one job per chunk`() {
         val activeEmbeddingSetId = ensurePersistedActiveEmbeddingTarget()
-        repeat(4) { index -> saveFixture("active-backfill-concurrent-$index") }
-        val workers = 2
-        val ready = CountDownLatch(workers)
-        val start = CountDownLatch(1)
-        val executor = Executors.newFixedThreadPool(workers)
+        val workers = 8
+        val chunksPerRound = 4
 
-        try {
-            val results = (1..workers).map {
-                executor.submit {
-                    ready.countDown()
-                    check(start.await(10, TimeUnit.SECONDS)) { "concurrent backfill start timed out" }
-                    activeEmbeddingBackfillStore.reconcile(
-                        embeddingSetId = activeEmbeddingSetId,
-                        batchSize = 4,
-                        afterChunkId = null,
-                        enqueuedAt = now,
-                    )
+        repeat(4) { round ->
+            repeat(chunksPerRound) { index -> saveFixture("active-backfill-concurrent-$round-$index") }
+            val ready = CountDownLatch(workers)
+            val start = CountDownLatch(1)
+            val executor = Executors.newFixedThreadPool(workers)
+
+            try {
+                val results = (1..workers).map {
+                    executor.submit {
+                        ready.countDown()
+                        check(start.await(10, TimeUnit.SECONDS)) { "concurrent backfill start timed out" }
+                        activeEmbeddingBackfillStore.reconcile(
+                            embeddingSetId = activeEmbeddingSetId,
+                            batchSize = chunksPerRound,
+                            afterChunkId = null,
+                            enqueuedAt = now,
+                        )
+                    }
                 }
+                assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue()
+                start.countDown()
+                results.forEach { it.get(20, TimeUnit.SECONDS) }
+            } finally {
+                executor.shutdownNow()
+                executor.awaitTermination(10, TimeUnit.SECONDS)
             }
-            assertThat(ready.await(10, TimeUnit.SECONDS)).isTrue()
-            start.countDown()
-            results.forEach { it.get(20, TimeUnit.SECONDS) }
-        } finally {
-            executor.shutdownNow()
-            executor.awaitTermination(10, TimeUnit.SECONDS)
-        }
 
-        assertThat(
-            jdbc.queryForObject(
-                "SELECT count(*) FROM embedding_jobs WHERE embedding_set_id = ?",
-                Long::class.java,
-                UUID.fromString(activeEmbeddingSetId.value),
-            ),
-        ).isEqualTo(4L)
+            assertThat(
+                jdbc.queryForObject(
+                    "SELECT count(*) FROM embedding_jobs WHERE embedding_set_id = ?",
+                    Long::class.java,
+                    UUID.fromString(activeEmbeddingSetId.value),
+                ),
+            ).isEqualTo(((round + 1) * chunksPerRound).toLong())
+        }
     }
 
     @Test
