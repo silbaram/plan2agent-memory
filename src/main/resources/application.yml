@@ -1,6 +1,9 @@
 spring:
   application:
     name: plan2agent-memory
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
   datasource:
     url: ${P2A_DB_URL:jdbc:postgresql://localhost:5432/p2a_artifact_store}
     username: ${P2A_DB_USERNAME:p2a}

@@ -352,6 +352,34 @@ class QueryRestControllerTest {
     }
 
     @Test
+    fun `semantic and hybrid HTTP requests treat omitted or null metadata filters as empty`() {
+        val mockMvc = MockMvcBuilders.standaloneSetup(controller)
+            .setControllerAdvice(RestExceptionHandler())
+            .setMessageConverters(MappingJackson2HttpMessageConverter(JacksonObjectMapperConfig().objectMapper()))
+            .build()
+
+        listOf(
+            "/api/search/semantic" to { semanticSearch.received?.metadataFilters },
+            "/api/search/hybrid" to { hybridSearch.received?.metadataFilters },
+        ).forEach { (endpoint, receivedFilters) ->
+            listOf(
+                """{"q":"decision"}""",
+                """{"q":"decision","metadataFilters":null}""",
+            ).forEach { payload ->
+                mockMvc.perform(
+                    post(endpoint)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(payload),
+                )
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.items").isArray)
+
+                assertThat(receivedFilters()).isEmpty()
+            }
+        }
+    }
+
+    @Test
     fun `q-only search and chunk contracts reject removed client embedding fields`() {
         val errors = RestExceptionHandler()
         val notConfigured = errors.embeddingProviderNotConfigured(ProviderNotConfiguredException())
