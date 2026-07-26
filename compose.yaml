@@ -5,7 +5,7 @@ services:
     environment:
       POSTGRES_DB: p2a_artifact_store
       POSTGRES_USER: p2a
-      POSTGRES_PASSWORD: p2a_local_password
+      POSTGRES_PASSWORD: ${P2A_DB_PASSWORD:?P2A_DB_PASSWORD must be set}
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
@@ -15,6 +15,68 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DJL_OFFLINE: "true"
+      P2A_DB_PASSWORD: ${P2A_DB_PASSWORD:?P2A_DB_PASSWORD must be set}
+      P2A_DB_URL: jdbc:postgresql://postgres:5432/p2a_artifact_store
+      P2A_DB_USERNAME: p2a
+      P2A_EMBEDDING_MODEL_ARTIFACT_URI: file:///opt/p2a/model/model.onnx
+      P2A_EMBEDDING_PROVIDER: transformers
+      P2A_EMBEDDING_TOKENIZER_ARTIFACT_URI: file:///opt/p2a/model/tokenizer.json
+      P2A_LOCAL_TOKEN: ${P2A_LOCAL_TOKEN:?P2A_LOCAL_TOKEN must be set}
+      SERVER_ADDRESS: 0.0.0.0
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - type: bind
+        source: ${P2A_MODEL_DIR:?P2A_MODEL_DIR must be set}
+        target: /opt/p2a/model
+        read_only: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          /bin/bash -ec 'exec 3<>/dev/tcp/127.0.0.1/8080;
+          printf "GET /actuator/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n" >&3;
+          IFS= read -r status <&3;
+          [[ "$$status" == *" 200 "* ]]'
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    environment:
+      P2A_BFF_HOST: 0.0.0.0
+      P2A_BFF_PORT: "4173"
+      P2A_BFF_UPSTREAM_ORIGIN: http://backend:8080
+      P2A_LOCAL_TOKEN: ${P2A_LOCAL_TOKEN:?P2A_LOCAL_TOKEN must be set}
+    ports:
+      - "127.0.0.1:4173:4173"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:4173/healthz').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
 volumes:
   p2a-artifact-store-postgres-data:

@@ -9,3 +9,13 @@
 !src/**
 !docker/
 !docker/**
+!dashboard/
+!dashboard/**
+
+dashboard/node_modules/
+dashboard/dist/
+dashboard/build/
+dashboard/.vite/
+dashboard/.env
+dashboard/.env.*
+!dashboard/.env.example
