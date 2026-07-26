@@ -8,6 +8,7 @@ const MAX_REQUEST_TARGET_LENGTH = 8 * 1024
 const MAX_PATH_LENGTH = 1024
 const MAX_QUERY_LENGTH = 4 * 1024
 const MAX_QUERY_VALUE_LENGTH = 2048
+const MAX_QUERY_PARAMETERS = 32
 const MAX_METADATA_FILTERS = 20
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -53,6 +54,7 @@ type QueryPairs = ReadonlyArray<readonly [string, string]>
 type Validator = (value: string) => boolean
 
 interface QueryRule {
+  maxOccurrences?: number
   required?: boolean
   maxLength?: number
   validate?: Validator
@@ -103,6 +105,7 @@ const queryRules = {
   sourceTaskId: { maxLength: 256, validate: isSafeText },
   sourceRunId: { maxLength: 256, validate: isSafeText },
   artifactType: { validate: isArtifactType },
+  artifactTypes: { maxLength: 32, maxOccurrences: DASHBOARD_ARTIFACT_TYPES.size, validate: isDashboardArtifactType },
   sourcePath: { maxLength: 1024, validate: isSafeSourcePath },
   taskId: { validate: isUuid },
   runId: { validate: isUuid },
@@ -150,6 +153,7 @@ const routes: readonly RouteDefinition[] = [
       'sourceTaskId',
       'sourceRunId',
       'artifactType',
+      'artifactTypes',
       'sourcePath',
       'taskId',
       'runId',
@@ -462,12 +466,12 @@ function validateQuery(rawQuery: string, rules: Readonly<Record<string, QueryRul
   }
 
   const pairs = rawQuery.split('&')
-  if (pairs.length > Object.keys(rules).length) {
+  if (pairs.length > MAX_QUERY_PARAMETERS) {
     throw new BffRequestError(400, 'Too many query parameters')
   }
 
   const values: [string, string][] = []
-  const seen = new Set<string>()
+  const occurrences = new Map<string, number>()
   for (const pair of pairs) {
     if (pair.length === 0) {
       throw new BffRequestError(400, 'Empty query parameter is not allowed')
@@ -479,7 +483,9 @@ function validateQuery(rawQuery: string, rules: Readonly<Record<string, QueryRul
     const value = decodeQueryComponent(rawValue)
     const rule = rules[name]
 
-    if (rule === undefined || seen.has(name)) {
+    const occurrenceCount = occurrences.get(name) ?? 0
+    const maximumOccurrences = rule?.maxOccurrences ?? 1
+    if (rule === undefined || occurrenceCount >= maximumOccurrences) {
       throw new BffRequestError(400, 'Query parameter is not allowed')
     }
     if (value.length === 0 || value.length > (rule.maxLength ?? MAX_QUERY_VALUE_LENGTH) || !isSafeQueryValue(value)) {
@@ -489,11 +495,11 @@ function validateQuery(rawQuery: string, rules: Readonly<Record<string, QueryRul
       throw new BffRequestError(400, 'Invalid query parameter value')
     }
 
-    seen.add(name)
+    occurrences.set(name, occurrenceCount + 1)
     values.push([name, value])
   }
 
-  assertRequiredQueryParameters(seen, rules)
+  assertRequiredQueryParameters(new Set(occurrences.keys()), rules)
   return values
 }
 
@@ -655,6 +661,10 @@ function isCursor(value: string) {
 
 function isArtifactType(value: string) {
   return ARTIFACT_TYPES.has(value)
+}
+
+function isDashboardArtifactType(value: string) {
+  return DASHBOARD_ARTIFACT_TYPES.has(value)
 }
 
 function isGraphNodeKind(value: string) {
