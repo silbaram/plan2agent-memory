@@ -70,7 +70,7 @@ docker-compose --env-file .env up --detach --wait
 ./scripts/local-down.sh
 ```
 
-`local-up.sh`는 Docker daemon이 응답하지 않으면 Lima `default` instance를 시작하고, `.env`의 필수 값과 `model.onnx`·`tokenizer.json`을 확인한 뒤 모든 서비스를 기동합니다. `local-down.sh`는 `docker-compose down --remove-orphans`만 사용하며 `--volumes`를 절대 전달하지 않으므로 PostgreSQL named volume과 저장 data를 보존합니다. 두 script 모두 Lima 자체는 중지하지 않습니다.
+`local-up.sh`와 `local-down.sh`는 매번 Lima `default` instance를 확인·기동하고, 기존 SSH Docker context를 해제한 뒤 Lima Unix socket만 사용합니다. `local-up.sh`는 `.env`의 필수 값과 `model.onnx`·`tokenizer.json`을 확인한 뒤 모든 서비스를 기동합니다. `local-down.sh`는 `docker-compose down --remove-orphans`만 사용하며 `--volumes`를 절대 전달하지 않으므로 PostgreSQL named volume과 저장 data를 보존합니다. 두 script 모두 Lima 자체는 중지하지 않습니다.
 
 ### PostgreSQL 시작
 

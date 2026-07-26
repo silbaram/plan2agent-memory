@@ -83,18 +83,15 @@ port_value() {
 ensure_docker() {
   command -v docker >/dev/null 2>&1 || die 'docker is not installed'
   command -v docker-compose >/dev/null 2>&1 || die 'docker-compose is not installed; this project uses Docker Compose v2'
+  command -v limactl >/dev/null 2>&1 || die 'limactl is not installed'
 
-  if docker info --format '{{.ServerVersion}}' >/dev/null 2>&1; then
-    return
-  fi
-
-  command -v limactl >/dev/null 2>&1 || die 'Docker daemon is unavailable and limactl is not installed'
-  info 'Docker daemon is unavailable; starting Lima default instance...'
+  info 'Ensuring Lima default instance is running...'
   limactl start default >/dev/null
 
   [ -S "$LIMA_SOCKET" ] || die "Lima Docker socket was not created at $LIMA_SOCKET"
+  unset DOCKER_CONTEXT
   export DOCKER_HOST="unix://$LIMA_SOCKET"
-  docker info --format '{{.ServerVersion}}' >/dev/null 2>&1 || die 'Docker daemon is still unavailable after Lima startup'
+  docker info --format '{{.ServerVersion}}' >/dev/null 2>&1 || die 'Lima Docker daemon is unavailable after startup'
 }
 
 wait_for_http() {
