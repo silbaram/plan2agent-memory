@@ -95,7 +95,7 @@ type ProxyMethod = 'GET' | 'POST'
 type QueryPairs = ReadonlyArray<readonly [string, string]>
 type Validator = (value: string) => boolean
 type ApprovedUpstreamHeaders = Record<string, string>
-type UpstreamFailureCode = 'forbidden_route' | 'response_too_large' | 'timeout' | 'unavailable'
+type UpstreamFailureCode = 'bff_backend_unavailable' | 'bff_forbidden_route' | 'bff_response_too_large' | 'bff_timeout'
 type StaticAsset = {
   body: Buffer
   contentType: string
@@ -103,10 +103,10 @@ type StaticAsset = {
 }
 
 const UPSTREAM_FAILURE_STATUS_CODES: Readonly<Record<UpstreamFailureCode, number>> = {
-  forbidden_route: 502,
-  response_too_large: 502,
-  timeout: 504,
-  unavailable: 503,
+  bff_backend_unavailable: 503,
+  bff_forbidden_route: 502,
+  bff_response_too_large: 502,
+  bff_timeout: 504,
 }
 
 interface QueryRule {
@@ -645,6 +645,7 @@ function assertNoMethodOverride(request: FastifyRequest) {
 function assertBodyRequestShape(request: FastifyRequest) {
   const declaredLength = headerValue(request.headers['content-length'])
   const contentLength = declaredLength === undefined ? undefined : Number(declaredLength)
+  const hasTransferEncoding = request.headers['transfer-encoding'] !== undefined
   if (contentLength !== undefined && (!Number.isSafeInteger(contentLength) || contentLength < 0)) {
     throw new BffRequestError(400, 'Invalid Content-Length header')
   }
@@ -661,7 +662,7 @@ function assertBodyRequestShape(request: FastifyRequest) {
     return
   }
 
-  if (contentLength !== undefined && contentLength > 0) {
+  if ((contentLength !== undefined && contentLength > 0) || hasTransferEncoding) {
     throw new BffRequestError(400, 'GET requests must not include a body')
   }
 }
@@ -791,9 +792,9 @@ async function fetchApprovedUpstream(
       throw error
     }
     if (abortController.signal.aborted) {
-      throw new BffUpstreamError('timeout')
+      throw new BffUpstreamError('bff_timeout')
     }
-    throw new BffUpstreamError('unavailable')
+    throw new BffUpstreamError('bff_backend_unavailable')
   } finally {
     clearTimeout(timeout)
   }
@@ -828,14 +829,14 @@ function buildApprovedUpstreamHeaders(method: ProxyMethod, localToken: string): 
 function assertNoUpstreamRedirect(response: Response, abortController: AbortController) {
   if (response.status >= 300 && response.status < 400) {
     abortController.abort()
-    throw new BffUpstreamError('forbidden_route')
+    throw new BffUpstreamError('bff_forbidden_route')
   }
 }
 
 async function readBoundedUpstreamResponse(response: Response, abortController: AbortController): Promise<Buffer> {
   if (getUpstreamContentLength(response) > MAX_UPSTREAM_RESPONSE_BYTES) {
     abortController.abort()
-    throw new BffUpstreamError('response_too_large')
+    throw new BffUpstreamError('bff_response_too_large')
   }
 
   if (response.body === null) {
@@ -857,7 +858,7 @@ async function readBoundedUpstreamResponse(response: Response, abortController: 
       if (totalLength > MAX_UPSTREAM_RESPONSE_BYTES) {
         abortController.abort()
         void reader.cancel().catch(() => undefined)
-        throw new BffUpstreamError('response_too_large')
+        throw new BffUpstreamError('bff_response_too_large')
       }
       chunks.push(chunk)
     }
@@ -1031,7 +1032,7 @@ function isPageLimit(value: string) {
 }
 
 function isMaxDepth(value: string) {
-  return isIntegerInRange(value, 1, 30)
+  return isIntegerInRange(value, 1, 10)
 }
 
 function isIntegerInRange(value: string, min: number, max: number) {

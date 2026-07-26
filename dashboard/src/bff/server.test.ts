@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { request as httpRequest } from 'node:http'
 import type { OutgoingHttpHeaders } from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -26,6 +27,10 @@ const syntheticStackMarker = 'synthetic-upstream-stack'
 
 type TestFetch = NonNullable<BffOptions['fetch']>
 type TestServerOptions = Pick<BffOptions, 'distDir'>
+type SocketResponse = {
+  body: string
+  statusCode: number
+}
 
 const expectedDashboardCsp = [
   "default-src 'self'",
@@ -85,6 +90,9 @@ describe('dashboard BFF allowlisted proxy', () => {
     ])
     expect(requests.every(({ init }) => !new Headers(init.headers).has('x-forwarded-host'))).toBe(true)
     expect(requests.every(({ init }) => new Headers(init.headers).get('x-p2a-local-token') === serverLocalToken)).toBe(true)
+    expect(requests.map(({ init }) => ({ body: init.body, method: init.method, redirect: init.redirect }))).toEqual(
+      requestsToAllow.map(() => ({ body: undefined, method: 'GET', redirect: 'manual' })),
+    )
   })
 
   it('forwards the two approved JSON POST search routes after schema validation', async () => {
@@ -105,7 +113,10 @@ describe('dashboard BFF allowlisted proxy', () => {
 
     expect(semantic.statusCode).toBe(200)
     expect(hybrid.statusCode).toBe(200)
-    expect(requests.map(({ url }) => url.pathname)).toEqual(['/api/search/semantic', '/api/search/hybrid'])
+    expect(requests.map(({ url }) => url.href)).toEqual([
+      'https://memory.example/api/search/semantic',
+      'https://memory.example/api/search/hybrid',
+    ])
     expect(requests.map(({ init }) => init.headers)).toEqual([
       {
         accept: 'application/json',
@@ -121,6 +132,10 @@ describe('dashboard BFF allowlisted proxy', () => {
     expect(requests.map(({ init }) => init.body)).toEqual([
       JSON.stringify({ q: 'find decision', projectId, metadataFilters: { kind: 'decision' }, limit: 20 }),
       JSON.stringify({ q: 'find decision', candidateLimit: 80, limit: 20, rrfK: 60 }),
+    ])
+    expect(requests.map(({ init }) => ({ method: init.method, redirect: init.redirect }))).toEqual([
+      { method: 'POST', redirect: 'manual' },
+      { method: 'POST', redirect: 'manual' },
     ])
   })
 
@@ -154,6 +169,29 @@ describe('dashboard BFF allowlisted proxy', () => {
 
   it('rejects raw backslash request targets before route matching can normalize them', () => {
     expect(isAllowedBffRequestTarget('/api\\health')).toBe(false)
+  })
+
+  it('rejects graph trace maxDepth values over ten before fetching upstream', async () => {
+    const { server, requests } = createTestServer()
+
+    const response = await server.inject({
+      method: 'GET',
+      url: '/api/graph/trace?naturalKey=decision:ND-1&maxDepth=11',
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect(response.json()).toEqual({ error: 'Invalid query parameter value' })
+    expect(requests).toHaveLength(0)
+  })
+
+  it('rejects a raw backslash request target before it reaches the upstream', async () => {
+    const { server, requests } = createTestServer()
+    const serverAddress = await server.listen({ host: '127.0.0.1', port: 0 })
+
+    const response = await sendSocketRequest(serverAddress, '/api\\health', 'GET')
+
+    expect(response.statusCode).toBeGreaterThanOrEqual(400)
+    expect(requests).toHaveLength(0)
   })
 
   it('requires a loopback Host and same-origin browser metadata before fetching upstream', async () => {
@@ -278,6 +316,18 @@ describe('dashboard BFF allowlisted proxy', () => {
     expect(requests).toHaveLength(0)
   })
 
+  it('rejects a chunked GET body before it can reach the upstream', async () => {
+    const { server, requests } = createTestServer()
+    const serverAddress = await server.listen({ host: '127.0.0.1', port: 0 })
+
+    const response = await sendChunkedGetBody(serverAddress, '/api/health')
+
+    expect(response.statusCode).toBe(400)
+    expect(response.body).not.toContain('bypass')
+    expect(response.body).not.toContain(serverLocalToken)
+    expect(requests).toHaveLength(0)
+  })
+
   it('injects the server-only token for GET requests without forwarding browser credentials', async () => {
     const { server, requests } = createTestServer()
 
@@ -379,7 +429,7 @@ describe('dashboard BFF allowlisted proxy', () => {
     expect(requests).toHaveLength(0)
   })
 
-  it('returns stable secret-free GET and POST errors when the upstream fails', async () => {
+  it('returns stable secret-free backend-unavailable errors when the upstream fails', async () => {
     const { server, requests } = createTestServer(() => {
       throw new Error(`upstream error contains ${serverLocalToken}`)
     })
@@ -394,13 +444,13 @@ describe('dashboard BFF allowlisted proxy', () => {
 
     for (const response of [getResponse, postResponse]) {
       expect(response.statusCode).toBe(503)
-      expect(response.json()).toEqual({ error: 'unavailable' })
+      expect(response.json()).toEqual({ error: 'bff_backend_unavailable' })
       expect(response.body).not.toContain(serverLocalToken)
     }
     expect(requests).toHaveLength(2)
   })
 
-  it('returns a stable unavailable error without exposing upstream failure details', async () => {
+  it('returns a stable backend-unavailable error without exposing upstream failure details', async () => {
     const unavailableFetch: TestFetch = async () => {
       const error = new Error(`fetch failed for ${internalUpstreamUrl}?q=${sensitiveQuery}; body=${sensitiveBody}; token=${serverLocalToken}`)
       error.stack = `${syntheticStackMarker}\n${error.stack ?? ''}`
@@ -416,7 +466,7 @@ describe('dashboard BFF allowlisted proxy', () => {
     })
 
     expect(response.statusCode).toBe(503)
-    expectSanitizedUpstreamFailure(response.body, response.headers, 'unavailable')
+    expectSanitizedUpstreamFailure(response.body, response.headers, 'bff_backend_unavailable')
     expect(requests).toHaveLength(1)
     expect(requests[0]?.init.redirect).toBe('manual')
   })
@@ -446,7 +496,7 @@ describe('dashboard BFF allowlisted proxy', () => {
       const response = await responsePromise
 
       expect(response.statusCode).toBe(504)
-      expectSanitizedUpstreamFailure(response.body, response.headers, 'timeout')
+      expectSanitizedUpstreamFailure(response.body, response.headers, 'bff_timeout')
       expect(signals[0]?.aborted).toBe(true)
       expect(requests[0]?.init.redirect).toBe('manual')
     } finally {
@@ -478,7 +528,7 @@ describe('dashboard BFF allowlisted proxy', () => {
     })
 
     expect(response.statusCode).toBe(502)
-    expectSanitizedUpstreamFailure(response.body, response.headers, 'response_too_large')
+    expectSanitizedUpstreamFailure(response.body, response.headers, 'bff_response_too_large')
     expect(response.body).not.toContain(partialResponseMarker)
     expect(signals[0]?.aborted).toBe(true)
     expect(requests).toHaveLength(1)
@@ -501,7 +551,7 @@ describe('dashboard BFF allowlisted proxy', () => {
     const response = await server.inject({ method: 'GET', url: `/api/search/keyword?q=${sensitiveQuery}` })
 
     expect(response.statusCode).toBe(502)
-    expectSanitizedUpstreamFailure(response.body, response.headers, 'response_too_large')
+    expectSanitizedUpstreamFailure(response.body, response.headers, 'bff_response_too_large')
     expect(response.body).not.toContain(partialResponseMarker)
     expect(signals[0]?.aborted).toBe(true)
     expect(requests).toHaveLength(1)
@@ -524,7 +574,7 @@ describe('dashboard BFF allowlisted proxy', () => {
       const response = await server.inject({ method: 'GET', url: `/api/search/keyword?q=${sensitiveQuery}` })
 
       expect(response.statusCode, `redirect status ${status}`).toBe(502)
-      expectSanitizedUpstreamFailure(response.body, response.headers, 'forbidden_route')
+      expectSanitizedUpstreamFailure(response.body, response.headers, 'bff_forbidden_route')
       expect(response.body).not.toContain(partialResponseMarker)
     }
 
@@ -592,6 +642,43 @@ describe('dashboard BFF allowlisted proxy', () => {
       },
     })
     return new Response(body, { headers: { 'content-type': 'application/json' } })
+  }
+
+  async function sendChunkedGetBody(serverAddress: string, path: string): Promise<SocketResponse> {
+    return sendSocketRequest(serverAddress, path, 'GET', {
+      'content-type': 'application/json',
+      'transfer-encoding': 'chunked',
+    }, JSON.stringify({ bypass: 'attempt' }))
+  }
+
+  async function sendSocketRequest(
+    serverAddress: string,
+    path: string,
+    method: 'GET',
+    headers: Readonly<Record<string, string>> = {},
+    body?: string,
+  ): Promise<SocketResponse> {
+    const url = new URL(serverAddress)
+    return new Promise((resolve, reject) => {
+      const request = httpRequest({
+        headers,
+        hostname: url.hostname,
+        method,
+        path,
+        port: url.port,
+      }, (response) => {
+        const chunks: Buffer[] = []
+        response.on('data', (chunk: Buffer) => chunks.push(chunk))
+        response.on('end', () => {
+          resolve({
+            body: Buffer.concat(chunks).toString('utf8'),
+            statusCode: response.statusCode ?? 0,
+          })
+        })
+      })
+      request.on('error', reject)
+      request.end(body)
+    })
   }
 
   function expectSanitizedUpstreamFailure(body: string, headers: unknown, code: string) {
