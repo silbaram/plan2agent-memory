@@ -9,6 +9,7 @@ import com.github.silbaram.plan2agent.memory.domain.readmodel.ArtifactDetail
 import com.github.silbaram.plan2agent.memory.domain.readmodel.DashboardArtifactPolicy
 import com.github.silbaram.plan2agent.memory.domain.readmodel.IterationSummary
 import com.github.silbaram.plan2agent.memory.domain.readmodel.ProjectSummary
+import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
@@ -17,10 +18,9 @@ import java.util.HexFormat
 /**
  * Application boundary for dashboard-specific reads.
  *
- * This is intentionally not a Spring component until a storage adapter exists. Task-003 adds the
- * concrete persistence adapter and runtime wiring; keeping this class constructible directly
- * allows the read contract to remain independently testable in the meantime.
+ * The service remains directly constructible so the read contract can be independently tested.
  */
+@Service
 class DashboardReadUseCaseService(
     private val dashboardReadPort: DashboardReadPort,
 ) : FindProjectSummariesUseCase,

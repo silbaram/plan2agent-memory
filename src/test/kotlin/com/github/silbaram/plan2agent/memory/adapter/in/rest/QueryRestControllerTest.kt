@@ -192,6 +192,14 @@ class QueryRestControllerTest {
 
         assertThat(findArtifacts.received?.artifactType).isEqualTo(ArtifactType.PROPOSAL)
         assertThat(findArtifacts.received?.artifactTypes).isNull()
+
+        mockMvc.perform(
+            get("/api/artifacts")
+                .param("artifactType", "document_chunk"),
+        ).andExpect(status().isOk())
+
+        assertThat(findArtifacts.received?.artifactType).isEqualTo(ArtifactType.DOCUMENT_CHUNK)
+        assertThat(findArtifacts.received?.artifactTypes).isNull()
     }
 
     @Test

@@ -164,7 +164,7 @@ data class FindArtifactsQuery(
         artifactTypes?.let {
             require(it.isNotEmpty()) { "FindArtifactsQuery artifactTypes must not be empty" }
         }
-        normalizedArtifactTypes.forEach {
+        artifactTypes.orEmpty().forEach {
             require(it in DASHBOARD_ARTIFACT_TYPES) {
                 "FindArtifactsQuery artifact type ${it.name} is not supported for artifact listing"
             }
