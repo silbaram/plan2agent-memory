@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DashboardApiError, type ArtifactDetail, type ArtifactDetailRequest, type DashboardApiClient } from '../data-access'
 import { ArtifactViewer } from './ArtifactViewer'
 
@@ -55,6 +55,7 @@ function createClient(resolver: (request: ArtifactDetailRequest) => Promise<Arti
 
 afterEach(() => {
   cleanup()
+  vi.restoreAllMocks()
 })
 
 describe('ArtifactViewer', () => {
@@ -78,7 +79,7 @@ describe('ArtifactViewer', () => {
     expect(screen.getByRole('tab', { name: '미리보기' }).getAttribute('aria-selected')).toBe('true')
   })
 
-  it('renders Markdown with a fixed sanitizer while blocking raw HTML, unsafe links, and external images', async () => {
+  it('renders Markdown with a fixed sanitizer while blocking raw HTML, MDX, unsafe links, and external images', async () => {
     const markdown = [
       '# 안전한 결정',
       '',
@@ -93,10 +94,17 @@ describe('ArtifactViewer', () => {
       '[파일 링크](file:///etc/passwd)',
       '![외부 이미지](https://example.com/image.png)',
       '<div>원시 HTML</div>',
+      '<svg onload="window.__artifactMarkdownExecuted = true"><a href="javascript:alert(1)">SVG 링크</a></svg>',
+      '<iframe src="https://example.com/embedded"></iframe>',
+      '<button onclick="window.__artifactMarkdownExecuted = true">이벤트 핸들러</button>',
+      '<script>window.__artifactMarkdownExecuted = true</script>',
+      '{window.__artifactMarkdownExecuted = true}',
+      '<DangerousMdxComponent onLoad={() => window.__artifactMarkdownExecuted = true} />',
     ].join('\n\n')
     const client = createClient(async () => createArtifact({ mediaType: 'text/markdown', rawContent: markdown }))
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
 
-    render(<ArtifactViewer artifactId={artifactId} artifactType="TASK" client={client} />)
+    const { container } = render(<ArtifactViewer artifactId={artifactId} artifactType="TASK" client={client} />)
 
     expect(await screen.findByRole('heading', { level: 1, name: '안전한 결정' })).toBeTruthy()
     expect(screen.getByRole('link', { name: '안전한 링크' }).getAttribute('href')).toBe('https://example.com/decision')
@@ -110,10 +118,13 @@ describe('ArtifactViewer', () => {
     expect(screen.queryByRole('link', { name: '파일 링크' })).toBeNull()
     expect(screen.queryByRole('img')).toBeNull()
     expect(screen.queryByText('원시 HTML')).toBeNull()
+    expect(container.querySelector('iframe, img, script, svg, [onclick], [onerror], [onload]')).toBeNull()
+    expect((window as Window & { __artifactMarkdownExecuted?: boolean }).__artifactMarkdownExecuted).toBeUndefined()
+    expect(fetchSpy).not.toHaveBeenCalled()
 
     fireEvent.click(screen.getByRole('tab', { name: '원문' }))
 
-    expect(screen.getByRole('tabpanel').textContent).toContain('<div>원시 HTML</div>')
+    expect(screen.getByLabelText('이스케이프된 원문').textContent).toBe(markdown)
   })
 
   it('formats valid JSON only in the preview tab and preserves its original text in the raw tab', async () => {
@@ -171,6 +182,19 @@ describe('ArtifactViewer', () => {
     render(<ArtifactViewer artifactId={artifactId} artifactType="PROJECT" client={client} />)
 
     expect(screen.getByRole('alert').textContent).toContain('지원하지 않는 산출물 유형')
+    expect(requestCount).toBe(0)
+  })
+
+  it('rejects a blank artifact identifier without making a data request', () => {
+    let requestCount = 0
+    const client = createClient(async () => {
+      requestCount += 1
+      return createArtifact()
+    })
+
+    render(<ArtifactViewer artifactId="  " artifactType="TASK" client={client} />)
+
+    expect(screen.getByRole('alert').textContent).toContain('유효하지 않은 산출물 요청')
     expect(requestCount).toBe(0)
   })
 })

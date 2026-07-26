@@ -87,6 +87,43 @@ describe('search URL state', () => {
 })
 
 describe('SearchRoute', () => {
+  it('restores a cursor-bound scoped URL into accessible controls and search navigation', async () => {
+    const requestUrls: URL[] = []
+    const restoredState: SearchUrlState = {
+      cursor: 'bound-page-two',
+      filter: 'TASK',
+      fusion: null,
+      mode: 'keyword',
+      page: 2,
+      q: 'restored decision',
+      scope: { kind: 'iteration', iterationId, projectId },
+    }
+    server.use(
+      http.get('/api/search/keyword', ({ request }) => {
+        requestUrls.push(new URL(request.url))
+        return HttpResponse.json(page([searchItem()]))
+      }),
+    )
+    setLocation(`/search${serializeSearchUrl(restoredState)}`)
+    renderSearch()
+
+    expect(await screen.findByRole('link', { name: '부모 산출물 열기' })).toBeTruthy()
+    expect(screen.getByLabelText('검색어')).toHaveProperty('value', 'restored decision')
+    expect(screen.getByLabelText('검색 방식')).toHaveProperty('value', 'keyword')
+    expect(screen.getByLabelText('범위')).toHaveProperty('value', 'iteration')
+    expect(screen.getByLabelText('프로젝트 ID')).toHaveProperty('value', projectId)
+    expect(screen.getByLabelText('이터레이션 ID')).toHaveProperty('value', iterationId)
+    expect(screen.getByText('페이지 2')).toBeTruthy()
+    expect(requestUrls).toHaveLength(1)
+    expect(requestUrls[0]?.searchParams.get('cursor')).toBe('bound-page-two')
+    expect(requestUrls[0]?.searchParams.get('artifactType')).toBe('TASK')
+    expect(requestUrls[0]?.searchParams.get('projectId')).toBe(projectId)
+    expect(requestUrls[0]?.searchParams.get('iterationId')).toBe(iterationId)
+    expect(screen.getByRole('link', { name: '탐색에서 선택' }).getAttribute('href')).toBe(
+      `/browse?projectId=${projectId}&selectedArtifactId=document-1&selectedArtifactType=DOCUMENT_SNAPSHOT&iterationId=${iterationId}`,
+    )
+  })
+
   it('keeps the default keyword mode explicit, preserves typed keyword parameters, and resets cursors for a new submission', async () => {
     const cursors: Array<string | null> = []
     server.use(

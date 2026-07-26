@@ -131,6 +131,43 @@ describe('TraceRoute', () => {
     expect(window.location.search).toContain('iterationId=v3-owner-dashboard')
   })
 
+  it('updates direction and maximum depth through accessible controls before requesting the new bounded trace', async () => {
+    const traceRequests: GraphTraceRequest[] = []
+    setLocation(tracePath())
+    renderTrace(createClient({
+      nodes: [taskNode()],
+      trace: async (request) => {
+        traceRequests.push(request)
+        return traceFixture()
+      },
+    }))
+
+    await screen.findByText('노드 ID: node-task')
+    fireEvent.change(screen.getByLabelText('방향'), { target: { value: 'UPSTREAM' } })
+    await waitFor(() => {
+      expect(traceRequests).toContainEqual({
+        direction: 'UPSTREAM',
+        iterationId,
+        maxDepth: 3,
+        naturalKey: 'task:task-1',
+        projectId,
+      })
+    })
+
+    fireEvent.change(await screen.findByLabelText('최대 깊이'), { target: { value: '5' } })
+    await waitFor(() => {
+      expect(traceRequests).toContainEqual({
+        direction: 'UPSTREAM',
+        iterationId,
+        maxDepth: 5,
+        naturalKey: 'task:task-1',
+        projectId,
+      })
+    })
+    expect(window.location.search).toContain('direction=UPSTREAM')
+    expect(window.location.search).toContain('maxDepth=5')
+  })
+
   it('shows an empty initial state when the graph node endpoint has no root candidates', async () => {
     setLocation('/trace')
     renderTrace(createClient({ nodes: [], trace: async () => traceFixture() }))
