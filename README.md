@@ -61,6 +61,17 @@ docker-compose --env-file .env up --detach --wait
 
 `docker-compose --env-file .env down --volumes`는 이 deployment의 PostgreSQL data를 삭제하는 의도적인 reset입니다. 백업 없이 실행하지 마세요.
 
+#### Local helper scripts
+
+매번 Lima socket, `.env`, model files, Compose health를 확인할 필요가 없도록 helper script를 제공합니다.
+
+```bash
+./scripts/local-up.sh
+./scripts/local-down.sh
+```
+
+`local-up.sh`는 Docker daemon이 응답하지 않으면 Lima `default` instance를 시작하고, `.env`의 필수 값과 `model.onnx`·`tokenizer.json`을 확인한 뒤 모든 서비스를 기동합니다. `local-down.sh`는 `docker-compose down --remove-orphans`만 사용하며 `--volumes`를 절대 전달하지 않으므로 PostgreSQL named volume과 저장 data를 보존합니다. 두 script 모두 Lima 자체는 중지하지 않습니다.
+
 ### PostgreSQL 시작
 
 backend만 host에서 개발할 때도 먼저 `.env`를 export한 뒤 PostgreSQL service만 올릴 수 있습니다. `compose.yaml`은 정확히 `pgvector/pgvector:0.8.5-pg17-bookworm@sha256:d2ef61f42ef767baa5a1475393303cc235bcd92febd9d7014eddb48b41f3bad0` 이미지를 사용합니다. digest를 생략하거나 tag만 바꾸지 마세요.
