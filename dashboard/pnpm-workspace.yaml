@@ -1,0 +1,7 @@
+packages:
+  - .
+
+allowBuilds:
+  '@astryxdesign/cli': false
+  '@astryxdesign/core': false
+  msw: false
