@@ -197,6 +197,10 @@ function TraceResult({ error, isLoading, onRetry, onSettingsChange, state, trace
     return null
   }
 
+  return <LoadedTraceResult onSettingsChange={onSettingsChange} state={state} trace={trace} />
+}
+
+function LoadedTraceResult({ onSettingsChange, state, trace }: Pick<TraceResultProps, 'onSettingsChange' | 'state'> & { readonly trace: GraphTrace }) {
   const layout = useMemo(() => layoutTraceGraph(trace), [trace])
 
   return (
