@@ -1,13 +1,13 @@
 services:
   postgres:
     image: pgvector/pgvector:0.8.5-pg17-bookworm@sha256:d2ef61f42ef767baa5a1475393303cc235bcd92febd9d7014eddb48b41f3bad0
-    container_name: p2a-artifact-store-postgres
+    container_name: ${P2A_POSTGRES_CONTAINER_NAME:-p2a-artifact-store-postgres}
     environment:
       POSTGRES_DB: p2a_artifact_store
       POSTGRES_USER: p2a
       POSTGRES_PASSWORD: ${P2A_DB_PASSWORD:?P2A_DB_PASSWORD must be set}
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${P2A_POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - p2a-artifact-store-postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -31,7 +31,7 @@ services:
       P2A_LOCAL_TOKEN: ${P2A_LOCAL_TOKEN:?P2A_LOCAL_TOKEN must be set}
       SERVER_ADDRESS: 0.0.0.0
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:${P2A_BACKEND_HOST_PORT:-8080}:8080"
     volumes:
       - type: bind
         source: ${P2A_MODEL_DIR:?P2A_MODEL_DIR must be set}
@@ -60,10 +60,10 @@ services:
     environment:
       P2A_BFF_HOST: 0.0.0.0
       P2A_BFF_PORT: "4173"
-      P2A_BFF_UPSTREAM_ORIGIN: http://backend:8080
+      P2A_BFF_UPSTREAM_ORIGIN: ${P2A_BFF_UPSTREAM_ORIGIN:-http://backend:8080}
       P2A_LOCAL_TOKEN: ${P2A_LOCAL_TOKEN:?P2A_LOCAL_TOKEN must be set}
     ports:
-      - "127.0.0.1:4173:4173"
+      - "127.0.0.1:${P2A_DASHBOARD_HOST_PORT:-4173}:4173"
     depends_on:
       backend:
         condition: service_healthy
