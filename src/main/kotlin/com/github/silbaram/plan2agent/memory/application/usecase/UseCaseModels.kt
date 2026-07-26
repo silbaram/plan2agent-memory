@@ -141,6 +141,7 @@ data class FindArtifactsQuery(
     val sourceTaskId: SourceTaskId? = null,
     val sourceRunId: SourceRunId? = null,
     val artifactType: ArtifactType? = null,
+    val artifactTypes: Set<ArtifactType>? = null,
     val sourcePath: String? = null,
     val taskId: TaskId? = null,
     val runId: RunId? = null,
@@ -149,11 +150,37 @@ data class FindArtifactsQuery(
     val limit: Int = 50,
     val cursor: String? = null,
 ) {
+    /**
+     * The logical type filter in a canonical order. A legacy single type and a repeatable
+     * type set therefore produce the same cursor fingerprint when they express the same query.
+     */
+    val normalizedArtifactTypes: List<ArtifactType> =
+        (artifactTypes ?: artifactType?.let(::setOf).orEmpty()).sortedBy(ArtifactType::name)
+
     init {
+        require(artifactType == null || artifactTypes == null) {
+            "FindArtifactsQuery artifactType and artifactTypes must not be supplied together"
+        }
+        artifactTypes?.let {
+            require(it.isNotEmpty()) { "FindArtifactsQuery artifactTypes must not be empty" }
+        }
+        normalizedArtifactTypes.forEach {
+            require(it in DASHBOARD_ARTIFACT_TYPES) {
+                "FindArtifactsQuery artifact type ${it.name} is not supported for artifact listing"
+            }
+        }
         require(limit > 0) { "FindArtifactsQuery limit must be positive" }
         require(cursor == null || cursor.isNotBlank()) { "FindArtifactsQuery cursor must not be blank" }
     }
 }
+
+val DASHBOARD_ARTIFACT_TYPES: Set<ArtifactType> = setOf(
+    ArtifactType.DOCUMENT_SNAPSHOT,
+    ArtifactType.TASK_GRAPH,
+    ArtifactType.TASK,
+    ArtifactType.RUN_RECORD,
+    ArtifactType.PROPOSAL,
+)
 
 data class KeywordSearchQuery(
     val query: String,

@@ -5,9 +5,11 @@ import com.github.silbaram.plan2agent.memory.application.port.out.ActiveVectorSe
 import com.github.silbaram.plan2agent.memory.application.port.out.ArtifactQueryPort
 import com.github.silbaram.plan2agent.memory.application.port.out.KeywordSearchPort
 import com.github.silbaram.plan2agent.memory.application.port.out.VectorSearchPort
+import com.github.silbaram.plan2agent.memory.application.usecase.ArtifactListRequestCursor
 import com.github.silbaram.plan2agent.memory.application.usecase.FindArtifactsQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.KeywordSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.PagedResult
+import com.github.silbaram.plan2agent.memory.application.usecase.SearchRequestCursor
 import com.github.silbaram.plan2agent.memory.application.usecase.VectorSearchQuery
 import com.github.silbaram.plan2agent.memory.domain.ArtifactSummary
 import com.github.silbaram.plan2agent.memory.domain.ArtifactType
@@ -46,6 +48,7 @@ class PostgresArtifactQueryAdapter(
     private val cursorCodec = SearchCursorCodec(objectMapper)
 
     override fun findArtifacts(query: FindArtifactsQuery): PagedResult<ArtifactSummary> = metrics.recordSearch("artifact.find") {
+        val requestFingerprint = ArtifactListRequestCursor.fingerprint(query)
         val params = MapSqlParameterSource()
             .addValue("limit", query.limit + 1)
         val filters = mutableListOf<String>()
@@ -82,9 +85,9 @@ class PostgresArtifactQueryAdapter(
             filters += "source_run_id = :sourceRunId"
             params.addValue("sourceRunId", it.value)
         }
-        query.artifactType?.let {
-            filters += "artifact_type = :artifactType"
-            params.addValue("artifactType", it.name)
+        if (query.normalizedArtifactTypes.isNotEmpty()) {
+            filters += "artifact_type IN (:artifactTypes)"
+            params.addValue("artifactTypes", query.normalizedArtifactTypes.map(ArtifactType::name))
         }
         query.sourcePath?.let {
             filters += "source_path = :sourcePath"
@@ -109,7 +112,7 @@ class PostgresArtifactQueryAdapter(
             params.addValue("sourceRefUri", it.uri)
         }
         query.cursor?.let {
-            val cursor = cursorCodec.decodeArtifact(it)
+            val cursor = cursorCodec.decodeArtifact(SearchRequestCursor.decode(it, requestFingerprint))
             filters += """
                 (
                     sort_timestamp < :cursorSortTimestamp
@@ -345,7 +348,9 @@ class PostgresArtifactQueryAdapter(
             params,
             artifactSummaryRowMapper(json),
         )
-        rows.toPagedResult(query.limit, { it.summary }) { cursorCodec.encode(it.cursor) }
+        rows.toPagedResult(query.limit, { it.summary }) {
+            SearchRequestCursor.encode(requestFingerprint, cursorCodec.encode(it.cursor))
+        }
     }
 }
 
