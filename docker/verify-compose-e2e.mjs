@@ -346,8 +346,9 @@ async function verifyRestartAndPersistence(dashboardOrigin) {
   for (const service of ['postgres', 'backend', 'dashboard']) {
     assertServiceHealthy(service)
   }
-  await expectJson(`${dashboardOrigin}/api/projects`, 200, { projectId: fixture.projectId })
-  return publishedOrigin('dashboard', 4173)
+  const restartedDashboardOrigin = publishedOrigin('dashboard', 4173)
+  await expectJson(`${restartedDashboardOrigin}/api/projects`, 200, { projectId: fixture.projectId })
+  return restartedDashboardOrigin
 }
 
 async function verifyTimeoutError() {
