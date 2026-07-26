@@ -279,8 +279,8 @@ describe('dashboard BFF allowlisted proxy', () => {
     })
 
     for (const response of [getResponse, postResponse]) {
-      expect(response.statusCode).toBe(500)
-      expect(response.json()).toEqual({ error: 'Upstream request failed' })
+      expect(response.statusCode).toBe(503)
+      expect(response.json()).toEqual({ error: 'unavailable' })
       expect(response.body).not.toContain(serverLocalToken)
     }
     expect(requests).toHaveLength(2)
