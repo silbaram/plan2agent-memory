@@ -59,6 +59,7 @@ const METHOD_OVERRIDE_HEADERS = [
 type ProxyMethod = 'GET' | 'POST'
 type QueryPairs = ReadonlyArray<readonly [string, string]>
 type Validator = (value: string) => boolean
+type ApprovedUpstreamHeaders = Record<string, string>
 
 interface QueryRule {
   maxOccurrences?: number
@@ -542,17 +543,15 @@ function buildApprovedUpstreamRequest(method: ProxyMethod, body: unknown, localT
   }
 }
 
-function buildApprovedUpstreamHeaders(method: ProxyMethod, localToken: string) {
-  return method === 'POST'
-    ? {
-      accept: 'application/json',
-      'content-type': 'application/json',
-      [LOCAL_TOKEN_HEADER_NAME]: localToken,
-    }
-    : {
-      accept: 'application/json',
-      [LOCAL_TOKEN_HEADER_NAME]: localToken,
-    }
+function buildApprovedUpstreamHeaders(method: ProxyMethod, localToken: string): ApprovedUpstreamHeaders {
+  const headers: ApprovedUpstreamHeaders = {
+    accept: 'application/json',
+    [LOCAL_TOKEN_HEADER_NAME]: localToken,
+  }
+  if (method === 'POST') {
+    headers['content-type'] = 'application/json'
+  }
+  return headers
 }
 
 function setApprovedUpstreamResponseHeaders(reply: FastifyReply, headers: Headers) {
@@ -567,10 +566,15 @@ function normalizeApprovedResponseContentType(value: string | null) {
     return undefined
   }
 
-  const mediaType = value.split(';', 1)[0]?.trim().toLowerCase()
-  return mediaType !== undefined && APPROVED_UPSTREAM_RESPONSE_CONTENT_TYPES.has(mediaType)
-    ? mediaType
-    : undefined
+  const [rawMediaType, ...rawParameters] = value.split(';')
+  const mediaType = rawMediaType?.trim().toLowerCase()
+  if (mediaType === undefined || !APPROVED_UPSTREAM_RESPONSE_CONTENT_TYPES.has(mediaType)) {
+    return undefined
+  }
+
+  return rawParameters.length === 1 && rawParameters[0]?.trim().toLowerCase() === 'charset=utf-8'
+    ? `${mediaType}; charset=utf-8`
+    : mediaType
 }
 
 function redactLocalTokenFromResponse(body: Buffer, localToken: string) {

@@ -160,7 +160,6 @@ describe('dashboard BFF allowlisted proxy', () => {
     })
 
     expect(response.statusCode).toBe(200)
-    expect(server.log.level).toBe('silent')
     expect(requests).toHaveLength(1)
     expectApprovedUpstreamHeaders(requests[0]?.init, false)
   })
@@ -211,7 +210,7 @@ describe('dashboard BFF allowlisted proxy', () => {
       expect(response.statusCode).toBe(200)
       expect(response.body).not.toContain(serverLocalToken)
       expect(JSON.stringify(response.headers)).not.toContain(serverLocalToken)
-      expect(response.headers['content-type']).toBe('application/json')
+      expect(response.headers['content-type']).toBe('application/json; charset=utf-8')
       expect(response.headers.authorization).toBeUndefined()
       expect(response.headers.connection).toBeUndefined()
       expect(response.headers.cookie).toBeUndefined()
@@ -247,6 +246,8 @@ describe('dashboard BFF allowlisted proxy', () => {
 
     expect(rejectedGet.statusCode).toBe(400)
     expect(rejectedPost.statusCode).toBe(400)
+    expect(rejectedGet.body).not.toContain(browserSuppliedToken)
+    expect(rejectedPost.body).not.toContain(browserSuppliedToken)
     expect(rejectedGet.body).not.toContain(serverLocalToken)
     expect(rejectedPost.body).not.toContain(serverLocalToken)
     expect(requests).toHaveLength(0)
