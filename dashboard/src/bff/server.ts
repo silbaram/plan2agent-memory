@@ -1,0 +1,717 @@
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, type RawServerDefault } from 'fastify'
+import { brotliDecompressSync, gunzipSync, inflateSync } from 'node:zlib'
+
+export const MAX_DECOMPRESSED_BODY_BYTES = 64 * 1024
+
+const DEFAULT_UPSTREAM_ORIGIN = 'http://127.0.0.1:8080'
+const MAX_REQUEST_TARGET_LENGTH = 8 * 1024
+const MAX_PATH_LENGTH = 1024
+const MAX_QUERY_LENGTH = 4 * 1024
+const MAX_QUERY_VALUE_LENGTH = 2048
+const MAX_METADATA_FILTERS = 20
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const SAFE_IDENTIFIER_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,255}$/
+const CURSOR_PATTERN = /^[a-zA-Z0-9_-]+={0,2}$/
+const ARTIFACT_TYPES = new Set([
+  'PROJECT',
+  'ITERATION',
+  'DOCUMENT_SNAPSHOT',
+  'TASK_GRAPH',
+  'TASK',
+  'RUN_RECORD',
+  'PROPOSAL',
+  'DOCUMENT_CHUNK',
+])
+const DASHBOARD_ARTIFACT_TYPES = new Set([
+  'DOCUMENT_SNAPSHOT',
+  'TASK_GRAPH',
+  'TASK',
+  'RUN_RECORD',
+  'PROPOSAL',
+])
+const GRAPH_NODE_KINDS = new Set([
+  'DECISION',
+  'ASSUMPTION',
+  'CLARIFYING_QUESTION',
+  'EVIDENCE',
+  'SPEC_SECTION',
+  'DOCUMENT',
+  'TASK',
+  'RUN',
+  'PROPOSAL',
+])
+const GRAPH_TRACE_DIRECTIONS = new Set(['UPSTREAM', 'DOWNSTREAM', 'BOTH'])
+const METHOD_OVERRIDE_HEADERS = [
+  'x-http-method-override',
+  'x-http-method',
+  'x-method-override',
+]
+
+type ProxyMethod = 'GET' | 'POST'
+type QueryPairs = ReadonlyArray<readonly [string, string]>
+type Validator = (value: string) => boolean
+
+interface QueryRule {
+  required?: boolean
+  maxLength?: number
+  validate?: Validator
+}
+
+interface RouteDefinition {
+  method: ProxyMethod
+  fastifyPath: string
+  pathPattern: RegExp
+  query: Readonly<Record<string, QueryRule>>
+  schema?: Record<string, unknown>
+}
+
+export interface BffOptions {
+  fetch?: typeof fetch
+  upstreamOrigin?: string
+}
+
+class BffRequestError extends Error {
+  constructor(
+    readonly statusCode: number,
+    message: string,
+  ) {
+    super(message)
+  }
+}
+
+const uuidSchema = {
+  type: 'string',
+  pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$',
+}
+
+const semanticSearchSchema = searchSchema({})
+const hybridSearchSchema = searchSchema({
+  rrfK: { type: 'integer', minimum: 1, maximum: 1000 },
+  candidateLimit: { type: 'integer', minimum: 1, maximum: 500 },
+})
+
+const queryRules = {
+  limit: { validate: isPageLimit },
+  cursor: { maxLength: MAX_QUERY_VALUE_LENGTH, validate: isCursor },
+  projectId: { validate: isUuid },
+  iterationId: { validate: isUuid },
+  sourceProjectId: { maxLength: 256, validate: isSafeText },
+  sourceIterationId: { maxLength: 256, validate: isSafeText },
+  sourceDocumentId: { maxLength: 256, validate: isSafeText },
+  sourceTaskGraphId: { maxLength: 256, validate: isSafeText },
+  sourceTaskId: { maxLength: 256, validate: isSafeText },
+  sourceRunId: { maxLength: 256, validate: isSafeText },
+  artifactType: { validate: isArtifactType },
+  sourcePath: { maxLength: 1024, validate: isSafeSourcePath },
+  taskId: { validate: isUuid },
+  runId: { validate: isUuid },
+  contentHash: { validate: isContentHash },
+  sourceReferenceCanonicalServerId: { validate: isUuid },
+  sourceReferenceUri: { maxLength: 2048, validate: isSafeText },
+  q: { required: true, maxLength: 1024, validate: isSearchText },
+  nodeKind: { validate: isGraphNodeKind },
+  query: { maxLength: 1024, validate: isSearchText },
+  naturalKey: { required: true, validate: isSafeIdentifier },
+  direction: { validate: isGraphTraceDirection },
+  maxDepth: { validate: isMaxDepth },
+} satisfies Record<string, QueryRule>
+
+const routes: readonly RouteDefinition[] = [
+  {
+    method: 'GET',
+    fastifyPath: '/api/health',
+    pathPattern: /^\/api\/health$/,
+    query: {},
+  },
+  {
+    method: 'GET',
+    fastifyPath: '/api/projects',
+    pathPattern: /^\/api\/projects$/,
+    query: pickQueryRules('limit', 'cursor'),
+  },
+  {
+    method: 'GET',
+    fastifyPath: '/api/projects/:projectId/iterations',
+    pathPattern: /^\/api\/projects\/(?<projectId>[0-9a-fA-F-]{36})\/iterations$/,
+    query: pickQueryRules('limit', 'cursor'),
+  },
+  {
+    method: 'GET',
+    fastifyPath: '/api/artifacts',
+    pathPattern: /^\/api\/artifacts$/,
+    query: pickQueryRules(
+      'projectId',
+      'iterationId',
+      'sourceProjectId',
+      'sourceIterationId',
+      'sourceDocumentId',
+      'sourceTaskGraphId',
+      'sourceTaskId',
+      'sourceRunId',
+      'artifactType',
+      'sourcePath',
+      'taskId',
+      'runId',
+      'contentHash',
+      'sourceReferenceCanonicalServerId',
+      'sourceReferenceUri',
+      'limit',
+      'cursor',
+    ),
+  },
+  {
+    method: 'GET',
+    fastifyPath: '/api/artifacts/:artifactType/:artifactId',
+    pathPattern: /^\/api\/artifacts\/(?<artifactType>[A-Z_]+)\/(?<artifactId>[0-9a-fA-F-]{36})$/,
+    query: {},
+  },
+  {
+    method: 'GET',
+    fastifyPath: '/api/search/keyword',
+    pathPattern: /^\/api\/search\/keyword$/,
+    query: pickQueryRules('q', 'projectId', 'iterationId', 'artifactType', 'sourcePath', 'taskId', 'runId', 'limit', 'cursor'),
+  },
+  {
+    method: 'GET',
+    fastifyPath: '/api/graph/nodes',
+    pathPattern: /^\/api\/graph\/nodes$/,
+    query: pickQueryRules('projectId', 'iterationId', 'nodeKind', 'query', 'limit'),
+  },
+  {
+    method: 'GET',
+    fastifyPath: '/api/graph/trace',
+    pathPattern: /^\/api\/graph\/trace$/,
+    query: pickQueryRules('projectId', 'naturalKey', 'iterationId', 'direction', 'maxDepth'),
+  },
+  {
+    method: 'POST',
+    fastifyPath: '/api/search/semantic',
+    pathPattern: /^\/api\/search\/semantic$/,
+    query: {},
+    schema: { body: semanticSearchSchema },
+  },
+  {
+    method: 'POST',
+    fastifyPath: '/api/search/hybrid',
+    pathPattern: /^\/api\/search\/hybrid$/,
+    query: {},
+    schema: { body: hybridSearchSchema },
+  },
+]
+
+export function createBffServer(options: BffOptions = {}): FastifyInstance {
+  const upstreamOrigin = resolveUpstreamOrigin(options.upstreamOrigin ?? DEFAULT_UPSTREAM_ORIGIN)
+  const fetchImpl = options.fetch ?? globalThis.fetch
+
+  if (typeof fetchImpl !== 'function') {
+    throw new TypeError('A fetch implementation is required')
+  }
+
+  const server = Fastify<RawServerDefault>({
+    bodyLimit: MAX_DECOMPRESSED_BODY_BYTES,
+    exposeHeadRoutes: false,
+    rewriteUrl(request) {
+      const requestUrl = request.url ?? '/__p2a_bff_rejected_request_target__'
+      return requiresRoutingRejection(requestUrl) ? '/__p2a_bff_rejected_request_target__' : requestUrl
+    },
+    ajv: {
+      customOptions: {
+        removeAdditional: false,
+      },
+    },
+  })
+
+  server.addContentTypeParser(
+    'application/json',
+    { bodyLimit: MAX_DECOMPRESSED_BODY_BYTES, parseAs: 'buffer' },
+    (request, body, done) => {
+      try {
+        const encodedBody = Buffer.isBuffer(body) ? body : Buffer.from(body)
+        const decodedBody = decompressBody(headerValue(request.headers['content-encoding']), encodedBody)
+        done(null, JSON.parse(decodedBody.toString('utf8')) as unknown)
+      } catch (error) {
+        done(error as Error)
+      }
+    },
+  )
+
+  server.addHook('onRequest', async (request, reply) => {
+    const target = request.raw.url ?? request.url
+    try {
+      assertSafeRequestTarget(target)
+      assertNoMethodOverride(request)
+      assertBodyRequestShape(request)
+    } catch (error) {
+      return sendRequestError(reply, error)
+    }
+  })
+
+  for (const route of routes) {
+    server.route({
+      method: route.method,
+      url: route.fastifyPath,
+      schema: route.schema,
+      handler: async (request, reply) => {
+        const target = validateRouteTarget(request.raw.url ?? request.url, route)
+
+        if (route.method === 'POST') {
+          validateSearchRequestBody(request.body, route.fastifyPath)
+        }
+
+        const upstreamUrl = buildUpstreamUrl(upstreamOrigin, target.path, target.query)
+        const upstreamResponse = await fetchImpl(upstreamUrl, {
+          method: route.method,
+          headers: route.method === 'POST'
+            ? { accept: 'application/json', 'content-type': 'application/json' }
+            : { accept: 'application/json' },
+          body: route.method === 'POST' ? JSON.stringify(request.body) : undefined,
+        })
+        const responseBody = Buffer.from(await upstreamResponse.arrayBuffer())
+        const contentType = upstreamResponse.headers.get('content-type')
+
+        if (contentType !== null) {
+          reply.header('content-type', contentType)
+        }
+
+        return reply.code(upstreamResponse.status).send(responseBody)
+      },
+    })
+  }
+
+  server.setNotFoundHandler((_request, reply) => reply.code(404).send({ error: 'Not found' }))
+  server.setErrorHandler((error, _request, reply) => {
+    if (error instanceof BffRequestError) {
+      return sendRequestError(reply, error)
+    }
+    const standardError = error as {
+      code?: unknown
+      message?: unknown
+      statusCode?: unknown
+      validation?: unknown
+    }
+
+    if (standardError.code === 'FST_ERR_CTP_BODY_TOO_LARGE') {
+      return reply.code(413).send({ error: 'Request body is too large' })
+    }
+
+    if (standardError.validation !== undefined) {
+      return reply.code(400).send({ error: 'Invalid request body' })
+    }
+
+    const statusCode = typeof standardError.statusCode === 'number' && standardError.statusCode >= 400 && standardError.statusCode < 500
+      ? standardError.statusCode
+      : 500
+    const message = typeof standardError.message === 'string' ? standardError.message : 'Invalid request'
+    return reply.code(statusCode).send({ error: statusCode === 500 ? 'Upstream request failed' : message })
+  })
+
+  return server
+}
+
+export function isAllowedBffRequestTarget(target: string) {
+  return !requiresRoutingRejection(target)
+}
+
+function searchSchema(extraProperties: Record<string, unknown>) {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['q'],
+    properties: {
+      q: { type: 'string', minLength: 1, maxLength: 1024 },
+      projectId: uuidSchema,
+      iterationId: uuidSchema,
+      artifactType: enumSchema([...ARTIFACT_TYPES]),
+      sourcePath: safeTextSchema(1024),
+      taskId: uuidSchema,
+      runId: uuidSchema,
+      metadataFilters: {
+        type: 'object',
+        maxProperties: MAX_METADATA_FILTERS,
+        additionalProperties: { type: 'string', minLength: 1, maxLength: 256 },
+        propertyNames: { pattern: '^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$' },
+      },
+      limit: { type: 'integer', minimum: 1, maximum: 200 },
+      cursor: { type: 'string', minLength: 1, maxLength: MAX_QUERY_VALUE_LENGTH, pattern: '^[A-Za-z0-9_-]+={0,2}$' },
+      ...extraProperties,
+    },
+  }
+}
+
+function enumSchema(values: readonly string[]) {
+  return { type: 'string', enum: values }
+}
+
+function safeTextSchema(maxLength: number) {
+  return { type: 'string', minLength: 1, maxLength }
+}
+
+function pickQueryRules(...keys: (keyof typeof queryRules)[]) {
+  return Object.fromEntries(keys.map((key) => [key, queryRules[key]]))
+}
+
+function assertSafeRequestTarget(target: string) {
+  if (target.length > MAX_REQUEST_TARGET_LENGTH) {
+    throw new BffRequestError(414, 'Request target is too long')
+  }
+
+  const queryIndex = target.indexOf('?')
+  const path = queryIndex === -1 ? target : target.slice(0, queryIndex)
+  const query = queryIndex === -1 ? '' : target.slice(queryIndex + 1)
+
+  if (!path.startsWith('/') || path.length > MAX_PATH_LENGTH || query.length > MAX_QUERY_LENGTH) {
+    throw new BffRequestError(400, 'Invalid request target')
+  }
+
+  if (path.includes('\\') || path.includes('//') || path.includes('#')) {
+    throw new BffRequestError(400, 'Unsafe request path')
+  }
+
+  assertValidPercentEncoding(path, 'request path')
+  let decodedPath: string
+  try {
+    decodedPath = decodeURIComponent(path)
+  } catch {
+    throw new BffRequestError(400, 'Malformed request path encoding')
+  }
+  if (decodedPath !== path || decodedPath.includes('\\') || hasTraversalSegment(decodedPath)) {
+    throw new BffRequestError(400, 'Encoded or traversal request path is not allowed')
+  }
+
+  if (query.includes('#')) {
+    throw new BffRequestError(400, 'Invalid request target')
+  }
+}
+
+function requiresRoutingRejection(target: string) {
+  const queryIndex = target.indexOf('?')
+  const path = queryIndex === -1 ? target : target.slice(0, queryIndex)
+  if (!path.startsWith('/') || path.includes('\\') || path.includes('//') || path.includes('#')) {
+    return true
+  }
+
+  try {
+    assertValidPercentEncoding(path, 'request path')
+    const decodedPath = decodeURIComponent(path)
+    return decodedPath !== path || decodedPath.includes('\\') || hasTraversalSegment(decodedPath)
+  } catch {
+    return true
+  }
+}
+
+function assertNoMethodOverride(request: FastifyRequest) {
+  if (METHOD_OVERRIDE_HEADERS.some((header) => request.headers[header] !== undefined)) {
+    throw new BffRequestError(400, 'Method overrides are not allowed')
+  }
+}
+
+function assertBodyRequestShape(request: FastifyRequest) {
+  const declaredLength = headerValue(request.headers['content-length'])
+  const contentLength = declaredLength === undefined ? undefined : Number(declaredLength)
+  if (contentLength !== undefined && (!Number.isSafeInteger(contentLength) || contentLength < 0)) {
+    throw new BffRequestError(400, 'Invalid Content-Length header')
+  }
+
+  if (contentLength !== undefined && contentLength > MAX_DECOMPRESSED_BODY_BYTES) {
+    throw new BffRequestError(413, 'Request body is too large')
+  }
+
+  if (request.method === 'POST') {
+    const contentType = headerValue(request.headers['content-type'])
+    if (contentType === undefined || contentType.split(';', 1)[0].trim().toLowerCase() !== 'application/json') {
+      throw new BffRequestError(415, 'Only application/json request bodies are allowed')
+    }
+    return
+  }
+
+  if (contentLength !== undefined && contentLength > 0) {
+    throw new BffRequestError(400, 'GET requests must not include a body')
+  }
+}
+
+function validateRouteTarget(target: string, route: RouteDefinition) {
+  assertSafeRequestTarget(target)
+  const queryIndex = target.indexOf('?')
+  const path = queryIndex === -1 ? target : target.slice(0, queryIndex)
+  const rawQuery = queryIndex === -1 ? '' : target.slice(queryIndex + 1)
+  const match = route.pathPattern.exec(path)
+
+  if (match === null) {
+    throw new BffRequestError(404, 'Route is not allowed')
+  }
+
+  const parameters = match.groups ?? {}
+  if (parameters.projectId !== undefined && !isUuid(parameters.projectId)) {
+    throw new BffRequestError(400, 'Invalid project identifier')
+  }
+  if (parameters.artifactType !== undefined && !DASHBOARD_ARTIFACT_TYPES.has(parameters.artifactType)) {
+    throw new BffRequestError(400, 'Invalid artifact type')
+  }
+  if (parameters.artifactId !== undefined && !isUuid(parameters.artifactId)) {
+    throw new BffRequestError(400, 'Invalid artifact identifier')
+  }
+
+  return { path, query: validateQuery(rawQuery, route.query) }
+}
+
+function validateQuery(rawQuery: string, rules: Readonly<Record<string, QueryRule>>): QueryPairs {
+  if (rawQuery.length === 0) {
+    assertRequiredQueryParameters(new Set(), rules)
+    return []
+  }
+
+  const pairs = rawQuery.split('&')
+  if (pairs.length > Object.keys(rules).length) {
+    throw new BffRequestError(400, 'Too many query parameters')
+  }
+
+  const values: [string, string][] = []
+  const seen = new Set<string>()
+  for (const pair of pairs) {
+    if (pair.length === 0) {
+      throw new BffRequestError(400, 'Empty query parameter is not allowed')
+    }
+    const separator = pair.indexOf('=')
+    const rawName = separator === -1 ? pair : pair.slice(0, separator)
+    const rawValue = separator === -1 ? '' : pair.slice(separator + 1)
+    const name = decodeQueryComponent(rawName)
+    const value = decodeQueryComponent(rawValue)
+    const rule = rules[name]
+
+    if (rule === undefined || seen.has(name)) {
+      throw new BffRequestError(400, 'Query parameter is not allowed')
+    }
+    if (value.length === 0 || value.length > (rule.maxLength ?? MAX_QUERY_VALUE_LENGTH) || !isSafeQueryValue(value)) {
+      throw new BffRequestError(400, 'Invalid query parameter value')
+    }
+    if (rule.validate !== undefined && !rule.validate(value)) {
+      throw new BffRequestError(400, 'Invalid query parameter value')
+    }
+
+    seen.add(name)
+    values.push([name, value])
+  }
+
+  assertRequiredQueryParameters(seen, rules)
+  return values
+}
+
+function assertRequiredQueryParameters(seen: ReadonlySet<string>, rules: Readonly<Record<string, QueryRule>>) {
+  for (const [name, rule] of Object.entries(rules)) {
+    if (rule.required && !seen.has(name)) {
+      throw new BffRequestError(400, `Missing required query parameter: ${name}`)
+    }
+  }
+}
+
+function decodeQueryComponent(value: string): string {
+  assertValidPercentEncoding(value, 'query parameter')
+  try {
+    return decodeURIComponent(value.replace(/\+/g, ' '))
+  } catch {
+    throw new BffRequestError(400, 'Malformed query encoding')
+  }
+}
+
+function assertValidPercentEncoding(value: string, label: string) {
+  for (let index = value.indexOf('%'); index !== -1; index = value.indexOf('%', index + 1)) {
+    if (!/^[0-9a-fA-F]{2}$/.test(value.slice(index + 1, index + 3))) {
+      throw new BffRequestError(400, `Malformed ${label} encoding`)
+    }
+  }
+}
+
+function buildUpstreamUrl(origin: string, path: string, query: QueryPairs) {
+  const url = new URL(path, origin)
+  for (const [name, value] of query) {
+    url.searchParams.append(name, value)
+  }
+  return url
+}
+
+function decompressBody(contentEncoding: string | undefined, body: Buffer) {
+  const encoding = contentEncoding?.trim().toLowerCase() ?? 'identity'
+  let decoded: Buffer
+  try {
+    switch (encoding) {
+      case 'identity':
+        decoded = body
+        break
+      case 'gzip':
+        decoded = gunzipSync(body, { maxOutputLength: MAX_DECOMPRESSED_BODY_BYTES })
+        break
+      case 'deflate':
+        decoded = inflateSync(body, { maxOutputLength: MAX_DECOMPRESSED_BODY_BYTES })
+        break
+      case 'br':
+        decoded = brotliDecompressSync(body, { maxOutputLength: MAX_DECOMPRESSED_BODY_BYTES })
+        break
+      default:
+        throw new BffRequestError(415, 'Unsupported Content-Encoding')
+    }
+  } catch (error) {
+    if (error instanceof BffRequestError) {
+      throw error
+    }
+    if (isBodyLimitError(error)) {
+      throw new BffRequestError(413, 'Request body is too large')
+    }
+    throw new BffRequestError(400, 'Invalid compressed JSON body')
+  }
+
+  if (decoded.length > MAX_DECOMPRESSED_BODY_BYTES) {
+    throw new BffRequestError(413, 'Request body is too large')
+  }
+  return decoded
+}
+
+function isBodyLimitError(error: unknown) {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ERR_BUFFER_TOO_LARGE'
+}
+
+function validateSearchRequestBody(body: unknown, path: string) {
+  if (!isRecord(body)) {
+    throw new BffRequestError(400, 'Invalid request body')
+  }
+  const query = body.q
+  if (!isSearchText(query) || query.length > 1024) {
+    throw new BffRequestError(400, 'Invalid search query')
+  }
+  if (body.projectId !== undefined && !isStringMatching(body.projectId, isUuid)) {
+    throw new BffRequestError(400, 'Invalid project identifier')
+  }
+  if (body.iterationId !== undefined && !isStringMatching(body.iterationId, isUuid)) {
+    throw new BffRequestError(400, 'Invalid iteration identifier')
+  }
+  if (body.artifactType !== undefined && !isStringMatching(body.artifactType, isArtifactType)) {
+    throw new BffRequestError(400, 'Invalid artifact type')
+  }
+  if (body.sourcePath !== undefined && !isStringMatching(body.sourcePath, isSafeSourcePath)) {
+    throw new BffRequestError(400, 'Invalid source path')
+  }
+  if (body.taskId !== undefined && !isStringMatching(body.taskId, isUuid)) {
+    throw new BffRequestError(400, 'Invalid task identifier')
+  }
+  if (body.runId !== undefined && !isStringMatching(body.runId, isUuid)) {
+    throw new BffRequestError(400, 'Invalid run identifier')
+  }
+  if (body.cursor !== undefined && !isStringMatching(body.cursor, isCursor)) {
+    throw new BffRequestError(400, 'Invalid cursor')
+  }
+  if (body.metadataFilters !== undefined && !isValidMetadataFilters(body.metadataFilters)) {
+    throw new BffRequestError(400, 'Invalid metadata filters')
+  }
+  if (
+    path === '/api/search/hybrid'
+    && typeof body.candidateLimit === 'number'
+    && typeof body.limit === 'number'
+    && body.candidateLimit < body.limit
+  ) {
+    throw new BffRequestError(400, 'candidateLimit must be greater than or equal to limit')
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isValidMetadataFilters(value: unknown) {
+  if (!isRecord(value) || Object.keys(value).length > MAX_METADATA_FILTERS) {
+    return false
+  }
+  return Object.entries(value).every(([key, entry]) => (
+    SAFE_IDENTIFIER_PATTERN.test(key)
+    && key.length <= 64
+    && typeof entry === 'string'
+    && isSafeText(entry)
+    && entry.length <= 256
+  ))
+}
+
+function isStringMatching(value: unknown, validator: Validator): value is string {
+  return typeof value === 'string' && validator(value)
+}
+
+function isUuid(value: string) {
+  return UUID_PATTERN.test(value)
+}
+
+function isPageLimit(value: string) {
+  return isIntegerInRange(value, 1, 200)
+}
+
+function isMaxDepth(value: string) {
+  return isIntegerInRange(value, 1, 30)
+}
+
+function isIntegerInRange(value: string, min: number, max: number) {
+  return /^(?:0|[1-9][0-9]*)$/.test(value) && Number(value) >= min && Number(value) <= max
+}
+
+function isCursor(value: string) {
+  return value.length <= MAX_QUERY_VALUE_LENGTH && CURSOR_PATTERN.test(value)
+}
+
+function isArtifactType(value: string) {
+  return ARTIFACT_TYPES.has(value)
+}
+
+function isGraphNodeKind(value: string) {
+  return GRAPH_NODE_KINDS.has(value)
+}
+
+function isGraphTraceDirection(value: string) {
+  return GRAPH_TRACE_DIRECTIONS.has(value)
+}
+
+function isContentHash(value: string) {
+  return /^[0-9a-f]{64}$/i.test(value)
+}
+
+function isSafeIdentifier(value: string) {
+  return SAFE_IDENTIFIER_PATTERN.test(value)
+}
+
+function isSafeText(value: string) {
+  return value.length > 0 && !value.includes('\\') && !containsControlCharacter(value)
+}
+
+function isSearchText(value: unknown): value is string {
+  return typeof value === 'string' && isSafeText(value) && value.trim().length > 0
+}
+
+function isSafeSourcePath(value: string) {
+  return isSafeText(value) && !hasTraversalSegment(value)
+}
+
+function isSafeQueryValue(value: string) {
+  return isSafeText(value) && !hasTraversalSegment(value)
+}
+
+function hasTraversalSegment(value: string) {
+  return value.split('/').some((segment) => segment === '.' || segment === '..')
+}
+
+function containsControlCharacter(value: string) {
+  return [...value].some((character) => character.codePointAt(0)! < 32)
+}
+
+function resolveUpstreamOrigin(value: string) {
+  const url = new URL(value)
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
+    throw new TypeError('upstreamOrigin must be an absolute HTTP(S) origin without a path')
+  }
+  return url.origin
+}
+
+function headerValue(value: string | string[] | undefined) {
+  return typeof value === 'string' ? value : undefined
+}
+
+function sendRequestError(reply: FastifyReply, error: unknown) {
+  const requestError = error instanceof BffRequestError
+    ? error
+    : new BffRequestError(400, 'Invalid request')
+  return reply.code(requestError.statusCode).send({ error: requestError.message })
+}
