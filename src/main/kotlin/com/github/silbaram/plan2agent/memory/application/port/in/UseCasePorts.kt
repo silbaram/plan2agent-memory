@@ -1,6 +1,9 @@
 package com.github.silbaram.plan2agent.memory.application.port.`in`
 
 import com.github.silbaram.plan2agent.memory.application.usecase.FindArtifactsQuery
+import com.github.silbaram.plan2agent.memory.application.usecase.FindArtifactDetailQuery
+import com.github.silbaram.plan2agent.memory.application.usecase.FindIterationSummariesQuery
+import com.github.silbaram.plan2agent.memory.application.usecase.FindProjectSummariesQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.HybridSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.KeywordSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.PagedResult
@@ -34,6 +37,9 @@ import com.github.silbaram.plan2agent.memory.domain.RunRecord
 import com.github.silbaram.plan2agent.memory.domain.Task
 import com.github.silbaram.plan2agent.memory.domain.TaskGraph
 import com.github.silbaram.plan2agent.memory.domain.VectorSearchMatch
+import com.github.silbaram.plan2agent.memory.domain.readmodel.ArtifactDetail
+import com.github.silbaram.plan2agent.memory.domain.readmodel.IterationSummary
+import com.github.silbaram.plan2agent.memory.domain.readmodel.ProjectSummary
 
 interface RegisterProjectUseCase {
     fun registerProject(command: RegisterProjectCommand): Project
@@ -65,6 +71,18 @@ interface SaveDocumentChunksUseCase {
 
 interface FindArtifactsUseCase {
     fun findArtifacts(query: FindArtifactsQuery): PagedResult<ArtifactSummary>
+}
+
+interface FindProjectSummariesUseCase {
+    fun findProjectSummaries(query: FindProjectSummariesQuery): PagedResult<ProjectSummary>
+}
+
+interface FindIterationSummariesUseCase {
+    fun findIterationSummaries(query: FindIterationSummariesQuery): PagedResult<IterationSummary>
+}
+
+interface FindArtifactDetailUseCase {
+    fun findArtifactDetail(query: FindArtifactDetailQuery): ArtifactDetail
 }
 
 interface KeywordSearchUseCase {
