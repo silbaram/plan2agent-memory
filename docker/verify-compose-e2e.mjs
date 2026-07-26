@@ -400,8 +400,10 @@ function verifyContainerInvariants() {
   const dashboardContainer = compose(['ps', '--quiet', 'dashboard'])
   const backendUser = docker(['inspect', '--format', '{{.Config.User}}', backendContainer])
   const dashboardUser = docker(['inspect', '--format', '{{.Config.User}}', dashboardContainer])
-  const backendArchitecture = docker(['inspect', '--format', '{{.Architecture}}', backendContainer])
-  const dashboardArchitecture = docker(['inspect', '--format', '{{.Architecture}}', dashboardContainer])
+  const backendImage = docker(['inspect', '--format', '{{.Image}}', backendContainer])
+  const dashboardImage = docker(['inspect', '--format', '{{.Image}}', dashboardContainer])
+  const backendArchitecture = docker(['image', 'inspect', '--format', '{{.Architecture}}', backendImage])
+  const dashboardArchitecture = docker(['image', 'inspect', '--format', '{{.Architecture}}', dashboardImage])
   const hostArchitecture = docker(['version', '--format', '{{.Server.Arch}}'])
   const modelMount = docker(['inspect', '--format', '{{range .Mounts}}{{if eq .Destination "/opt/p2a/model"}}{{.RW}}{{end}}{{end}}', backendContainer])
 
