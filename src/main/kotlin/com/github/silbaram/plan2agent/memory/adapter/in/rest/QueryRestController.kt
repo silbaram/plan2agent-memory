@@ -42,6 +42,7 @@ class QueryRestController(
         @RequestParam(required = false) sourceReferenceUri: String?,
         @RequestParam(required = false) limit: Int?,
         @RequestParam(required = false) cursor: String?,
+        @RequestParam(required = false) artifactTypes: List<String>? = null,
     ): PagedResponse<ArtifactLookupResponse> =
         findArtifactsUseCase.findArtifacts(
             ArtifactLookupRequest(
@@ -62,6 +63,7 @@ class QueryRestController(
                 sourceReferenceUri = sourceReferenceUri,
                 limit = limit,
                 cursor = cursor,
+                artifactTypes = artifactTypes,
             ).toQuery(),
         ).toRestPage { it.toLookupResponse() }
 

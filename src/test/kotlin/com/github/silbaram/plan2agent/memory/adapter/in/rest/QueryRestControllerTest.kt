@@ -15,6 +15,7 @@ import com.github.silbaram.plan2agent.memory.application.port.out.ActiveVectorSe
 import com.github.silbaram.plan2agent.memory.application.port.out.ProviderNotConfiguredException
 import com.github.silbaram.plan2agent.memory.application.port.out.ProviderUnavailableException
 import com.github.silbaram.plan2agent.memory.application.port.out.VectorSearchPort
+import com.github.silbaram.plan2agent.memory.application.usecase.ArtifactListRequestCursor
 import com.github.silbaram.plan2agent.memory.application.usecase.FindArtifactsQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.DEFAULT_RRF_K
 import com.github.silbaram.plan2agent.memory.application.usecase.GraphNodeSearchQuery
@@ -22,6 +23,7 @@ import com.github.silbaram.plan2agent.memory.application.usecase.GraphTraceQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.HybridSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.KeywordSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.PagedResult
+import com.github.silbaram.plan2agent.memory.application.usecase.SearchRequestCursor
 import com.github.silbaram.plan2agent.memory.application.usecase.SemanticSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.SemanticSearchUseCaseService
 import com.github.silbaram.plan2agent.memory.application.usecase.VectorSearchQuery
@@ -58,6 +60,7 @@ import org.junit.jupiter.api.Test
 import java.time.Instant
 import org.springframework.http.MediaType
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
@@ -165,6 +168,92 @@ class QueryRestControllerTest {
         assertThat(response.items.single().sourceReference?.path).isEqualTo("spec.md")
         assertThat(response.items.single().metadata).containsEntry("custom", "value")
         assertThat(response.nextCursor).isEqualTo("next-artifact-cursor")
+    }
+
+    @Test
+    fun `artifact lookup exposes repeatable type unions and preserves legacy type filters`() {
+        val mockMvc = artifactMockMvc(controller)
+
+        mockMvc.perform(
+            get("/api/artifacts")
+                .param("artifactTypes", " proposal ", "task", "PROPOSAL"),
+        ).andExpect(status().isOk())
+
+        assertThat(findArtifacts.received?.artifactType).isNull()
+        assertThat(findArtifacts.received?.artifactTypes)
+            .containsExactlyInAnyOrder(ArtifactType.PROPOSAL, ArtifactType.TASK)
+        assertThat(findArtifacts.received?.normalizedArtifactTypes)
+            .containsExactly(ArtifactType.PROPOSAL, ArtifactType.TASK)
+
+        mockMvc.perform(
+            get("/api/artifacts")
+                .param("artifactType", " proposal "),
+        ).andExpect(status().isOk())
+
+        assertThat(findArtifacts.received?.artifactType).isEqualTo(ArtifactType.PROPOSAL)
+        assertThat(findArtifacts.received?.artifactTypes).isNull()
+    }
+
+    @Test
+    fun `artifact lookup rejects conflicting and unsupported type filters with validation errors`() {
+        val mockMvc = artifactMockMvc(controller)
+
+        mockMvc.perform(
+            get("/api/artifacts")
+                .param("artifactType", "TASK")
+                .param("artifactTypes", "RUN_RECORD"),
+        )
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.error").value("validation_error"))
+
+        listOf("DOCUMENT_CHUNK", "PROJECT", "not_an_artifact").forEach { artifactType ->
+            mockMvc.perform(
+                get("/api/artifacts")
+                    .param("artifactTypes", artifactType),
+            )
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("validation_error"))
+        }
+    }
+
+    @Test
+    fun `artifact lookup binds cursors to normalized filters but not page limit`() {
+        val cursorBoundFindArtifacts = CursorBoundFindArtifactsUseCase()
+        val strictController = QueryRestController(
+            findArtifactsUseCase = cursorBoundFindArtifacts,
+            keywordSearchUseCase = keywordSearch,
+            semanticSearchUseCase = semanticSearch,
+            hybridSearchUseCase = hybridSearch,
+            findArtifactGraphNodesUseCase = findGraphNodes,
+            traceArtifactGraphUseCase = traceGraph,
+        )
+        val mockMvc = artifactMockMvc(strictController)
+        val initialQuery = FindArtifactsQuery(
+            projectId = ProjectId("cursor-project"),
+            artifactTypes = linkedSetOf(ArtifactType.PROPOSAL, ArtifactType.TASK),
+            limit = 1,
+        )
+        val cursor = SearchRequestCursor.encode(
+            ArtifactListRequestCursor.fingerprint(initialQuery),
+            "adapter-cursor",
+        )
+
+        mockMvc.perform(
+            get("/api/artifacts")
+                .param("projectId", "cursor-project")
+                .param("artifactTypes", "task", "proposal")
+                .param("limit", "50")
+                .param("cursor", cursor),
+        ).andExpect(status().isOk())
+
+        mockMvc.perform(
+            get("/api/artifacts")
+                .param("projectId", "cursor-project")
+                .param("artifactTypes", "task")
+                .param("cursor", cursor),
+        )
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.error").value("validation_error"))
     }
 
     @Test
@@ -578,6 +667,12 @@ class QueryRestControllerTest {
     }
 }
 
+private fun artifactMockMvc(controller: QueryRestController) =
+    MockMvcBuilders.standaloneSetup(controller)
+        .setControllerAdvice(RestExceptionHandler())
+        .setMessageConverters(MappingJackson2HttpMessageConverter(JacksonObjectMapperConfig().objectMapper()))
+        .build()
+
 private class FakeFindArtifactsUseCase : FindArtifactsUseCase {
     var received: FindArtifactsQuery? = null
     var result: PagedResult<ArtifactSummary> = PagedResult(emptyList(), nextCursor = "next-artifact-cursor")
@@ -585,6 +680,15 @@ private class FakeFindArtifactsUseCase : FindArtifactsUseCase {
     override fun findArtifacts(query: FindArtifactsQuery): PagedResult<ArtifactSummary> {
         received = query
         return result
+    }
+}
+
+private class CursorBoundFindArtifactsUseCase : FindArtifactsUseCase {
+    override fun findArtifacts(query: FindArtifactsQuery): PagedResult<ArtifactSummary> {
+        query.cursor?.let { cursor ->
+            SearchRequestCursor.decode(cursor, ArtifactListRequestCursor.fingerprint(query))
+        }
+        return PagedResult(emptyList())
     }
 }
 

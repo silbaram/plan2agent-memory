@@ -52,6 +52,7 @@ data class ArtifactLookupRequest(
     val sourceReferenceUri: String? = null,
     val limit: Int? = null,
     val cursor: String? = null,
+    val artifactTypes: List<String>? = null,
 )
 
 data class KeywordSearchRequest(
@@ -224,6 +225,7 @@ fun ArtifactLookupRequest.toQuery(): FindArtifactsQuery =
         sourceTaskId = sourceTaskId.toOptionalId(::SourceTaskId),
         sourceRunId = sourceRunId.toOptionalId(::SourceRunId),
         artifactType = parseOptionalEnum<ArtifactType>(artifactType, "artifactType"),
+        artifactTypes = parseOptionalEnums<ArtifactType>(artifactTypes, "artifactTypes"),
         sourcePath = sourcePath?.trim()?.takeIf(String::isNotEmpty),
         taskId = taskId.toOptionalId(::TaskId),
         runId = runId.toOptionalId(::RunId),
@@ -462,6 +464,12 @@ private inline fun <reified T : Enum<T>> parseOptionalEnum(value: String?, field
         throw IllegalArgumentException("$field has invalid value")
     }
 }
+
+private inline fun <reified T : Enum<T>> parseOptionalEnums(values: List<String>?, field: String): Set<T>? =
+    values?.map { value ->
+        parseOptionalEnum<T>(value, field)
+            ?: throw IllegalArgumentException("$field has invalid value")
+    }?.toSet()
 
 private fun SourceReference.toRestResponse(): SourceReferenceResponse =
     SourceReferenceResponse(
