@@ -10,36 +10,84 @@ Plan2Agent Memory Server는 로컬 P2A 산출물을 관계형으로 저장하고
 
 - Java 21
 - Gradle wrapper
-- Docker Compose
-- Docker가 실행 가능한 로컬 환경
+- Node.js 22.23.1과 Corepack (dashboard 개발·browser 검증)
+- Lima와 Docker Compose v2 (`docker-compose` 명령)
+- Compose runtime용 ONNX model directory (`model.onnx`, `tokenizer.json`)
+
+Lima를 처음 쓰는 macOS 환경에서는 Docker daemon을 먼저 시작하고 shell이 Lima socket을 보도록 설정합니다. 이 repository의 Compose 명령은 Docker Desktop plugin이 아닌 `docker-compose`를 사용합니다.
+
+```bash
+limactl start
+export DOCKER_HOST="unix://$HOME/.lima/default/sock/docker.sock"
+docker-compose version
+```
+
+### Dashboard 포함 Compose reference deployment
+
+이 reference deployment는 한 명의 로컬 운영자만을 위한 구성입니다. PostgreSQL, backend, dashboard의 published port는 모두 `127.0.0.1`로만 bind됩니다. dashboard의 Node BFF만 backend의 `X-P2A-Local-Token`을 보유·주입하며, browser bundle·storage·request에는 token을 넣지 않습니다. LAN, public reverse proxy, port forwarding 또는 다중 사용자 접근이 필요해지면 먼저 인증·권한 경계를 별도 설계해야 합니다.
+
+`.env`는 git에 포함하지 않습니다. 개인 경로와 실제 secret을 넣어야 하므로 example을 복사한 후 직접 값을 채웁니다.
+
+```bash
+cp .env.example .env
+# .env의 P2A_DB_PASSWORD, P2A_LOCAL_TOKEN, P2A_MODEL_DIR를 실제 값으로 변경
+set -a
+source .env
+set +a
+```
+
+`P2A_MODEL_DIR`에는 정확히 `model.onnx`와 `tokenizer.json`이 있어야 합니다. Compose는 이 directory만 `/opt/p2a/model:ro`로 mount하고, container 내부 URI `file:///opt/p2a/model/model.onnx`, `file:///opt/p2a/model/tokenizer.json`만 사용합니다. model·tokenizer·host absolute path·token은 image나 git에 복사하지 않습니다.
+
+```bash
+shasum -a 256 "$P2A_MODEL_DIR/model.onnx" "$P2A_MODEL_DIR/tokenizer.json"
+docker-compose --env-file .env config --quiet
+docker-compose --env-file .env up --build --detach --wait
+curl --fail http://127.0.0.1:8080/actuator/health
+curl --fail http://127.0.0.1:4173/healthz
+```
+
+정상 순서는 `postgres healthy → backend healthy → dashboard healthy`입니다. backend의 `DJL_OFFLINE=true`는 image에 prefetch된 native cache를 사용하며 runtime download를 금지합니다. provider 상태는 별도로 확인합니다.
+
+```bash
+curl http://127.0.0.1:8080/actuator/metrics/p2a.embedding.provider.state
+```
+
+정상 중지는 volume을 유지합니다. 재기동 뒤에도 data가 남는지 확인할 때는 같은 명령을 다시 사용합니다.
+
+```bash
+docker-compose --env-file .env down
+docker-compose --env-file .env up --detach --wait
+```
+
+`docker-compose --env-file .env down --volumes`는 이 deployment의 PostgreSQL data를 삭제하는 의도적인 reset입니다. 백업 없이 실행하지 마세요.
 
 ### PostgreSQL 시작
 
-`compose.yaml`은 정확히 `pgvector/pgvector:0.8.5-pg17-bookworm@sha256:d2ef61f42ef767baa5a1475393303cc235bcd92febd9d7014eddb48b41f3bad0` 이미지를 사용합니다. digest를 생략하거나 tag만 바꾸지 마세요. 이 reference Compose의 host port는 `127.0.0.1:5432`에만 bind되므로 LAN이나 public interface로 DB를 공개하지 않습니다.
+backend만 host에서 개발할 때도 먼저 `.env`를 export한 뒤 PostgreSQL service만 올릴 수 있습니다. `compose.yaml`은 정확히 `pgvector/pgvector:0.8.5-pg17-bookworm@sha256:d2ef61f42ef767baa5a1475393303cc235bcd92febd9d7014eddb48b41f3bad0` 이미지를 사용합니다. digest를 생략하거나 tag만 바꾸지 마세요.
 
 ```bash
-docker compose up -d postgres
+docker-compose --env-file .env up --detach postgres
 ```
 
-기본 DB 설정은 다음과 같습니다.
+DB 이름과 user는 고정이고 password와 host port는 `.env`가 소유합니다.
 
 - DB: `p2a_artifact_store`
 - User: `p2a`
-- Password: `p2a_local_password`
-- Port: `5432`
-- JDBC URL: `jdbc:postgresql://localhost:5432/p2a_artifact_store`
+- Password: `P2A_DB_PASSWORD`
+- Port: `P2A_POSTGRES_HOST_PORT` (기본 `5432`, loopback only)
+- JDBC URL: `jdbc:postgresql://127.0.0.1:${P2A_POSTGRES_HOST_PORT:-5432}/p2a_artifact_store`
 
 DB schema의 유일한 변경 경로는 `src/main/resources/db/migration/V*.sql` Flyway migration입니다. 빈 DB에는 현재 `V1__create_artifact_store_schema.sql`, `V2__add_server_global_embedding_profiles.sql`, `V3__add_embedding_jobs.sql`의 V1~V3 chain이 순서대로 적용됩니다. 같은 version 번호가 있더라도 현재 V1 checksum/schema를 validate하지 못하는 과거 DB history는 호환되는 것으로 가정하지 마세요. 필요한 data를 백업하고 reset한 뒤 현재 server가 V1~V3를 적용하게 해야 합니다. JPA/Hibernate DDL 생성과 Spring `schema.sql` 초기화는 비활성화되어 있으며, 환경변수나 profile이 `create`, `update`, `create-drop`, 표준 JPA schema generation 또는 `spring.sql.init.mode`를 활성화하면 애플리케이션은 persistence bean 초기화 전에 기동을 중단합니다. 이후 테이블의 `CREATE`, `ALTER`, `DROP`은 새 versioned SQL migration으로만 반영합니다.
 
 ### 현재 Flyway V1~V3 chain 전환을 위한 전체 초기화
 
-이 절차는 Memory DB의 테이블, Flyway history, 검색 인덱스와 저장 데이터를 모두 삭제합니다. 기존 서버와 쓰기 요청을 먼저 중지하고, 필요한 데이터는 백업한 뒤 실행합니다. 초기화 후에는 이 repository의 최신 서버만 시작해야 합니다.
+이 절차는 Memory DB의 테이블, Flyway history, 검색 인덱스와 저장 데이터를 모두 삭제합니다. 기존 서버와 쓰기 요청을 먼저 중지하고, 필요한 데이터는 백업한 뒤 실행합니다. 초기화 후에는 이 repository의 최신 서버만 시작해야 합니다. `.env`를 먼저 만들고 export한 상태여야 합니다.
 
 로컬 Docker Compose 환경은 named volume을 제거하면 됩니다.
 
 ```bash
-docker compose down -v
-docker compose up -d postgres
+docker-compose --env-file .env down --volumes
+docker-compose --env-file .env up --detach postgres
 ./gradlew bootRun
 ```
 
@@ -83,8 +131,8 @@ ORDER BY installed_rank;
 ```bash
 P2A_DB_URL=jdbc:postgresql://localhost:5432/p2a_artifact_store \
 P2A_DB_USERNAME=p2a \
-P2A_DB_PASSWORD=p2a_local_password \
-P2A_LOCAL_TOKEN=local-dev-token \
+P2A_DB_PASSWORD=replace-with-a-local-db-password \
+P2A_LOCAL_TOKEN=replace-with-a-long-random-local-token \
 ./gradlew bootRun
 ```
 
@@ -200,10 +248,47 @@ curl http://localhost:8080/actuator/metrics
 Lima Docker socket을 쓰는 로컬 환경에서는 다음처럼 실행할 수 있습니다.
 
 ```bash
-DOCKER_HOST=unix:///Users/qoo10/.lima/default/sock/docker.sock \
+DOCKER_HOST=unix://$HOME/.lima/default/sock/docker.sock \
 TESTCONTAINERS_RYUK_DISABLED=true \
 ./gradlew test --rerun-tasks
 ```
+
+### Dashboard와 전체 regression
+
+아래는 새 로컬 환경에서 실행하는 전체 regression 순서입니다. `P2A_MODEL_DIR`은 runtime Compose에만 쓰는 실제 model directory이고, opt-in ONNX test URI는 `.env`에서 주석을 해제했을 때만 쓰입니다. browser, dashboard static bundle, URL query, local storage에는 `P2A_LOCAL_TOKEN`을 넣지 마세요. token은 Compose dashboard BFF와 backend 사이에서만 server-side header로 사용됩니다.
+
+```bash
+# Dashboard/BFF 의존성과 browser 준비 (처음 한 번 또는 lockfile 변경 뒤)
+corepack enable
+corepack pnpm --dir dashboard install --frozen-lockfile
+corepack pnpm --dir dashboard exec playwright install chromium
+
+# Backend와 Testcontainers regression
+DOCKER_HOST=unix://$HOME/.lima/default/sock/docker.sock \
+TESTCONTAINERS_RYUK_DISABLED=true \
+./gradlew test
+
+# Dashboard/BFF 정적 검사와 unit/integration regression
+corepack pnpm --dir dashboard run typecheck
+corepack pnpm --dir dashboard run lint
+corepack pnpm --dir dashboard run test
+
+# 실제 Fastify production BFF를 띄운 browser regression 및 axe 검사
+corepack pnpm --dir dashboard run test:e2e
+corepack pnpm --dir dashboard run test:a11y
+
+# 별도 project·port·temporary model을 사용하는 Compose E2E regression
+P2A_DOCKER_HOST=unix://$HOME/.lima/default/sock/docker.sock \
+node docker/verify-compose-e2e.mjs
+```
+
+마지막 Compose E2E는 runtime provider가 unavailable일 때의 degraded 응답도 검증하기 위해 temporary fake model을 사용합니다. 실제 `P2A_MODEL_DIR`을 쓰는 위 Compose 기동의 provider `ready` 확인을 대체하지 않습니다. 이 script는 고유한 `p2a-e2e-*` project, port, volume만 생성·정리하므로 표준 Compose deployment와 그 data volume을 중지하거나 삭제하지 않습니다.
+
+### Version pin 유지보수 정책
+
+Compose image는 tag와 digest를 항상 한 쌍으로 고정합니다. base image, pgvector image, Node/Java image의 tag 또는 digest를 바꾸는 일은 별도 maintenance review에서 source tag와 digest, build, runtime health, architecture를 함께 재검증해야 합니다. floating tag를 쓰거나 digest만/태그만 바꾸지 마세요.
+
+Gradle dependency version, `dashboard/package.json`의 direct dependency version, `pnpm-lock.yaml`의 exact resolved version도 같은 maintenance review 대상으로 취급합니다. 의존성 갱신은 기능 작업에 섞지 말고 필요한 regression을 다시 실행합니다. multi-architecture image manifest를 이용하므로 `platform: linux/amd64`처럼 host architecture를 Compose에 hard-code하지 마세요. Lima가 실행 중인 host architecture에 맞는 image를 선택하게 둡니다.
 
 ## 인증
 

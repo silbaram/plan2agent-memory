@@ -697,8 +697,8 @@ class ApiIntegrationTest {
             "pgvector/pgvector:0.8.5-pg17-bookworm@sha256:d2ef61f42ef767baa5a1475393303cc235bcd92febd9d7014eddb48b41f3bad0",
             "POSTGRES_DB: p2a_artifact_store",
             "POSTGRES_USER: p2a",
-            "POSTGRES_PASSWORD: p2a_local_password",
-            "\"127.0.0.1:5432:5432\"",
+            "POSTGRES_PASSWORD: ${'$'}{P2A_DB_PASSWORD:?P2A_DB_PASSWORD must be set}",
+            "\"127.0.0.1:${'$'}{P2A_POSTGRES_HOST_PORT:-5432}:5432\"",
             "pg_isready -U p2a -d p2a_artifact_store",
         )
         assertThat(application).contains(
