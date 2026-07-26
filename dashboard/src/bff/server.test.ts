@@ -5,6 +5,8 @@ import { createBffServer, isAllowedBffRequestTarget, MAX_DECOMPRESSED_BODY_BYTES
 
 const projectId = '11111111-1111-4111-8111-111111111111'
 const artifactId = '22222222-2222-4222-8222-222222222222'
+const serverLocalToken = 'server-only-synthetic-token'
+const browserSuppliedToken = 'browser-controlled-synthetic-token'
 
 describe('dashboard BFF allowlisted proxy', () => {
   const servers: ReturnType<typeof createBffServer>[] = []
@@ -43,6 +45,7 @@ describe('dashboard BFF allowlisted proxy', () => {
       'https://memory.example/api/graph/trace?projectId=11111111-1111-4111-8111-111111111111&naturalKey=decision%3AND-1&direction=BOTH&maxDepth=10',
     ])
     expect(requests.every(({ init }) => !new Headers(init.headers).has('x-forwarded-host'))).toBe(true)
+    expect(requests.every(({ init }) => new Headers(init.headers).get('x-p2a-local-token') === serverLocalToken)).toBe(true)
   })
 
   it('forwards the two approved JSON POST search routes after schema validation', async () => {
@@ -65,8 +68,16 @@ describe('dashboard BFF allowlisted proxy', () => {
     expect(hybrid.statusCode).toBe(200)
     expect(requests.map(({ url }) => url.pathname)).toEqual(['/api/search/semantic', '/api/search/hybrid'])
     expect(requests.map(({ init }) => init.headers)).toEqual([
-      { accept: 'application/json', 'content-type': 'application/json' },
-      { accept: 'application/json', 'content-type': 'application/json' },
+      {
+        accept: 'application/json',
+        'content-type': 'application/json',
+        'x-p2a-local-token': serverLocalToken,
+      },
+      {
+        accept: 'application/json',
+        'content-type': 'application/json',
+        'x-p2a-local-token': serverLocalToken,
+      },
     ])
     expect(requests.map(({ init }) => init.body)).toEqual([
       JSON.stringify({ q: 'find decision', projectId, metadataFilters: { kind: 'decision' }, limit: 20 }),
@@ -106,6 +117,10 @@ describe('dashboard BFF allowlisted proxy', () => {
     expect(isAllowedBffRequestTarget('/api\\health')).toBe(false)
   })
 
+  it('fails closed when no header-safe server-only token is configured', () => {
+    expect(() => createBffServer({ localToken: ' ' })).toThrow('localToken must be a non-empty header-safe value')
+  })
+
   it('rejects non-JSON, invalid schema bodies, and decompressed payloads over 64 KiB before fetching upstream', async () => {
     const { server, requests } = createTestServer()
 
@@ -135,18 +150,183 @@ describe('dashboard BFF allowlisted proxy', () => {
     expect(requests).toHaveLength(0)
   })
 
-  function createTestServer() {
+  it('injects the server-only token for GET requests without forwarding browser credentials', async () => {
+    const { server, requests } = createTestServer()
+
+    const response = await server.inject({
+      method: 'GET',
+      url: '/api/projects?limit=10',
+      headers: browserCredentialHeaders(),
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(server.log.level).toBe('silent')
+    expect(requests).toHaveLength(1)
+    expectApprovedUpstreamHeaders(requests[0]?.init, false)
+  })
+
+  it('injects the server-only token for POST requests without forwarding browser credentials', async () => {
+    const { server, requests } = createTestServer()
+
+    const response = await server.inject({
+      method: 'POST',
+      url: '/api/search/semantic',
+      headers: {
+        'content-type': 'application/json',
+        ...browserCredentialHeaders(),
+      },
+      payload: JSON.stringify({ q: 'find decision', projectId }),
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(requests).toHaveLength(1)
+    expectApprovedUpstreamHeaders(requests[0]?.init, true)
+  })
+
+  it('redacts the local token and strips upstream credential headers from GET and POST responses', async () => {
+    const { server, requests } = createTestServer(() => new Response(JSON.stringify({ localToken: serverLocalToken }), {
+      headers: {
+        authorization: `Bearer ${serverLocalToken}`,
+        connection: 'close',
+        'content-type': 'application/json; charset=utf-8',
+        cookie: `session=${serverLocalToken}`,
+        'keep-alive': 'timeout=5',
+        'proxy-authenticate': `Bearer ${serverLocalToken}`,
+        'set-cookie': `session=${serverLocalToken}`,
+        'www-authenticate': `Bearer ${serverLocalToken}`,
+        'x-api-key': serverLocalToken,
+        'x-p2a-local-token': serverLocalToken,
+      },
+    }))
+
+    const getResponse = await server.inject({ method: 'GET', url: '/api/health' })
+    const postResponse = await server.inject({
+      method: 'POST',
+      url: '/api/search/hybrid',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify({ q: 'find decision' }),
+    })
+
+    for (const response of [getResponse, postResponse]) {
+      expect(response.statusCode).toBe(200)
+      expect(response.body).not.toContain(serverLocalToken)
+      expect(JSON.stringify(response.headers)).not.toContain(serverLocalToken)
+      expect(response.headers['content-type']).toBe('application/json')
+      expect(response.headers.authorization).toBeUndefined()
+      expect(response.headers.connection).toBeUndefined()
+      expect(response.headers.cookie).toBeUndefined()
+      expect(response.headers['keep-alive']).toBeUndefined()
+      expect(response.headers['proxy-authenticate']).toBeUndefined()
+      expect(response.headers['set-cookie']).toBeUndefined()
+      expect(response.headers['www-authenticate']).toBeUndefined()
+      expect(response.headers['x-api-key']).toBeUndefined()
+      expect(response.headers['x-p2a-local-token']).toBeUndefined()
+    }
+    expect(requests).toHaveLength(2)
+  })
+
+  it('returns stable secret-free GET and POST errors without attempting upstream fetches for rejected input', async () => {
+    const { server, requests } = createTestServer(() => {
+      throw new Error(`upstream error contains ${serverLocalToken}`)
+    })
+
+    const rejectedGet = await server.inject({
+      method: 'GET',
+      url: '/api/search/keyword?q=memory&q=duplicate',
+      headers: browserCredentialHeaders(),
+    })
+    const rejectedPost = await server.inject({
+      method: 'POST',
+      url: '/api/search/semantic',
+      headers: {
+        'content-type': 'application/json',
+        ...browserCredentialHeaders(),
+      },
+      payload: JSON.stringify({ q: 'memory', upstreamOrigin: `https://${serverLocalToken}.example` }),
+    })
+
+    expect(rejectedGet.statusCode).toBe(400)
+    expect(rejectedPost.statusCode).toBe(400)
+    expect(rejectedGet.body).not.toContain(serverLocalToken)
+    expect(rejectedPost.body).not.toContain(serverLocalToken)
+    expect(requests).toHaveLength(0)
+  })
+
+  it('returns stable secret-free GET and POST errors when the upstream fails', async () => {
+    const { server, requests } = createTestServer(() => {
+      throw new Error(`upstream error contains ${serverLocalToken}`)
+    })
+
+    const getResponse = await server.inject({ method: 'GET', url: '/api/health' })
+    const postResponse = await server.inject({
+      method: 'POST',
+      url: '/api/search/semantic',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify({ q: 'memory' }),
+    })
+
+    for (const response of [getResponse, postResponse]) {
+      expect(response.statusCode).toBe(500)
+      expect(response.json()).toEqual({ error: 'Upstream request failed' })
+      expect(response.body).not.toContain(serverLocalToken)
+    }
+    expect(requests).toHaveLength(2)
+  })
+
+  function createTestServer(upstreamResponse: () => Response = () => new Response(JSON.stringify({ status: 'UP' }), {
+    headers: { 'content-type': 'application/json' },
+  })) {
     const requests: { init: RequestInit; url: URL }[] = []
     const server = createBffServer({
+      localToken: serverLocalToken,
       upstreamOrigin: 'https://memory.example',
       fetch: async (input, init = {}) => {
         requests.push({ init, url: new URL(input.toString()) })
-        return new Response(JSON.stringify({ status: 'UP' }), {
-          headers: { 'content-type': 'application/json' },
-        })
+        return upstreamResponse()
       },
     })
     servers.push(server)
     return { server, requests }
+  }
+
+  function browserCredentialHeaders() {
+    return {
+      authorization: `Bearer ${browserSuppliedToken}`,
+      connection: 'keep-alive',
+      cookie: `session=${browserSuppliedToken}`,
+      host: 'attacker.example',
+      'keep-alive': 'timeout=5',
+      'proxy-authorization': `Bearer ${browserSuppliedToken}`,
+      'x-api-key': browserSuppliedToken,
+      'x-access-token': browserSuppliedToken,
+      'x-auth-token': browserSuppliedToken,
+      'x-p2a-local-token': browserSuppliedToken,
+    }
+  }
+
+  function expectApprovedUpstreamHeaders(init: RequestInit | undefined, isPost: boolean) {
+    const headers = new Headers(init?.headers)
+
+    expect(headers.get('accept')).toBe('application/json')
+    expect(headers.get('content-type')).toBe(isPost ? 'application/json' : null)
+    expect(headers.get('x-p2a-local-token')).toBe(serverLocalToken)
+    expect([...headers.keys()].sort()).toEqual(
+      isPost
+        ? ['accept', 'content-type', 'x-p2a-local-token']
+        : ['accept', 'x-p2a-local-token'],
+    )
+    for (const headerName of [
+      'authorization',
+      'connection',
+      'cookie',
+      'host',
+      'keep-alive',
+      'proxy-authorization',
+      'x-api-key',
+      'x-access-token',
+      'x-auth-token',
+    ]) {
+      expect(headers.has(headerName)).toBe(false)
+    }
   }
 })

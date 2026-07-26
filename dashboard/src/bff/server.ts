@@ -10,6 +10,13 @@ const MAX_QUERY_LENGTH = 4 * 1024
 const MAX_QUERY_VALUE_LENGTH = 2048
 const MAX_QUERY_PARAMETERS = 32
 const MAX_METADATA_FILTERS = 20
+const LOCAL_TOKEN_HEADER_NAME = 'x-p2a-local-token'
+const REDACTED_VALUE = '[redacted]'
+
+const APPROVED_UPSTREAM_RESPONSE_CONTENT_TYPES = new Set([
+  'application/json',
+  'application/problem+json',
+])
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const SAFE_IDENTIFIER_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,255}$/
@@ -70,6 +77,7 @@ interface RouteDefinition {
 
 export interface BffOptions {
   fetch?: typeof fetch
+  localToken: string
   upstreamOrigin?: string
 }
 
@@ -204,8 +212,9 @@ const routes: readonly RouteDefinition[] = [
   },
 ]
 
-export function createBffServer(options: BffOptions = {}): FastifyInstance {
+export function createBffServer(options: BffOptions): FastifyInstance {
   const upstreamOrigin = resolveUpstreamOrigin(options.upstreamOrigin ?? DEFAULT_UPSTREAM_ORIGIN)
+  const localToken = resolveLocalToken(options.localToken)
   const fetchImpl = options.fetch ?? globalThis.fetch
 
   if (typeof fetchImpl !== 'function') {
@@ -215,6 +224,7 @@ export function createBffServer(options: BffOptions = {}): FastifyInstance {
   const server = Fastify<RawServerDefault>({
     bodyLimit: MAX_DECOMPRESSED_BODY_BYTES,
     exposeHeadRoutes: false,
+    logger: false,
     rewriteUrl(request) {
       const requestUrl = request.url ?? '/__p2a_bff_rejected_request_target__'
       return requiresRoutingRejection(requestUrl) ? '/__p2a_bff_rejected_request_target__' : requestUrl
@@ -264,19 +274,16 @@ export function createBffServer(options: BffOptions = {}): FastifyInstance {
         }
 
         const upstreamUrl = buildUpstreamUrl(upstreamOrigin, target.path, target.query)
-        const upstreamResponse = await fetchImpl(upstreamUrl, {
-          method: route.method,
-          headers: route.method === 'POST'
-            ? { accept: 'application/json', 'content-type': 'application/json' }
-            : { accept: 'application/json' },
-          body: route.method === 'POST' ? JSON.stringify(request.body) : undefined,
-        })
-        const responseBody = Buffer.from(await upstreamResponse.arrayBuffer())
-        const contentType = upstreamResponse.headers.get('content-type')
+        const upstreamResponse = await fetchImpl(
+          upstreamUrl,
+          buildApprovedUpstreamRequest(route.method, request.body, localToken),
+        )
+        const responseBody = redactLocalTokenFromResponse(
+          Buffer.from(await upstreamResponse.arrayBuffer()),
+          localToken,
+        )
 
-        if (contentType !== null) {
-          reply.header('content-type', contentType)
-        }
+        setApprovedUpstreamResponseHeaders(reply, upstreamResponse.headers)
 
         return reply.code(upstreamResponse.status).send(responseBody)
       },
@@ -288,12 +295,7 @@ export function createBffServer(options: BffOptions = {}): FastifyInstance {
     if (error instanceof BffRequestError) {
       return sendRequestError(reply, error)
     }
-    const standardError = error as {
-      code?: unknown
-      message?: unknown
-      statusCode?: unknown
-      validation?: unknown
-    }
+    const standardError = toStandardError(error)
 
     if (standardError.code === 'FST_ERR_CTP_BODY_TOO_LARGE') {
       return reply.code(413).send({ error: 'Request body is too large' })
@@ -303,11 +305,7 @@ export function createBffServer(options: BffOptions = {}): FastifyInstance {
       return reply.code(400).send({ error: 'Invalid request body' })
     }
 
-    const statusCode = typeof standardError.statusCode === 'number' && standardError.statusCode >= 400 && standardError.statusCode < 500
-      ? standardError.statusCode
-      : 500
-    const message = typeof standardError.message === 'string' ? standardError.message : 'Invalid request'
-    return reply.code(statusCode).send({ error: statusCode === 500 ? 'Upstream request failed' : message })
+    return reply.code(500).send({ error: 'Upstream request failed' })
   })
 
   return server
@@ -536,6 +534,65 @@ function buildUpstreamUrl(origin: string, path: string, query: QueryPairs) {
   return url
 }
 
+function buildApprovedUpstreamRequest(method: ProxyMethod, body: unknown, localToken: string): RequestInit {
+  return {
+    method,
+    headers: buildApprovedUpstreamHeaders(method, localToken),
+    body: method === 'POST' ? JSON.stringify(body) : undefined,
+  }
+}
+
+function buildApprovedUpstreamHeaders(method: ProxyMethod, localToken: string) {
+  return method === 'POST'
+    ? {
+      accept: 'application/json',
+      'content-type': 'application/json',
+      [LOCAL_TOKEN_HEADER_NAME]: localToken,
+    }
+    : {
+      accept: 'application/json',
+      [LOCAL_TOKEN_HEADER_NAME]: localToken,
+    }
+}
+
+function setApprovedUpstreamResponseHeaders(reply: FastifyReply, headers: Headers) {
+  const contentType = normalizeApprovedResponseContentType(headers.get('content-type'))
+  if (contentType !== undefined) {
+    reply.header('content-type', contentType)
+  }
+}
+
+function normalizeApprovedResponseContentType(value: string | null) {
+  if (value === null) {
+    return undefined
+  }
+
+  const mediaType = value.split(';', 1)[0]?.trim().toLowerCase()
+  return mediaType !== undefined && APPROVED_UPSTREAM_RESPONSE_CONTENT_TYPES.has(mediaType)
+    ? mediaType
+    : undefined
+}
+
+function redactLocalTokenFromResponse(body: Buffer, localToken: string) {
+  const tokenBytes = Buffer.from(localToken, 'utf8')
+  const firstMatch = body.indexOf(tokenBytes)
+  if (firstMatch === -1) {
+    return body
+  }
+
+  const redactedValue = Buffer.from(REDACTED_VALUE, 'utf8')
+  const parts: Buffer[] = []
+  let start = 0
+  let match = firstMatch
+  while (match !== -1) {
+    parts.push(body.subarray(start, match), redactedValue)
+    start = match + tokenBytes.length
+    match = body.indexOf(tokenBytes, start)
+  }
+  parts.push(body.subarray(start))
+  return Buffer.concat(parts)
+}
+
 function decompressBody(contentEncoding: string | undefined, body: Buffer) {
   const encoding = contentEncoding?.trim().toLowerCase() ?? 'identity'
   let decoded: Buffer
@@ -715,6 +772,13 @@ function resolveUpstreamOrigin(value: string) {
   return url.origin
 }
 
+function resolveLocalToken(value: string) {
+  if (!/^[\x21-\x7e]+$/.test(value)) {
+    throw new TypeError('localToken must be a non-empty header-safe value')
+  }
+  return value
+}
+
 function headerValue(value: string | string[] | undefined) {
   return typeof value === 'string' ? value : undefined
 }
@@ -724,4 +788,13 @@ function sendRequestError(reply: FastifyReply, error: unknown) {
     ? error
     : new BffRequestError(400, 'Invalid request')
   return reply.code(requestError.statusCode).send({ error: requestError.message })
+}
+
+function toStandardError(error: unknown) {
+  return isRecord(error)
+    ? {
+      code: error.code,
+      validation: error.validation,
+    }
+    : {}
 }
