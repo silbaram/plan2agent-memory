@@ -199,12 +199,14 @@ async function seedFixture(backendOrigin) {
     name: 'Compose E2E Project',
     canonicalServerId: ids.projectId,
     rootPath: '/compose-e2e',
+    metadata: {},
   })
   await postBackend(backendOrigin, `/api/projects/${ids.projectId}/iterations`, {
     iterationId: ids.iterationId,
     sourceIterationId: 'compose-e2e-iteration',
     label: 'Compose E2E',
     status: 'ACTIVE',
+    metadata: {},
   })
   await postBackend(backendOrigin, '/api/documents/snapshots', documentSnapshot(ids))
   await postBackend(backendOrigin, '/api/task-graphs', {
@@ -215,6 +217,7 @@ async function seedFixture(backendOrigin) {
     graphHash: 'compose-e2e-graph-hash',
     graphJson: JSON.stringify({ tasks: [ids.taskId] }),
     taskIds: [ids.taskId],
+    metadata: {},
   })
   await postBackend(backendOrigin, '/api/tasks/bulk', {
     graphId: ids.taskGraphId,
@@ -229,6 +232,7 @@ async function seedFixture(backendOrigin) {
       status: 'READY',
       targetArea: 'docker/compose-e2e',
       acceptanceCriteria: ['Exercise BFF read routes'],
+      metadata: {},
     }],
   })
   await postBackend(backendOrigin, '/api/document-chunks/bulk', {
@@ -244,6 +248,7 @@ async function seedFixture(backendOrigin) {
         chunkIndex: 0,
         content: 'compose-e2e-keyword proves BFF keyword search traversal',
         chunkHash: 'compose-e2e-chunk-hash',
+        metadata: {},
       },
     }],
   })
@@ -256,6 +261,7 @@ async function seedFixture(backendOrigin) {
       naturalKey: ids.naturalKey,
       label: 'Compose E2E decision',
       content: 'Graph route fixture',
+      metadata: {},
     }],
     edges: [],
   })
@@ -485,5 +491,6 @@ function documentSnapshot(ids) {
     title: 'Compose E2E document',
     content: ids.content ?? 'Compose E2E artifact detail fixture',
     contentHash: `compose-e2e-${ids.documentId}`,
+    metadata: {},
   }
 }
