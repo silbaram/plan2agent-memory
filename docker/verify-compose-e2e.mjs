@@ -217,6 +217,7 @@ async function seedFixture(backendOrigin) {
     graphHash: 'compose-e2e-graph-hash',
     graphJson: JSON.stringify({ tasks: [ids.taskId] }),
     taskIds: [ids.taskId],
+    dependencyEdges: [],
     metadata: {},
   })
   await postBackend(backendOrigin, '/api/tasks/bulk', {
@@ -231,6 +232,7 @@ async function seedFixture(backendOrigin) {
       description: 'BFF round-trip fixture',
       status: 'READY',
       targetArea: 'docker/compose-e2e',
+      dependencies: [],
       acceptanceCriteria: ['Exercise BFF read routes'],
       metadata: {},
     }],
