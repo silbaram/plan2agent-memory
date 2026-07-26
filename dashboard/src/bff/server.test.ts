@@ -1,3 +1,6 @@
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { gzipSync } from 'node:zlib'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -21,12 +24,33 @@ const partialResponseMarker = 'synthetic-partial-response'
 const syntheticStackMarker = 'synthetic-upstream-stack'
 
 type TestFetch = NonNullable<BffOptions['fetch']>
+type TestServerOptions = Pick<BffOptions, 'distDir'>
+
+const expectedDashboardCsp = [
+  "default-src 'self'",
+  "base-uri 'none'",
+  "object-src 'none'",
+  "frame-ancestors 'none'",
+  "form-action 'self'",
+  "script-src 'self'",
+  "style-src 'self'",
+  "style-src-attr 'unsafe-inline'",
+  "img-src 'self' data:",
+  "font-src 'self'",
+  "connect-src 'self'",
+  "manifest-src 'self'",
+  "worker-src 'self'",
+].join('; ')
 
 describe('dashboard BFF allowlisted proxy', () => {
   const servers: ReturnType<typeof createBffServer>[] = []
+  const staticDirectories: string[] = []
 
   afterEach(async () => {
-    await Promise.all(servers.splice(0).map((server) => server.close()))
+    await Promise.all([
+      ...servers.splice(0).map((server) => server.close()),
+      ...staticDirectories.splice(0).map((directory) => rm(directory, { force: true, recursive: true })),
+    ])
   })
 
   it('forwards only the approved GET routes to the configured upstream origin', async () => {
@@ -44,7 +68,7 @@ describe('dashboard BFF allowlisted proxy', () => {
     ]
 
     for (const url of requestsToAllow) {
-      const response = await server.inject({ method: 'GET', url, headers: { host: 'attacker.example', 'x-forwarded-host': 'attacker.example' } })
+      const response = await server.inject({ method: 'GET', url, headers: { host: 'localhost', 'x-forwarded-host': 'attacker.example' } })
       expect(response.statusCode).toBe(200)
     }
 
@@ -129,6 +153,95 @@ describe('dashboard BFF allowlisted proxy', () => {
 
   it('rejects raw backslash request targets before route matching can normalize them', () => {
     expect(isAllowedBffRequestTarget('/api\\health')).toBe(false)
+  })
+
+  it('requires a loopback Host and same-origin browser metadata before fetching upstream', async () => {
+    const { server, requests } = createTestServer()
+    const rejectedRequests = [
+      { host: 'attacker.example' },
+      { host: 'localhost:4173', origin: 'http://attacker.example' },
+      { host: 'localhost:4173', origin: 'https://localhost:4173' },
+      { host: 'localhost:4173', origin: 'http://localhost:4173', 'sec-fetch-site': 'cross-site' },
+      { host: 'localhost:4173', origin: 'http://localhost:4173', 'sec-fetch-site': 'same-site' },
+    ]
+
+    for (const headers of rejectedRequests) {
+      const response = await server.inject({
+        method: 'GET',
+        url: `/api/search/keyword?q=${sensitiveQuery}`,
+        headers,
+      })
+
+      expect(response.statusCode).toBe(403)
+      expect(response.json()).toEqual({ error: 'Forbidden request context' })
+      expect(response.body).not.toContain(sensitiveQuery)
+      expect(JSON.stringify(response.headers)).not.toContain('attacker.example')
+    }
+
+    const accepted = await server.inject({
+      method: 'GET',
+      url: '/api/health',
+      headers: trustedBrowserHeaders(),
+    })
+
+    expect(accepted.statusCode).toBe(200)
+    expect(requests).toHaveLength(1)
+  })
+
+  it('serves dist files and SPA routes without allowing API or healthz fallback collisions', async () => {
+    const distDir = await createStaticFixture({
+      'assets/main-AbCdEf12.js': 'window.dashboardLoaded = true',
+      'index.html': '<!doctype html><html><body><main id="root"></main></body></html>',
+    })
+    const { server, requests } = createTestServer(undefined, undefined, { distDir })
+    const headers = trustedBrowserHeaders()
+
+    const crossSiteStatic = await server.inject({
+      method: 'GET',
+      url: '/',
+      headers: {
+        host: 'localhost:4173',
+        origin: 'http://attacker.example',
+        'sec-fetch-site': 'cross-site',
+      },
+    })
+    const index = await server.inject({ method: 'GET', url: '/', headers })
+    const spaRoute = await server.inject({ method: 'GET', url: '/runs/current', headers })
+    const asset = await server.inject({ method: 'GET', url: '/assets/main-AbCdEf12.js', headers })
+    const missingAsset = await server.inject({ method: 'GET', url: '/assets/missing-ZyXwVu98.js', headers })
+    const api = await server.inject({ method: 'GET', url: '/api/health', headers })
+    const unknownApi = await server.inject({ method: 'GET', url: '/api/not-an-spa-route', headers })
+    const healthz = await server.inject({ method: 'GET', url: '/healthz', headers })
+    const healthzPost = await server.inject({ method: 'POST', url: '/healthz', headers })
+
+    expect(crossSiteStatic.statusCode).toBe(403)
+    expect(crossSiteStatic.body).not.toContain('<main id="root"></main>')
+    expect(index.statusCode).toBe(200)
+    expect(index.body).toContain('<main id="root"></main>')
+    expect(index.headers['cache-control']).toBe('no-store')
+    expect(spaRoute.statusCode).toBe(200)
+    expect(spaRoute.body).toBe(index.body)
+    expect(asset.statusCode).toBe(200)
+    expect(asset.body).toBe('window.dashboardLoaded = true')
+    expect(asset.headers['cache-control']).toBe('public, max-age=31536000, immutable')
+    expect(asset.headers['content-type']).toBe('application/javascript; charset=utf-8')
+    expect(missingAsset.statusCode).toBe(404)
+    expect(missingAsset.body).not.toContain('<main id="root"></main>')
+    expect(api.statusCode).toBe(200)
+    expect(api.body).toBe(JSON.stringify({ status: 'UP' }))
+    expect(api.headers['cache-control']).toBe('no-store')
+    expect(unknownApi.statusCode).toBe(404)
+    expect(unknownApi.body).not.toContain('<main id="root"></main>')
+    expect(healthz.statusCode).toBe(200)
+    expect(healthz.json()).toEqual({ status: 'ok' })
+    expect(healthz.headers['cache-control']).toBe('no-store')
+    expect(healthzPost.statusCode).toBe(415)
+    expect(healthzPost.body).not.toContain('<main id="root"></main>')
+    expect(requests).toHaveLength(1)
+
+    for (const response of [index, spaRoute, asset, api, unknownApi, healthz]) {
+      expectDashboardSecurityHeaders(response.headers)
+    }
   })
 
   it('fails closed when no header-safe server-only token is configured', () => {
@@ -423,9 +536,11 @@ describe('dashboard BFF allowlisted proxy', () => {
       headers: { 'content-type': 'application/json' },
     }),
     fetchOverride?: TestFetch,
+    serverOptions: TestServerOptions = {},
   ) {
     const requests: { init: RequestInit; url: URL }[] = []
     const server = createBffServer({
+      ...serverOptions,
       localToken: serverLocalToken,
       upstreamOrigin: 'https://memory.example',
       fetch: async (input, init = {}) => {
@@ -435,6 +550,35 @@ describe('dashboard BFF allowlisted proxy', () => {
     })
     servers.push(server)
     return { server, requests }
+  }
+
+  async function createStaticFixture(files: Readonly<Record<string, string>>) {
+    const distDir = await mkdtemp(join(tmpdir(), 'p2a-dashboard-dist-'))
+    staticDirectories.push(distDir)
+    await Promise.all(Object.entries(files).map(async ([path, content]) => {
+      const filePath = join(distDir, path)
+      await mkdir(dirname(filePath), { recursive: true })
+      await writeFile(filePath, content, 'utf8')
+    }))
+    return distDir
+  }
+
+  function trustedBrowserHeaders() {
+    return {
+      host: 'localhost:4173',
+      origin: 'http://localhost:4173',
+      'sec-fetch-site': 'same-origin',
+    }
+  }
+
+  function expectDashboardSecurityHeaders(headers: Record<string, string | string[] | undefined>) {
+    expect(headers['content-security-policy']).toBe(expectedDashboardCsp)
+    expect(headers['cross-origin-opener-policy']).toBe('same-origin')
+    expect(headers['cross-origin-resource-policy']).toBe('same-origin')
+    expect(headers['permissions-policy']).toBe('camera=(), geolocation=(), microphone=(), payment=(), usb=()')
+    expect(headers['referrer-policy']).toBe('no-referrer')
+    expect(headers['x-content-type-options']).toBe('nosniff')
+    expect(headers['x-frame-options']).toBe('DENY')
   }
 
   function createChunkedResponse(chunks: readonly Uint8Array[]) {
@@ -469,7 +613,7 @@ describe('dashboard BFF allowlisted proxy', () => {
       authorization: `Bearer ${browserSuppliedToken}`,
       connection: 'keep-alive',
       cookie: `session=${browserSuppliedToken}`,
-      host: 'attacker.example',
+      host: 'localhost',
       'keep-alive': 'timeout=5',
       'proxy-authorization': `Bearer ${browserSuppliedToken}`,
       'x-api-key': browserSuppliedToken,

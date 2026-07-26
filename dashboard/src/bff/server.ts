@@ -1,4 +1,6 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, type RawServerDefault } from 'fastify'
+import { readFile, realpath, stat } from 'node:fs/promises'
+import { extname, isAbsolute, relative, resolve } from 'node:path'
 import { brotliDecompressSync, gunzipSync, inflateSync } from 'node:zlib'
 
 export const MAX_DECOMPRESSED_BODY_BYTES = 64 * 1024
@@ -14,6 +16,37 @@ const MAX_QUERY_PARAMETERS = 32
 const MAX_METADATA_FILTERS = 20
 const LOCAL_TOKEN_HEADER_NAME = 'x-p2a-local-token'
 const REDACTED_VALUE = '[redacted]'
+const NO_STORE_CACHE_CONTROL = 'no-store'
+const IMMUTABLE_ASSET_CACHE_CONTROL = 'public, max-age=31536000, immutable'
+const DASHBOARD_CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "base-uri 'none'",
+  "object-src 'none'",
+  "frame-ancestors 'none'",
+  "form-action 'self'",
+  "script-src 'self'",
+  "style-src 'self'",
+  "style-src-attr 'unsafe-inline'",
+  "img-src 'self' data:",
+  "font-src 'self'",
+  "connect-src 'self'",
+  "manifest-src 'self'",
+  "worker-src 'self'",
+].join('; ')
+
+const STATIC_CONTENT_TYPES: Readonly<Record<string, string>> = {
+  '.css': 'text/css; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.ico': 'image/x-icon',
+  '.js': 'application/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.webp': 'image/webp',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+}
 
 const APPROVED_UPSTREAM_RESPONSE_CONTENT_TYPES = new Set([
   'application/json',
@@ -63,6 +96,11 @@ type QueryPairs = ReadonlyArray<readonly [string, string]>
 type Validator = (value: string) => boolean
 type ApprovedUpstreamHeaders = Record<string, string>
 type UpstreamFailureCode = 'forbidden_route' | 'response_too_large' | 'timeout' | 'unavailable'
+type StaticAsset = {
+  body: Buffer
+  contentType: string
+  path: string
+}
 
 const UPSTREAM_FAILURE_STATUS_CODES: Readonly<Record<UpstreamFailureCode, number>> = {
   forbidden_route: 502,
@@ -92,6 +130,7 @@ interface UpstreamResponse {
 }
 
 export interface BffOptions {
+  distDir?: string
   fetch?: typeof fetch
   localToken: string
   upstreamOrigin?: string
@@ -238,6 +277,7 @@ const routes: readonly RouteDefinition[] = [
 ]
 
 export function createBffServer(options: BffOptions): FastifyInstance {
+  const distDir = options.distDir
   const upstreamOrigin = resolveUpstreamOrigin(options.upstreamOrigin ?? DEFAULT_UPSTREAM_ORIGIN)
   const localToken = resolveLocalToken(options.localToken)
   const fetchImpl = options.fetch ?? globalThis.fetch
@@ -278,12 +318,21 @@ export function createBffServer(options: BffOptions): FastifyInstance {
   server.addHook('onRequest', async (request, reply) => {
     const target = request.raw.url ?? request.url
     try {
+      assertTrustedRequestContext(request, target)
       assertSafeRequestTarget(target)
       assertNoMethodOverride(request)
       assertBodyRequestShape(request)
     } catch (error) {
       return sendRequestError(reply, error)
     }
+  })
+
+  server.addHook('onSend', async (_request, reply, payload) => {
+    setDashboardSecurityHeaders(reply)
+    if (!reply.hasHeader('cache-control')) {
+      reply.header('cache-control', NO_STORE_CACHE_CONTROL)
+    }
+    return payload
   })
 
   for (const route of routes) {
@@ -315,7 +364,28 @@ export function createBffServer(options: BffOptions): FastifyInstance {
     })
   }
 
-  server.setNotFoundHandler((_request, reply) => reply.code(404).send({ error: 'Not found' }))
+  server.route({
+    method: 'GET',
+    url: '/healthz',
+    handler: async (_request, reply) => reply.code(200).send({ status: 'ok' }),
+  })
+
+  server.setNotFoundHandler(async (request, reply) => {
+    const target = request.raw.url ?? request.url
+    const path = getRequestPath(target)
+    if (request.method !== 'GET' || distDir === undefined || !isStaticRoute(path)) {
+      return reply.code(404).send({ error: 'Not found' })
+    }
+
+    const staticAsset = await readStaticAsset(distDir, isStaticAssetPath(path) ? path : '/index.html')
+    if (staticAsset === undefined) {
+      return reply.code(404).send({ error: 'Not found' })
+    }
+
+    reply.header('cache-control', staticAssetCacheControl(staticAsset.path))
+    reply.header('content-type', staticAsset.contentType)
+    return reply.code(200).send(staticAsset.body)
+  })
   server.setErrorHandler((error, _request, reply) => {
     if (error instanceof BffRequestError) {
       return sendRequestError(reply, error)
@@ -341,6 +411,142 @@ export function createBffServer(options: BffOptions): FastifyInstance {
 
 export function isAllowedBffRequestTarget(target: string) {
   return !requiresRoutingRejection(target)
+}
+
+function assertTrustedRequestContext(request: FastifyRequest, target: string) {
+  const loopbackAuthority = getLoopbackAuthority(headerValue(request.headers.host))
+  if (loopbackAuthority === undefined) {
+    throw new BffRequestError(403, 'Forbidden request context')
+  }
+
+  const origin = headerValue(request.headers.origin)
+  if (origin !== undefined && !isSameLoopbackOrigin(origin, loopbackAuthority, request.protocol)) {
+    throw new BffRequestError(403, 'Forbidden request context')
+  }
+
+  const fetchSite = headerValue(request.headers['sec-fetch-site'])
+  if (fetchSite !== undefined && !isAllowedFetchSite(fetchSite, getRequestPath(target))) {
+    throw new BffRequestError(403, 'Forbidden request context')
+  }
+}
+
+function getLoopbackAuthority(host: string | undefined) {
+  if (host === undefined) {
+    return undefined
+  }
+
+  try {
+    const url = new URL(`http://${host}`)
+    if (url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
+      return undefined
+    }
+
+    const hostname = url.hostname.toLowerCase()
+    if (hostname !== 'localhost' && hostname !== '127.0.0.1' && hostname !== '[::1]' && hostname !== '::1') {
+      return undefined
+    }
+    return url.host.toLowerCase()
+  } catch {
+    return undefined
+  }
+}
+
+function isSameLoopbackOrigin(origin: string, expectedAuthority: string, protocol: string) {
+  try {
+    const url = new URL(origin)
+    if (
+      url.protocol !== `${protocol}:`
+      || url.username
+      || url.password
+      || url.pathname !== '/'
+      || url.search
+      || url.hash
+    ) {
+      return false
+    }
+    return getLoopbackAuthority(url.host) === expectedAuthority
+  } catch {
+    return false
+  }
+}
+
+function isAllowedFetchSite(value: string, path: string) {
+  const site = value.trim().toLowerCase()
+  if (site === 'same-origin') {
+    return true
+  }
+  return site === 'none' && !isApiOrHealthPath(path)
+}
+
+function getRequestPath(target: string) {
+  const queryIndex = target.indexOf('?')
+  return queryIndex === -1 ? target : target.slice(0, queryIndex)
+}
+
+function isApiOrHealthPath(path: string) {
+  return path === '/api' || path.startsWith('/api/') || path === '/healthz'
+}
+
+function isStaticRoute(path: string) {
+  return !isApiOrHealthPath(path)
+}
+
+function isStaticAssetPath(path: string) {
+  const filename = path.slice(path.lastIndexOf('/') + 1)
+  return filename.includes('.')
+}
+
+async function readStaticAsset(distDir: string, requestPath: string): Promise<StaticAsset | undefined> {
+  try {
+    const staticRoot = await realpath(distDir)
+    const candidate = resolve(staticRoot, requestPath.slice(1))
+    if (!isWithinDirectory(staticRoot, candidate)) {
+      return undefined
+    }
+
+    const realCandidate = await realpath(candidate)
+    if (!isWithinDirectory(staticRoot, realCandidate)) {
+      return undefined
+    }
+
+    const file = await stat(realCandidate)
+    if (!file.isFile()) {
+      return undefined
+    }
+
+    return {
+      body: await readFile(realCandidate),
+      contentType: staticContentType(requestPath),
+      path: requestPath,
+    }
+  } catch {
+    return undefined
+  }
+}
+
+function isWithinDirectory(root: string, candidate: string) {
+  const pathFromRoot = relative(root, candidate)
+  return pathFromRoot === '' || (!pathFromRoot.startsWith('..') && !isAbsolute(pathFromRoot))
+}
+
+function staticContentType(path: string) {
+  return STATIC_CONTENT_TYPES[extname(path).toLowerCase()] ?? 'application/octet-stream'
+}
+
+function staticAssetCacheControl(path: string) {
+  return /-[A-Za-z0-9_-]{8,}\.[^/]+$/.test(path)
+    ? IMMUTABLE_ASSET_CACHE_CONTROL
+    : NO_STORE_CACHE_CONTROL
+}
+
+function setDashboardSecurityHeaders(reply: FastifyReply) {
+  reply.header('content-security-policy', DASHBOARD_CONTENT_SECURITY_POLICY)
+  reply.header('cross-origin-opener-policy', 'same-origin')
+  reply.header('cross-origin-resource-policy', 'same-origin')
+  reply.header('permissions-policy', 'camera=(), geolocation=(), microphone=(), payment=(), usb=()')
+  reply.header('referrer-policy', 'no-referrer')
+  reply.header('x-content-type-options', 'nosniff')
+  reply.header('x-frame-options', 'DENY')
 }
 
 function searchSchema(extraProperties: Record<string, unknown>) {
