@@ -145,6 +145,42 @@ class ReadUseCaseServiceTest {
     }
 
     @Test
+    fun `artifact lookup normalizes dashboard artifact type sets and rejects unsupported filters`() {
+        val query = FindArtifactsQuery(
+            artifactTypes = linkedSetOf(
+                ArtifactType.TASK,
+                ArtifactType.DOCUMENT_SNAPSHOT,
+                ArtifactType.RUN_RECORD,
+            ),
+        )
+
+        assertThat(query.normalizedArtifactTypes).containsExactly(
+            ArtifactType.DOCUMENT_SNAPSHOT,
+            ArtifactType.RUN_RECORD,
+            ArtifactType.TASK,
+        )
+        assertThat(FindArtifactsQuery(artifactType = ArtifactType.TASK).normalizedArtifactTypes)
+            .containsExactly(ArtifactType.TASK)
+
+        assertThatThrownBy {
+            FindArtifactsQuery(
+                artifactType = ArtifactType.TASK,
+                artifactTypes = setOf(ArtifactType.RUN_RECORD),
+            )
+        }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessageContaining("must not be supplied together")
+        assertThatThrownBy { FindArtifactsQuery(artifactTypes = emptySet()) }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessageContaining("must not be empty")
+        listOf(ArtifactType.DOCUMENT_CHUNK, ArtifactType.PROJECT, ArtifactType.ITERATION).forEach { unsupported ->
+            assertThatThrownBy { FindArtifactsQuery(artifactTypes = setOf(unsupported)) }
+                .isInstanceOf(IllegalArgumentException::class.java)
+                .hasMessageContaining("not supported for artifact listing")
+        }
+    }
+
+    @Test
     fun `keyword search validates q limit and filters before delegating`() {
         assertThatThrownBy { KeywordSearchQuery(query = " ") }
             .isInstanceOf(IllegalArgumentException::class.java)

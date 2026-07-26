@@ -1503,6 +1503,57 @@ class PostgresStorageIntegrationTest {
     }
 
     @Test
+    fun `artifact lookup unions normalized dashboard types with stable filter bound pagination`() {
+        val fixture = saveFixture("artifact-type-union")
+        val reversedTypes = linkedSetOf(ArtifactType.TASK, ArtifactType.RUN_RECORD)
+        val fullQuery = FindArtifactsQuery(
+            projectId = fixture.project.id,
+            iterationId = fixture.iteration.id,
+            artifactTypes = reversedTypes,
+            limit = 10,
+        )
+
+        val fullPage = artifactQuery.findArtifacts(fullQuery)
+        val firstPage = artifactQuery.findArtifacts(fullQuery.copy(limit = 1))
+        val secondPage = artifactQuery.findArtifacts(
+            fullQuery.copy(
+                artifactTypes = linkedSetOf(ArtifactType.RUN_RECORD, ArtifactType.TASK),
+                limit = 2,
+                cursor = requireNotNull(firstPage.nextCursor),
+            ),
+        )
+
+        assertThat(fullPage.items.map { it.artifactType to it.artifactId }).containsExactly(
+            ArtifactType.RUN_RECORD to fixture.run.id.value,
+            ArtifactType.TASK to fixture.task.id.value,
+        )
+        assertThat((firstPage.items + secondPage.items).map { it.artifactType to it.artifactId })
+            .containsExactlyElementsOf(fullPage.items.map { it.artifactType to it.artifactId })
+        assertThat(secondPage.nextCursor).isNull()
+
+        assertThatThrownBy {
+            artifactQuery.findArtifacts(
+                fullQuery.copy(
+                    artifactTypes = setOf(ArtifactType.TASK),
+                    cursor = requireNotNull(firstPage.nextCursor),
+                ),
+            )
+        }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessage("cursor does not match this request")
+        assertThatThrownBy {
+            artifactQuery.findArtifacts(
+                fullQuery.copy(
+                    projectId = ProjectId(stableUuid("artifact-type-union-other-project")),
+                    cursor = requireNotNull(firstPage.nextCursor),
+                ),
+            )
+        }
+            .isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessage("cursor does not match this request")
+    }
+
+    @Test
     fun `document snapshots and chunks are idempotent by content and chunk hash`() {
         val fixture = saveProjectAndIteration("idempotency")
         val activeEmbeddingSetId = ensurePersistedActiveEmbeddingTarget()
