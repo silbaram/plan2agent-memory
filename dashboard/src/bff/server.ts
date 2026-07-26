@@ -355,7 +355,7 @@ export function createBffServer(options: BffOptions): FastifyInstance {
           request.body,
           localToken,
         )
-        const responseBody = redactLocalTokenFromResponse(upstreamResponse.body, localToken)
+        const responseBody = redactLocalTokenFromResponse(upstreamResponse.body, localToken).toString('utf8')
 
         setApprovedUpstreamResponseHeaders(reply, upstreamResponse.response.headers)
 

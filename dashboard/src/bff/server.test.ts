@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import type { OutgoingHttpHeaders } from 'node:http'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { gzipSync } from 'node:zlib'
@@ -571,7 +572,7 @@ describe('dashboard BFF allowlisted proxy', () => {
     }
   }
 
-  function expectDashboardSecurityHeaders(headers: Record<string, string | string[] | undefined>) {
+  function expectDashboardSecurityHeaders(headers: OutgoingHttpHeaders) {
     expect(headers['content-security-policy']).toBe(expectedDashboardCsp)
     expect(headers['cross-origin-opener-policy']).toBe('same-origin')
     expect(headers['cross-origin-resource-policy']).toBe('same-origin')
