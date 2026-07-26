@@ -1,12 +1,26 @@
 import { gzipSync } from 'node:zlib'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { createBffServer, isAllowedBffRequestTarget, MAX_DECOMPRESSED_BODY_BYTES } from './server'
+import {
+  createBffServer,
+  isAllowedBffRequestTarget,
+  MAX_DECOMPRESSED_BODY_BYTES,
+  MAX_UPSTREAM_RESPONSE_BYTES,
+  UPSTREAM_TIMEOUT_MILLISECONDS,
+} from './server'
+import type { BffOptions } from './server'
 
 const projectId = '11111111-1111-4111-8111-111111111111'
 const artifactId = '22222222-2222-4222-8222-222222222222'
 const serverLocalToken = 'server-only-synthetic-token'
 const browserSuppliedToken = 'browser-controlled-synthetic-token'
+const sensitiveQuery = 'synthetic-private-query'
+const sensitiveBody = 'synthetic-private-body'
+const internalUpstreamUrl = 'http://127.0.0.1:8080/internal-only'
+const partialResponseMarker = 'synthetic-partial-response'
+const syntheticStackMarker = 'synthetic-upstream-stack'
+
+type TestFetch = NonNullable<BffOptions['fetch']>
 
 describe('dashboard BFF allowlisted proxy', () => {
   const servers: ReturnType<typeof createBffServer>[] = []
@@ -272,20 +286,182 @@ describe('dashboard BFF allowlisted proxy', () => {
     expect(requests).toHaveLength(2)
   })
 
-  function createTestServer(upstreamResponse: () => Response = () => new Response(JSON.stringify({ status: 'UP' }), {
-    headers: { 'content-type': 'application/json' },
-  })) {
+  it('returns a stable unavailable error without exposing upstream failure details', async () => {
+    const unavailableFetch: TestFetch = async () => {
+      const error = new Error(`fetch failed for ${internalUpstreamUrl}?q=${sensitiveQuery}; body=${sensitiveBody}; token=${serverLocalToken}`)
+      error.stack = `${syntheticStackMarker}\n${error.stack ?? ''}`
+      throw error
+    }
+    const { server, requests } = createTestServer(undefined, unavailableFetch)
+
+    const response = await server.inject({
+      method: 'POST',
+      url: '/api/search/semantic',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify({ q: sensitiveBody }),
+    })
+
+    expect(response.statusCode).toBe(503)
+    expectSanitizedUpstreamFailure(response.body, response.headers, 'unavailable')
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.init.redirect).toBe('manual')
+  })
+
+  it('aborts an approved request after 10 seconds without a real-time delay', async () => {
+    vi.useFakeTimers()
+    try {
+      const signals: AbortSignal[] = []
+      const timeoutFetch: TestFetch = async (_input, init) => {
+        const signal = init?.signal
+        if (signal === null || signal === undefined) {
+          throw new Error('missing abort signal')
+        }
+        signals.push(signal)
+        return new Promise<Response>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(new Error(`aborted ${internalUpstreamUrl}`)), { once: true })
+        })
+      }
+      const { server, requests } = createTestServer(undefined, timeoutFetch)
+
+      const responsePromise = server.inject({
+        method: 'GET',
+        url: `/api/search/keyword?q=${sensitiveQuery}`,
+      })
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(UPSTREAM_TIMEOUT_MILLISECONDS)
+      const response = await responsePromise
+
+      expect(response.statusCode).toBe(504)
+      expectSanitizedUpstreamFailure(response.body, response.headers, 'timeout')
+      expect(signals[0]?.aborted).toBe(true)
+      expect(requests[0]?.init.redirect).toBe('manual')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('aborts oversized Content-Length responses before forwarding any partial body', async () => {
+    const signals: AbortSignal[] = []
+    const contentLengthFetch: TestFetch = async (_input, init) => {
+      const signal = init?.signal
+      if (signal !== null && signal !== undefined) {
+        signals.push(signal)
+      }
+      return new Response(`${partialResponseMarker}:${serverLocalToken}`, {
+        headers: {
+          'content-length': String(MAX_UPSTREAM_RESPONSE_BYTES + 1),
+          'content-type': 'application/json',
+        },
+      })
+    }
+    const { server, requests } = createTestServer(undefined, contentLengthFetch)
+
+    const response = await server.inject({
+      method: 'POST',
+      url: '/api/search/semantic',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify({ q: sensitiveBody }),
+    })
+
+    expect(response.statusCode).toBe(502)
+    expectSanitizedUpstreamFailure(response.body, response.headers, 'response_too_large')
+    expect(response.body).not.toContain(partialResponseMarker)
+    expect(signals[0]?.aborted).toBe(true)
+    expect(requests).toHaveLength(1)
+  })
+
+  it('aborts chunked responses that exceed 10 MiB without forwarding a partial body', async () => {
+    const signals: AbortSignal[] = []
+    const chunkedFetch: TestFetch = async (_input, init) => {
+      const signal = init?.signal
+      if (signal !== null && signal !== undefined) {
+        signals.push(signal)
+      }
+      return createChunkedResponse([
+        new TextEncoder().encode(partialResponseMarker),
+        new Uint8Array(MAX_UPSTREAM_RESPONSE_BYTES),
+      ])
+    }
+    const { server, requests } = createTestServer(undefined, chunkedFetch)
+
+    const response = await server.inject({ method: 'GET', url: `/api/search/keyword?q=${sensitiveQuery}` })
+
+    expect(response.statusCode).toBe(502)
+    expectSanitizedUpstreamFailure(response.body, response.headers, 'response_too_large')
+    expect(response.body).not.toContain(partialResponseMarker)
+    expect(signals[0]?.aborted).toBe(true)
+    expect(requests).toHaveLength(1)
+  })
+
+  it('uses manual redirects and rejects every tested upstream 3xx response without leaking a Location value', async () => {
+    const redirectStatuses = [300, 301, 302, 303, 307, 308]
+    let statusIndex = 0
+    const redirectFetch: TestFetch = async () => {
+      const status = redirectStatuses[statusIndex]
+      statusIndex += 1
+      return new Response(partialResponseMarker, {
+        status,
+        headers: { location: `${internalUpstreamUrl}?q=${sensitiveQuery}` },
+      })
+    }
+    const { server, requests } = createTestServer(undefined, redirectFetch)
+
+    for (const status of redirectStatuses) {
+      const response = await server.inject({ method: 'GET', url: `/api/search/keyword?q=${sensitiveQuery}` })
+
+      expect(response.statusCode, `redirect status ${status}`).toBe(502)
+      expectSanitizedUpstreamFailure(response.body, response.headers, 'forbidden_route')
+      expect(response.body).not.toContain(partialResponseMarker)
+    }
+
+    expect(requests).toHaveLength(redirectStatuses.length)
+    expect(requests.every(({ init }) => init.redirect === 'manual')).toBe(true)
+  })
+
+  function createTestServer(
+    upstreamResponse: () => Response = () => new Response(JSON.stringify({ status: 'UP' }), {
+      headers: { 'content-type': 'application/json' },
+    }),
+    fetchOverride?: TestFetch,
+  ) {
     const requests: { init: RequestInit; url: URL }[] = []
     const server = createBffServer({
       localToken: serverLocalToken,
       upstreamOrigin: 'https://memory.example',
       fetch: async (input, init = {}) => {
         requests.push({ init, url: new URL(input.toString()) })
-        return upstreamResponse()
+        return fetchOverride === undefined ? upstreamResponse() : fetchOverride(input, init)
       },
     })
     servers.push(server)
     return { server, requests }
+  }
+
+  function createChunkedResponse(chunks: readonly Uint8Array[]) {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of chunks) {
+          controller.enqueue(chunk)
+        }
+        controller.close()
+      },
+    })
+    return new Response(body, { headers: { 'content-type': 'application/json' } })
+  }
+
+  function expectSanitizedUpstreamFailure(body: string, headers: unknown, code: string) {
+    expect(body).toBe(JSON.stringify({ error: code }))
+    const publicResponse = `${body}${JSON.stringify(headers)}`
+    for (const sensitiveValue of [
+      browserSuppliedToken,
+      internalUpstreamUrl,
+      sensitiveBody,
+      sensitiveQuery,
+      serverLocalToken,
+      syntheticStackMarker,
+    ]) {
+      expect(publicResponse).not.toContain(sensitiveValue)
+    }
   }
 
   function browserCredentialHeaders() {

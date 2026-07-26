@@ -2,6 +2,8 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest, 
 import { brotliDecompressSync, gunzipSync, inflateSync } from 'node:zlib'
 
 export const MAX_DECOMPRESSED_BODY_BYTES = 64 * 1024
+export const MAX_UPSTREAM_RESPONSE_BYTES = 10 * 1024 * 1024
+export const UPSTREAM_TIMEOUT_MILLISECONDS = 10_000
 
 const DEFAULT_UPSTREAM_ORIGIN = 'http://127.0.0.1:8080'
 const MAX_REQUEST_TARGET_LENGTH = 8 * 1024
@@ -60,6 +62,14 @@ type ProxyMethod = 'GET' | 'POST'
 type QueryPairs = ReadonlyArray<readonly [string, string]>
 type Validator = (value: string) => boolean
 type ApprovedUpstreamHeaders = Record<string, string>
+type UpstreamFailureCode = 'forbidden_route' | 'response_too_large' | 'timeout' | 'unavailable'
+
+const UPSTREAM_FAILURE_STATUS_CODES: Readonly<Record<UpstreamFailureCode, number>> = {
+  forbidden_route: 502,
+  response_too_large: 502,
+  timeout: 504,
+  unavailable: 503,
+}
 
 interface QueryRule {
   maxOccurrences?: number
@@ -76,6 +86,11 @@ interface RouteDefinition {
   schema?: Record<string, unknown>
 }
 
+interface UpstreamResponse {
+  body: Buffer
+  response: Response
+}
+
 export interface BffOptions {
   fetch?: typeof fetch
   localToken: string
@@ -88,6 +103,15 @@ class BffRequestError extends Error {
     message: string,
   ) {
     super(message)
+  }
+}
+
+class BffUpstreamError extends Error {
+  readonly statusCode: number
+
+  constructor(readonly code: UpstreamFailureCode) {
+    super(code)
+    this.statusCode = UPSTREAM_FAILURE_STATUS_CODES[code]
   }
 }
 
@@ -275,18 +299,18 @@ export function createBffServer(options: BffOptions): FastifyInstance {
         }
 
         const upstreamUrl = buildUpstreamUrl(upstreamOrigin, target.path, target.query)
-        const upstreamResponse = await fetchImpl(
+        const upstreamResponse = await fetchApprovedUpstream(
+          fetchImpl,
           upstreamUrl,
-          buildApprovedUpstreamRequest(route.method, request.body, localToken),
-        )
-        const responseBody = redactLocalTokenFromResponse(
-          Buffer.from(await upstreamResponse.arrayBuffer()),
+          route.method,
+          request.body,
           localToken,
         )
+        const responseBody = redactLocalTokenFromResponse(upstreamResponse.body, localToken)
 
-        setApprovedUpstreamResponseHeaders(reply, upstreamResponse.headers)
+        setApprovedUpstreamResponseHeaders(reply, upstreamResponse.response.headers)
 
-        return reply.code(upstreamResponse.status).send(responseBody)
+        return reply.code(upstreamResponse.response.status).send(responseBody)
       },
     })
   }
@@ -295,6 +319,9 @@ export function createBffServer(options: BffOptions): FastifyInstance {
   server.setErrorHandler((error, _request, reply) => {
     if (error instanceof BffRequestError) {
       return sendRequestError(reply, error)
+    }
+    if (error instanceof BffUpstreamError) {
+      return reply.code(error.statusCode).send({ error: error.code })
     }
     const standardError = toStandardError(error)
 
@@ -535,11 +562,49 @@ function buildUpstreamUrl(origin: string, path: string, query: QueryPairs) {
   return url
 }
 
-function buildApprovedUpstreamRequest(method: ProxyMethod, body: unknown, localToken: string): RequestInit {
+async function fetchApprovedUpstream(
+  fetchImpl: typeof fetch,
+  upstreamUrl: URL,
+  method: ProxyMethod,
+  body: unknown,
+  localToken: string,
+): Promise<UpstreamResponse> {
+  const abortController = new AbortController()
+  const timeout = setTimeout(() => abortController.abort(), UPSTREAM_TIMEOUT_MILLISECONDS)
+
+  try {
+    const response = await fetchImpl(
+      upstreamUrl,
+      buildApprovedUpstreamRequest(method, body, localToken, abortController.signal),
+    )
+    assertNoUpstreamRedirect(response, abortController)
+    const responseBody = await readBoundedUpstreamResponse(response, abortController)
+    return { body: responseBody, response }
+  } catch (error) {
+    if (error instanceof BffUpstreamError) {
+      throw error
+    }
+    if (abortController.signal.aborted) {
+      throw new BffUpstreamError('timeout')
+    }
+    throw new BffUpstreamError('unavailable')
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+function buildApprovedUpstreamRequest(
+  method: ProxyMethod,
+  body: unknown,
+  localToken: string,
+  signal: AbortSignal,
+): RequestInit {
   return {
     method,
     headers: buildApprovedUpstreamHeaders(method, localToken),
     body: method === 'POST' ? JSON.stringify(body) : undefined,
+    redirect: 'manual',
+    signal,
   }
 }
 
@@ -552,6 +617,57 @@ function buildApprovedUpstreamHeaders(method: ProxyMethod, localToken: string): 
     headers['content-type'] = 'application/json'
   }
   return headers
+}
+
+function assertNoUpstreamRedirect(response: Response, abortController: AbortController) {
+  if (response.status >= 300 && response.status < 400) {
+    abortController.abort()
+    throw new BffUpstreamError('forbidden_route')
+  }
+}
+
+async function readBoundedUpstreamResponse(response: Response, abortController: AbortController): Promise<Buffer> {
+  if (getUpstreamContentLength(response) > MAX_UPSTREAM_RESPONSE_BYTES) {
+    abortController.abort()
+    throw new BffUpstreamError('response_too_large')
+  }
+
+  if (response.body === null) {
+    return Buffer.alloc(0)
+  }
+
+  const reader = response.body.getReader()
+  const chunks: Buffer[] = []
+  let totalLength = 0
+  try {
+    while (true) {
+      const result = await reader.read()
+      if (result.done) {
+        break
+      }
+
+      const chunk = Buffer.from(result.value)
+      totalLength += chunk.length
+      if (totalLength > MAX_UPSTREAM_RESPONSE_BYTES) {
+        abortController.abort()
+        void reader.cancel().catch(() => undefined)
+        throw new BffUpstreamError('response_too_large')
+      }
+      chunks.push(chunk)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  return Buffer.concat(chunks, totalLength)
+}
+
+function getUpstreamContentLength(response: Response) {
+  const contentLength = response.headers.get('content-length')
+  if (contentLength === null || !/^[0-9]+$/.test(contentLength)) {
+    return 0
+  }
+  return Number(contentLength)
 }
 
 function setApprovedUpstreamResponseHeaders(reply: FastifyReply, headers: Headers) {
