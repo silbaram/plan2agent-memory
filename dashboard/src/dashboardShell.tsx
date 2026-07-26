@@ -49,14 +49,14 @@ function isCurrentNavigationRoute(pathname: string, href: string) {
 function RouteSlot({ children, description, title }: RouteSlotProps) {
   return (
     <div className="route-slot" id="main-content" tabIndex={-1}>
-      <header className="route-slot__header">
+      <div className="route-slot__header">
         <Text as="h1" type="display-2">
           {title}
         </Text>
         <Text as="p" color="secondary" type="large">
           {description}
         </Text>
-      </header>
+      </div>
       {children}
     </div>
   )
@@ -69,7 +69,7 @@ function DashboardNavigation() {
     <SideNav
       aria-label="주요 탐색"
       footer={
-        <Text as="p" color="secondary" type="supporting">
+        <Text as="p" color="primary" type="supporting">
           서버 데이터를 변경하지 않는 읽기 전용 화면입니다.
         </Text>
       }
@@ -78,11 +78,10 @@ function DashboardNavigation() {
           heading="Plan2Agent Memory"
           headingHref="/browse"
           icon={<NavIcon icon={<span aria-hidden="true">P</span>} />}
-          subheading="읽기 전용 탐색기"
         />
       }
     >
-      <SideNavSection title="조회">
+      <SideNavSection isHeaderHidden title="조회">
         {navigationItems.map((item) => (
           <SideNavItem
             href={item.href}
@@ -106,7 +105,7 @@ export function DashboardShell() {
       topNav={
         <TopNav
           endContent={
-            <Text color="secondary" type="supporting">
+            <Text color="primary" type="supporting">
               읽기 전용
             </Text>
           }

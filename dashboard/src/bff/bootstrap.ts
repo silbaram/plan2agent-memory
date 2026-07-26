@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url'
 
 import { createBffServer } from './server'
 
-const dashboardDistDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'dist')
+const dashboardDistDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'dist')
 const localToken = requiredEnvironmentValue('P2A_LOCAL_TOKEN')
 const upstreamOrigin = requiredEnvironmentValue('P2A_BFF_UPSTREAM_ORIGIN')
 const host = process.env.P2A_BFF_HOST ?? '0.0.0.0'

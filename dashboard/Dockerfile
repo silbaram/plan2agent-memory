@@ -24,10 +24,10 @@ WORKDIR /opt/p2a/dashboard
 COPY --from=build --chown=node:node /opt/p2a/dashboard/package.json ./package.json
 COPY --from=build --chown=node:node /opt/p2a/dashboard/node_modules ./node_modules
 COPY --from=build --chown=node:node /opt/p2a/dashboard/dist ./dist
-COPY --from=build --chown=node:node /opt/p2a/dashboard/build/server ./server
+COPY --from=build --chown=node:node /opt/p2a/dashboard/build/server ./build/server
 
 USER node
 
 EXPOSE 4173
 
-CMD ["node", "server/bootstrap.js"]
+CMD ["node", "build/server/bootstrap.js"]

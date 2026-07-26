@@ -7,9 +7,10 @@ export default defineConfig({
     trace: 'retain-on-failure',
   },
   webServer: {
-    command: 'pnpm build && pnpm exec vite --host 127.0.0.1 --port 4173',
+    command: './node_modules/.bin/tsc --noEmit && ./node_modules/.bin/vite build && ./node_modules/.bin/vite build --ssr src/bff/bootstrap.ts --outDir build/server && P2A_BFF_HOST=127.0.0.1 P2A_BFF_PORT=4173 P2A_BFF_UPSTREAM_ORIGIN=http://127.0.0.1:8080 P2A_LOCAL_TOKEN=playwright-server-only-token node build/server/bootstrap.js',
     port: 4173,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: false,
+    timeout: 120_000,
   },
   projects: [
     {
