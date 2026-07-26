@@ -1,19 +1,42 @@
 package com.github.silbaram.plan2agent.memory.adapter.out.postgres
 
 import com.github.silbaram.plan2agent.memory.application.port.out.DashboardReadPort
+import com.github.silbaram.plan2agent.memory.application.port.out.DocumentSnapshotStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.IterationStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.ProjectStorePort
+import com.github.silbaram.plan2agent.memory.application.port.out.RunRecordStorePort
+import com.github.silbaram.plan2agent.memory.application.port.out.TaskGraphStorePort
+import com.github.silbaram.plan2agent.memory.application.port.out.TaskStorePort
 import com.github.silbaram.plan2agent.memory.application.usecase.IterationSummaryPageQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.MAX_DASHBOARD_PAGE_LIMIT
 import com.github.silbaram.plan2agent.memory.application.usecase.ProjectSummaryPageQuery
+import com.github.silbaram.plan2agent.memory.domain.ArtifactRef
+import com.github.silbaram.plan2agent.memory.domain.ArtifactType
 import com.github.silbaram.plan2agent.memory.domain.CanonicalServerId
+import com.github.silbaram.plan2agent.memory.domain.ContentHash
+import com.github.silbaram.plan2agent.memory.domain.DocumentId
+import com.github.silbaram.plan2agent.memory.domain.DocumentSnapshot
 import com.github.silbaram.plan2agent.memory.domain.Iteration
 import com.github.silbaram.plan2agent.memory.domain.IterationId
 import com.github.silbaram.plan2agent.memory.domain.IterationStatus
 import com.github.silbaram.plan2agent.memory.domain.Project
 import com.github.silbaram.plan2agent.memory.domain.ProjectId
+import com.github.silbaram.plan2agent.memory.domain.RunId
+import com.github.silbaram.plan2agent.memory.domain.RunRecord
+import com.github.silbaram.plan2agent.memory.domain.RunStatus
+import com.github.silbaram.plan2agent.memory.domain.SourceDocumentId
 import com.github.silbaram.plan2agent.memory.domain.SourceIterationId
 import com.github.silbaram.plan2agent.memory.domain.SourceProjectId
+import com.github.silbaram.plan2agent.memory.domain.SourceReference
+import com.github.silbaram.plan2agent.memory.domain.SourceRunId
+import com.github.silbaram.plan2agent.memory.domain.SourceTaskGraphId
+import com.github.silbaram.plan2agent.memory.domain.SourceTaskId
+import com.github.silbaram.plan2agent.memory.domain.Task
+import com.github.silbaram.plan2agent.memory.domain.TaskGraph
+import com.github.silbaram.plan2agent.memory.domain.TaskGraphId
+import com.github.silbaram.plan2agent.memory.domain.TaskId
+import com.github.silbaram.plan2agent.memory.domain.TaskStatus
+import com.github.silbaram.plan2agent.memory.domain.readmodel.ArtifactIdentity
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.AfterAll
@@ -47,6 +70,18 @@ class PostgresDashboardReadIntegrationTest {
 
     @Autowired
     private lateinit var iterationStore: IterationStorePort
+
+    @Autowired
+    private lateinit var documentSnapshotStore: DocumentSnapshotStorePort
+
+    @Autowired
+    private lateinit var taskGraphStore: TaskGraphStorePort
+
+    @Autowired
+    private lateinit var taskStore: TaskStorePort
+
+    @Autowired
+    private lateinit var runRecordStore: RunRecordStorePort
 
     @BeforeEach
     fun cleanDatabase() {
@@ -165,6 +200,214 @@ class PostgresDashboardReadIntegrationTest {
             .hasMessage("Dashboard iteration cursor does not match project")
     }
 
+    @Test
+    fun `artifact detail uses type plus id and preserves all supported typed payloads`() {
+        val fixture = storeDetailFixture()
+
+        val documentDetail = requireNotNull(
+            dashboardReadPort.findArtifactDetail(
+                ArtifactIdentity(ArtifactType.DOCUMENT_SNAPSHOT, fixture.document.id.value),
+            ),
+        )
+        val taskDetail = requireNotNull(
+            dashboardReadPort.findArtifactDetail(
+                ArtifactIdentity(ArtifactType.TASK, fixture.task.id.value),
+            ),
+        )
+        val graphDetail = requireNotNull(
+            dashboardReadPort.findArtifactDetail(
+                ArtifactIdentity(ArtifactType.TASK_GRAPH, fixture.taskGraph.id.value),
+            ),
+        )
+        val runDetail = requireNotNull(
+            dashboardReadPort.findArtifactDetail(
+                ArtifactIdentity(ArtifactType.RUN_RECORD, fixture.run.id.value),
+            ),
+        )
+        val proposalDetail = requireNotNull(
+            dashboardReadPort.findArtifactDetail(
+                ArtifactIdentity(ArtifactType.PROPOSAL, fixture.proposal.id.value),
+            ),
+        )
+
+        assertThat(fixture.document.id.value).isEqualTo(fixture.task.id.value)
+        assertThat(documentDetail.artifactType).isEqualTo(ArtifactType.DOCUMENT_SNAPSHOT)
+        assertThat(documentDetail.title).isEqualTo(fixture.document.title)
+        assertThat(documentDetail.rawContent).isEqualTo(fixture.document.content)
+        assertThat(documentDetail.mediaType).isEqualTo("text/markdown")
+        assertThat(documentDetail.projectId).isEqualTo(fixture.project.id)
+        assertThat(documentDetail.iterationId).isEqualTo(fixture.iteration.id)
+        assertThat(documentDetail.source.sourceProjectId).isEqualTo(fixture.project.sourceProjectId)
+        assertThat(documentDetail.source.sourceIterationId).isEqualTo(fixture.iteration.sourceIterationId)
+        assertThat(documentDetail.source.sourceDocumentId).isEqualTo(fixture.document.sourceDocumentId)
+        assertThat(documentDetail.source.sourceReference).isEqualTo(fixture.document.sourceReference)
+        assertThat(documentDetail.lineage.documentId).isEqualTo(fixture.document.id)
+        assertThat(documentDetail.lineage.contentHash).isEqualTo(fixture.document.contentHash)
+        assertThat(documentDetail.lineage.snapshotVersion).isEqualTo(1)
+        assertThat(documentDetail.metadata).containsEntry("kind", "document")
+
+        assertThat(taskDetail.artifactType).isEqualTo(ArtifactType.TASK)
+        assertThat(taskDetail.title).isEqualTo(fixture.task.title)
+        assertThat(taskDetail.mediaType).isEqualTo("application/json")
+        assertThat(taskDetail.rawContent).contains("\"task_id\": \"${fixture.task.id.value}\"")
+        assertThat(taskDetail.rawContent).contains("\"title\": \"${fixture.task.title}\"")
+        assertThat(taskDetail.source.sourceProjectId).isEqualTo(fixture.project.sourceProjectId)
+        assertThat(taskDetail.source.sourceIterationId).isEqualTo(fixture.iteration.sourceIterationId)
+        assertThat(taskDetail.source.sourceTaskGraphId).isEqualTo(fixture.taskGraph.sourceTaskGraphId)
+        assertThat(taskDetail.source.sourceTaskId).isEqualTo(fixture.task.sourceTaskId)
+        assertThat(taskDetail.lineage.documentId).isEqualTo(fixture.document.id)
+        assertThat(taskDetail.lineage.taskGraphId).isEqualTo(fixture.taskGraph.id)
+        assertThat(taskDetail.lineage.taskId).isEqualTo(fixture.task.id)
+        assertThat(taskDetail.metadata).containsEntry("kind", "task")
+
+        assertThat(graphDetail.artifactType).isEqualTo(ArtifactType.TASK_GRAPH)
+        assertThat(graphDetail.rawContent).isEqualTo(fixture.taskGraph.graphJson)
+        assertThat(graphDetail.mediaType).isEqualTo("application/json")
+        assertThat(graphDetail.source.sourceDocumentId).isEqualTo(fixture.document.sourceDocumentId)
+        assertThat(graphDetail.source.sourceTaskGraphId).isEqualTo(fixture.taskGraph.sourceTaskGraphId)
+        assertThat(graphDetail.lineage.documentId).isEqualTo(fixture.document.id)
+        assertThat(graphDetail.lineage.taskGraphId).isEqualTo(fixture.taskGraph.id)
+        assertThat(graphDetail.lineage.contentHash).isEqualTo(fixture.taskGraph.graphHash)
+        assertThat(graphDetail.metadata).containsEntry("kind", "task-graph")
+
+        assertThat(runDetail.artifactType).isEqualTo(ArtifactType.RUN_RECORD)
+        assertThat(runDetail.rawContent).isEqualTo(fixture.run.runJson)
+        assertThat(runDetail.mediaType).isEqualTo("application/json")
+        assertThat(runDetail.source.sourceProjectId).isEqualTo(fixture.project.sourceProjectId)
+        assertThat(runDetail.source.sourceIterationId).isEqualTo(fixture.iteration.sourceIterationId)
+        assertThat(runDetail.source.sourceTaskGraphId).isEqualTo(fixture.taskGraph.sourceTaskGraphId)
+        assertThat(runDetail.source.sourceTaskId).isEqualTo(fixture.task.sourceTaskId)
+        assertThat(runDetail.source.sourceRunId).isEqualTo(fixture.run.sourceRunId)
+        assertThat(runDetail.lineage.taskGraphId).isEqualTo(fixture.taskGraph.id)
+        assertThat(runDetail.lineage.taskId).isEqualTo(fixture.task.id)
+        assertThat(runDetail.lineage.runId).isEqualTo(fixture.run.id)
+        assertThat(runDetail.lineage.artifactRefs).isEqualTo(fixture.run.artifactRefs)
+        assertThat(runDetail.metadata).containsEntry("kind", "run")
+
+        assertThat(proposalDetail.artifactType).isEqualTo(ArtifactType.PROPOSAL)
+        assertThat(proposalDetail.rawContent).isEqualTo(fixture.proposal.content)
+        assertThat(proposalDetail.mediaType).isEqualTo("application/json")
+        assertThat(proposalDetail.source.sourceDocumentId).isEqualTo(fixture.proposal.sourceDocumentId)
+        assertThat(proposalDetail.lineage.documentId).isEqualTo(fixture.proposal.id)
+        assertThat(proposalDetail.lineage.contentHash).isEqualTo(fixture.proposal.contentHash)
+        assertThat(proposalDetail.metadata).containsEntry("kind", "proposal")
+    }
+
+    @Test
+    fun `artifact detail returns no row for a missing supported identity and rejects excluded types first`() {
+        assertThat(
+            dashboardReadPort.findArtifactDetail(
+                ArtifactIdentity(ArtifactType.RUN_RECORD, "00000000-0000-0000-0000-000000000099"),
+            ),
+        ).isNull()
+
+        listOf(ArtifactType.PROJECT, ArtifactType.ITERATION, ArtifactType.DOCUMENT_CHUNK).forEach { artifactType ->
+            assertThatThrownBy {
+                dashboardReadPort.findArtifactDetail(ArtifactIdentity(artifactType, "not-a-uuid"))
+            }
+                .isInstanceOf(IllegalArgumentException::class.java)
+                .hasMessage("Artifact type ${artifactType.name} is not supported by dashboard detail")
+        }
+    }
+
+    private fun storeDetailFixture(): DetailFixture {
+        val project = storeProject("00000000-0000-0000-0000-000000000030", "detail-project", at("00:00:00"))
+        val iteration = storeIteration(project, "00000000-0000-0000-0000-000000000031", "detail-iteration", at("00:01:00"))
+        val sharedDocumentAndTaskId = "00000000-0000-0000-0000-000000000032"
+        val document = documentSnapshotStore.save(
+            DocumentSnapshot(
+                id = DocumentId(sharedDocumentAndTaskId),
+                projectId = project.id,
+                iterationId = iteration.id,
+                sourceDocumentId = SourceDocumentId("source-detail-document"),
+                sourcePath = "docs/detail.md",
+                snapshotVersion = 1,
+                artifactType = ArtifactType.DOCUMENT_SNAPSHOT,
+                title = "Detail document",
+                content = "# Detail document\n\nStored markdown.",
+                contentHash = ContentHash("detail-document-hash"),
+                sourceReference = sourceReference(sharedDocumentAndTaskId, "docs/detail.md"),
+                capturedAt = at("00:02:00"),
+                createdAt = at("00:02:00"),
+                metadata = mapOf("kind" to "document"),
+            ),
+        )
+        val taskGraph = taskGraphStore.save(
+            TaskGraph(
+                id = TaskGraphId("00000000-0000-0000-0000-000000000033"),
+                projectId = project.id,
+                iterationId = iteration.id,
+                sourceTaskGraphId = SourceTaskGraphId("source-detail-graph"),
+                sourceDocumentId = document.sourceDocumentId,
+                graphHash = ContentHash("detail-graph-hash"),
+                graphJson = "{\"tasks\":[\"$sharedDocumentAndTaskId\"]}",
+                taskIds = setOf(TaskId(sharedDocumentAndTaskId)),
+                sourceReference = sourceReference("00000000-0000-0000-0000-000000000033", "task-graphs/detail.json"),
+                createdAt = at("00:03:00"),
+                metadata = mapOf("kind" to "task-graph"),
+            ),
+        )
+        val task = taskStore.saveAll(
+            listOf(
+                Task(
+                    id = TaskId(sharedDocumentAndTaskId),
+                    projectId = project.id,
+                    iterationId = iteration.id,
+                    taskGraphId = taskGraph.id,
+                    sourceTaskId = SourceTaskId("source-detail-task"),
+                    title = "Detail task",
+                    description = "Preserve the stored task payload.",
+                    status = TaskStatus.READY,
+                    targetArea = "dashboard-detail",
+                    acceptanceCriteria = listOf("Expose raw task content"),
+                    sourceReference = sourceReference(sharedDocumentAndTaskId, "task-graphs/detail.json#task"),
+                    createdAt = at("00:04:00"),
+                    metadata = mapOf("kind" to "task"),
+                ),
+            ),
+        ).single()
+        val run = runRecordStore.save(
+            RunRecord(
+                id = RunId("00000000-0000-0000-0000-000000000034"),
+                projectId = project.id,
+                iterationId = iteration.id,
+                taskId = task.id,
+                sourceRunId = SourceRunId("source-detail-run"),
+                status = RunStatus.FINISHED,
+                agentTool = "codex",
+                runJson = "{\"status\":\"finished\",\"summary\":\"detail\"}",
+                artifactRefs = listOf(ArtifactRef(ArtifactType.DOCUMENT_SNAPSHOT, document.id.value, document.sourcePath)),
+                startedAt = at("00:05:00"),
+                finishedAt = at("00:06:00"),
+                sourceReference = sourceReference("00000000-0000-0000-0000-000000000034", "runs/detail.json"),
+                createdAt = at("00:05:00"),
+                metadata = mapOf("kind" to "run"),
+            ),
+        )
+        val proposal = documentSnapshotStore.save(
+            DocumentSnapshot(
+                id = DocumentId("00000000-0000-0000-0000-000000000035"),
+                projectId = project.id,
+                iterationId = iteration.id,
+                sourceDocumentId = SourceDocumentId("source-detail-proposal"),
+                sourcePath = ".plan2agent/proposals/detail.json",
+                snapshotVersion = 1,
+                artifactType = ArtifactType.PROPOSAL,
+                title = "Detail proposal",
+                content = "{\"proposalId\":\"detail\"}",
+                contentHash = ContentHash("detail-proposal-hash"),
+                sourceReference = sourceReference(
+                    "00000000-0000-0000-0000-000000000035",
+                    ".plan2agent/proposals/detail.json",
+                ),
+                capturedAt = at("00:07:00"),
+                createdAt = at("00:07:00"),
+                metadata = mapOf("kind" to "proposal"),
+            ),
+        )
+        return DetailFixture(project, iteration, document, taskGraph, task, run, proposal)
+    }
+
     private fun storeProject(id: String, name: String, createdAt: Instant): Project =
         projectStore.save(
             Project(
@@ -195,6 +438,25 @@ class PostgresDashboardReadIntegrationTest {
         )
 
     private fun at(time: String): Instant = Instant.parse("2026-07-26T${time}Z")
+
+    private fun sourceReference(canonicalServerId: String, path: String): SourceReference =
+        SourceReference(
+            canonicalServerId = CanonicalServerId(canonicalServerId),
+            uri = "file:///workspace/$path",
+            path = path,
+            startLine = 1,
+            endLine = 2,
+        )
+
+    private data class DetailFixture(
+        val project: Project,
+        val iteration: Iteration,
+        val document: DocumentSnapshot,
+        val taskGraph: TaskGraph,
+        val task: Task,
+        val run: RunRecord,
+        val proposal: DocumentSnapshot,
+    )
 
     private companion object {
         val pgvectorImage: DockerImageName = DockerImageName

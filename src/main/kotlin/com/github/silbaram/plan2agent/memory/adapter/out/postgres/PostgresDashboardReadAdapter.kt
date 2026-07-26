@@ -6,14 +6,28 @@ import com.github.silbaram.plan2agent.memory.application.usecase.IterationSummar
 import com.github.silbaram.plan2agent.memory.application.usecase.MAX_DASHBOARD_PAGE_LIMIT
 import com.github.silbaram.plan2agent.memory.application.usecase.PagedResult
 import com.github.silbaram.plan2agent.memory.application.usecase.ProjectSummaryPageQuery
+import com.github.silbaram.plan2agent.memory.domain.ArtifactRef
+import com.github.silbaram.plan2agent.memory.domain.ArtifactType
 import com.github.silbaram.plan2agent.memory.domain.CanonicalServerId
+import com.github.silbaram.plan2agent.memory.domain.ContentHash
+import com.github.silbaram.plan2agent.memory.domain.DocumentId
 import com.github.silbaram.plan2agent.memory.domain.IterationId
 import com.github.silbaram.plan2agent.memory.domain.IterationStatus
 import com.github.silbaram.plan2agent.memory.domain.ProjectId
+import com.github.silbaram.plan2agent.memory.domain.RunId
+import com.github.silbaram.plan2agent.memory.domain.SourceDocumentId
 import com.github.silbaram.plan2agent.memory.domain.SourceIterationId
 import com.github.silbaram.plan2agent.memory.domain.SourceProjectId
+import com.github.silbaram.plan2agent.memory.domain.SourceRunId
+import com.github.silbaram.plan2agent.memory.domain.SourceTaskGraphId
+import com.github.silbaram.plan2agent.memory.domain.SourceTaskId
+import com.github.silbaram.plan2agent.memory.domain.TaskGraphId
+import com.github.silbaram.plan2agent.memory.domain.TaskId
 import com.github.silbaram.plan2agent.memory.domain.readmodel.ArtifactDetail
 import com.github.silbaram.plan2agent.memory.domain.readmodel.ArtifactIdentity
+import com.github.silbaram.plan2agent.memory.domain.readmodel.ArtifactLineage
+import com.github.silbaram.plan2agent.memory.domain.readmodel.ArtifactSource
+import com.github.silbaram.plan2agent.memory.domain.readmodel.DashboardArtifactPolicy
 import com.github.silbaram.plan2agent.memory.domain.readmodel.IterationSummary
 import com.github.silbaram.plan2agent.memory.domain.readmodel.ProjectSummary
 import org.springframework.jdbc.core.RowMapper
@@ -106,9 +120,186 @@ class PostgresDashboardReadAdapter(
             rows.toIterationPage(query.limit, query.projectId, cursorCodec)
         }
 
-    /** Artifact raw-detail mapping is added in task-004. */
     override fun findArtifactDetail(identity: ArtifactIdentity): ArtifactDetail? =
-        throw UnsupportedOperationException("Dashboard artifact detail reads are not implemented")
+        metrics.recordSearch("dashboard.artifact.detail") {
+            require(DashboardArtifactPolicy.isTreeAndDetailArtifact(identity.artifactType)) {
+                "Artifact type ${identity.artifactType.name} is not supported by dashboard detail"
+            }
+            when (identity.artifactType) {
+                ArtifactType.DOCUMENT_SNAPSHOT,
+                ArtifactType.PROPOSAL,
+                -> findDocumentArtifactDetail(identity)
+
+                ArtifactType.TASK_GRAPH -> findTaskGraphArtifactDetail(identity)
+                ArtifactType.TASK -> findTaskArtifactDetail(identity)
+                ArtifactType.RUN_RECORD -> findRunArtifactDetail(identity)
+
+                ArtifactType.PROJECT,
+                ArtifactType.ITERATION,
+                ArtifactType.DOCUMENT_CHUNK,
+                -> error("Unsupported dashboard artifact type ${identity.artifactType}")
+            }
+        }
+
+    private fun findDocumentArtifactDetail(identity: ArtifactIdentity): ArtifactDetail? =
+        jdbc.queryOne(
+            """
+            SELECT
+                d.document_id::text AS artifact_id,
+                d.project_id::text AS project_id,
+                d.iteration_id::text AS iteration_id,
+                d.document_id::text AS document_id,
+                NULL::text AS task_graph_id,
+                NULL::text AS task_id,
+                NULL::text AS run_id,
+                d.content_hash,
+                d.snapshot_version,
+                p.source_project_id,
+                i.source_iteration_id,
+                d.source_document_id,
+                NULL::text AS source_task_graph_id,
+                NULL::text AS source_task_id,
+                NULL::text AS source_run_id,
+                d.source_path,
+                COALESCE(d.metadata ->> '${PostgresJsonSupport.DOCUMENT_TITLE}', d.source_path) AS title,
+                COALESCE(
+                    NULLIF(d.metadata ->> 'mediaType', ''),
+                    CASE
+                        WHEN lower(d.source_path) LIKE '%.md' OR lower(d.source_path) LIKE '%.markdown'
+                            THEN 'text/markdown'
+                        WHEN lower(d.source_path) LIKE '%.json' THEN 'application/json'
+                        ELSE 'text/plain'
+                    END
+                ) AS media_type,
+                d.content AS raw_content,
+                NULL::text AS artifact_refs_json,
+                d.metadata,
+                d.created_at,
+                d.updated_at
+            FROM documents d
+            JOIN projects p ON p.project_id = d.project_id
+            LEFT JOIN iterations i ON i.iteration_id = d.iteration_id
+            WHERE d.document_id = :artifactId
+              AND d.artifact_type = :artifactType
+            """.trimIndent(),
+            MapSqlParameterSource()
+                .addValue("artifactId", UUID.fromString(identity.artifactId))
+                .addValue("artifactType", identity.artifactType.name),
+            artifactDetailRowMapper(identity.artifactType, json),
+        )
+
+    private fun findTaskGraphArtifactDetail(identity: ArtifactIdentity): ArtifactDetail? =
+        jdbc.queryOne(
+            """
+            SELECT
+                tg.task_graph_id::text AS artifact_id,
+                tg.project_id::text AS project_id,
+                tg.iteration_id::text AS iteration_id,
+                tg.document_id::text AS document_id,
+                tg.task_graph_id::text AS task_graph_id,
+                NULL::text AS task_id,
+                NULL::text AS run_id,
+                tg.graph_hash AS content_hash,
+                NULL::integer AS snapshot_version,
+                p.source_project_id,
+                i.source_iteration_id,
+                COALESCE(tg.source_document_id, d.source_document_id) AS source_document_id,
+                tg.source_task_graph_id,
+                NULL::text AS source_task_id,
+                NULL::text AS source_run_id,
+                d.source_path,
+                COALESCE(tg.source_task_graph_id, tg.task_graph_id::text) AS title,
+                COALESCE(NULLIF(tg.metadata ->> 'mediaType', ''), 'application/json') AS media_type,
+                tg.graph_json::text AS raw_content,
+                NULL::text AS artifact_refs_json,
+                tg.metadata,
+                tg.created_at,
+                tg.updated_at
+            FROM task_graphs tg
+            JOIN projects p ON p.project_id = tg.project_id
+            JOIN iterations i ON i.iteration_id = tg.iteration_id
+            LEFT JOIN documents d ON d.document_id = tg.document_id
+            WHERE tg.task_graph_id = :artifactId
+            """.trimIndent(),
+            MapSqlParameterSource("artifactId", UUID.fromString(identity.artifactId)),
+            artifactDetailRowMapper(identity.artifactType, json),
+        )
+
+    private fun findTaskArtifactDetail(identity: ArtifactIdentity): ArtifactDetail? =
+        jdbc.queryOne(
+            """
+            SELECT
+                t.task_id::text AS artifact_id,
+                t.project_id::text AS project_id,
+                t.iteration_id::text AS iteration_id,
+                tg.document_id::text AS document_id,
+                t.task_graph_id::text AS task_graph_id,
+                t.task_id::text AS task_id,
+                NULL::text AS run_id,
+                NULL::text AS content_hash,
+                NULL::integer AS snapshot_version,
+                p.source_project_id,
+                i.source_iteration_id,
+                COALESCE(tg.source_document_id, d.source_document_id) AS source_document_id,
+                tg.source_task_graph_id,
+                t.source_task_id,
+                NULL::text AS source_run_id,
+                d.source_path,
+                t.title,
+                COALESCE(NULLIF(t.metadata ->> 'mediaType', ''), 'application/json') AS media_type,
+                to_jsonb(t)::text AS raw_content,
+                NULL::text AS artifact_refs_json,
+                t.metadata,
+                t.created_at,
+                t.updated_at
+            FROM tasks t
+            JOIN projects p ON p.project_id = t.project_id
+            JOIN iterations i ON i.iteration_id = t.iteration_id
+            JOIN task_graphs tg ON tg.task_graph_id = t.task_graph_id
+            LEFT JOIN documents d ON d.document_id = tg.document_id
+            WHERE t.task_id = :artifactId
+            """.trimIndent(),
+            MapSqlParameterSource("artifactId", UUID.fromString(identity.artifactId)),
+            artifactDetailRowMapper(identity.artifactType, json),
+        )
+
+    private fun findRunArtifactDetail(identity: ArtifactIdentity): ArtifactDetail? =
+        jdbc.queryOne(
+            """
+            SELECT
+                r.run_id::text AS artifact_id,
+                r.project_id::text AS project_id,
+                r.iteration_id::text AS iteration_id,
+                NULL::text AS document_id,
+                t.task_graph_id::text AS task_graph_id,
+                r.task_id::text AS task_id,
+                r.run_id::text AS run_id,
+                NULL::text AS content_hash,
+                NULL::integer AS snapshot_version,
+                p.source_project_id,
+                i.source_iteration_id,
+                NULL::text AS source_document_id,
+                tg.source_task_graph_id,
+                t.source_task_id,
+                r.source_run_id,
+                NULL::text AS source_path,
+                COALESCE(r.source_run_id, r.run_id::text) AS title,
+                COALESCE(NULLIF(r.metadata ->> 'mediaType', ''), 'application/json') AS media_type,
+                r.run_json::text AS raw_content,
+                r.artifact_refs_json::text AS artifact_refs_json,
+                r.metadata,
+                r.created_at,
+                r.updated_at
+            FROM runs r
+            JOIN projects p ON p.project_id = r.project_id
+            JOIN iterations i ON i.iteration_id = r.iteration_id
+            JOIN tasks t ON t.task_id = r.task_id
+            JOIN task_graphs tg ON tg.task_graph_id = t.task_graph_id
+            WHERE r.run_id = :artifactId
+            """.trimIndent(),
+            MapSqlParameterSource("artifactId", UUID.fromString(identity.artifactId)),
+            artifactDetailRowMapper(identity.artifactType, json),
+        )
 
     private fun validateLimit(limit: Int) {
         require(limit in 1..MAX_DASHBOARD_PAGE_LIMIT) {
@@ -174,6 +365,56 @@ private fun iterationSummaryRowMapper(json: PostgresJsonSupport): RowMapper<Iter
                 createdAt = rs.instant("created_at"),
                 iterationId = iterationId,
             ),
+        )
+    }
+
+private fun artifactDetailRowMapper(
+    artifactType: ArtifactType,
+    json: PostgresJsonSupport,
+): RowMapper<ArtifactDetail> =
+    RowMapper { rs, _ ->
+        val metadata = json.metadataFromJson(rs.getString("metadata"))
+        val projectId = ProjectId(rs.getString("project_id"))
+        val iterationId = rs.getString("iteration_id")?.let(::IterationId)
+        ArtifactDetail(
+            artifactType = artifactType,
+            artifactId = rs.getString("artifact_id"),
+            projectId = projectId,
+            iterationId = iterationId,
+            title = rs.getString("title"),
+            source = ArtifactSource(
+                sourceProjectId = rs.getString("source_project_id")?.let(::SourceProjectId),
+                sourceIterationId = rs.getString("source_iteration_id")?.let(::SourceIterationId),
+                sourceDocumentId = rs.getString("source_document_id")?.let(::SourceDocumentId),
+                sourceTaskGraphId = rs.getString("source_task_graph_id")?.let(::SourceTaskGraphId),
+                sourceTaskId = rs.getString("source_task_id")?.let(::SourceTaskId),
+                sourceRunId = rs.getString("source_run_id")?.let(::SourceRunId),
+                sourcePath = rs.getString("source_path"),
+                sourceReference = json.sourceReferenceFrom(metadata),
+            ),
+            lineage = ArtifactLineage(
+                projectId = projectId,
+                iterationId = iterationId,
+                documentId = rs.getString("document_id")?.let(::DocumentId),
+                taskGraphId = rs.getString("task_graph_id")?.let(::TaskGraphId),
+                taskId = rs.getString("task_id")?.let(::TaskId),
+                runId = rs.getString("run_id")?.let(::RunId),
+                contentHash = rs.getString("content_hash")?.let(::ContentHash),
+                snapshotVersion = rs.nullableInt("snapshot_version"),
+                artifactRefs = json.artifactRefsFromJson(rs.getString("artifact_refs_json"))
+                    .map {
+                        ArtifactRef(
+                            artifactType = ArtifactType.valueOf(it.artifactType),
+                            artifactId = it.artifactId,
+                            sourcePath = it.sourcePath,
+                        )
+                    },
+            ),
+            mediaType = rs.getString("media_type"),
+            rawContent = rs.getString("raw_content"),
+            createdAt = rs.instant("created_at"),
+            updatedAt = rs.nullableInstant("updated_at"),
+            metadata = json.withoutReservedMetadata(metadata),
         )
     }
 
@@ -265,6 +506,22 @@ private class DashboardHierarchyCursorCodec(
 private fun ResultSet.instant(column: String): Instant = getTimestamp(column).toInstant()
 
 private fun ResultSet.nullableInstant(column: String): Instant? = getTimestamp(column)?.toInstant()
+
+private fun ResultSet.nullableInt(column: String): Int? {
+    val value = getInt(column)
+    return if (wasNull()) null else value
+}
+
+private fun <T> NamedParameterJdbcTemplate.queryOne(
+    sql: String,
+    params: MapSqlParameterSource,
+    mapper: RowMapper<T>,
+): T? =
+    try {
+        queryForObject(sql, params, mapper)
+    } catch (_: org.springframework.dao.EmptyResultDataAccessException) {
+        null
+    }
 
 private const val PROJECT_SUMMARY_CURSOR_KIND = "dashboard-project-summary.v1"
 private const val ITERATION_SUMMARY_CURSOR_KIND = "dashboard-iteration-summary.v1"
