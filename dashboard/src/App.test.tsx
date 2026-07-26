@@ -1,6 +1,9 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import type { ArtifactDetail, ArtifactLookupItem, DashboardApiClient, DashboardArtifactType } from './data-access'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import { App } from './App'
+import { ArtifactRouteSlot, BrowseRouteSlot } from './dashboardShell'
 
 function setLocation(pathname: string) {
   window.history.replaceState({}, '', pathname)
@@ -22,7 +25,7 @@ describe('App', () => {
     expect(screen.getByRole('navigation', { name: '대시보드 탐색' })).toBeTruthy()
     expect(screen.getByRole('navigation', { name: '주요 탐색' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: '산출물 탐색' })).toBeTruthy()
-    expect(screen.getByRole('status', { name: '프로젝트 목록 준비 중' })).toBeTruthy()
+    expect(screen.getByRole('status', { name: '프로젝트 목록을 불러오는 중' })).toBeTruthy()
     expect(screen.getByRole('link', { name: '본문으로 건너뛰기' }).getAttribute('href')).toBe('#main-content')
   })
 
@@ -38,15 +41,15 @@ describe('App', () => {
     fireEvent.click(searchLink)
 
     expect(screen.getByRole('heading', { name: '검색' })).toBeTruthy()
-    expect(screen.getByRole('status').textContent).toContain('아직 검색 결과가 없습니다')
+    expect(screen.getByRole('status').textContent).toContain('기본 방식은 키워드 검색입니다')
   })
 
   it('provides artifact, degraded trace, and error state route slots', () => {
-    setLocation('/artifact/DOCUMENT/example-artifact')
+    setLocation('/artifact/TASK/example-artifact')
     const artifactRoute = render(<App />)
 
     expect(screen.getByRole('heading', { name: '산출물 상세' })).toBeTruthy()
-    expect(screen.getByText('DOCUMENT · example-artifact의 상세 데이터가 연결되면 이 영역에 표시됩니다.')).toBeTruthy()
+    expect(screen.getByRole('status').textContent).toContain('산출물을 불러오는 중')
 
     artifactRoute.unmount()
     setLocation('/trace/DOCUMENT/example-artifact')
@@ -62,4 +65,171 @@ describe('App', () => {
     expect(screen.getByRole('heading', { name: '화면을 찾을 수 없습니다' })).toBeTruthy()
     expect(screen.getByRole('alert').textContent).toContain('잘못된 대시보드 경로')
   })
+
+  it('uses browse selection parameters for the existing controlled tree and renders a selected artifact detail', async () => {
+    const selections: Array<{ readonly artifactId: string; readonly artifactType: string }> = []
+    const apiClient: DashboardApiClient = {
+      getArtifact: async ({ artifactId, artifactType }) => {
+        selections.push({ artifactId, artifactType })
+        return artifactDetail(artifactId, artifactType)
+      },
+      health: async () => ({ status: 'UP', timestamp: '2026-07-26T00:00:00Z' }),
+      hybridSearch: async () => ({ items: [], nextCursor: null }),
+      keywordSearch: async () => ({ items: [], nextCursor: null }),
+      listArtifacts: async () => ({
+        items: [artifactLookup()],
+        nextCursor: null,
+      }),
+      listGraphNodes: async () => [],
+      listProjectIterations: async () => ({
+        items: [{
+          createdAt: '2026-07-26T00:00:00Z',
+          iterationId: 'iteration-1',
+          label: 'Iteration one',
+          metadata: {},
+          projectId: 'project-1',
+          sourceIterationId: 'source-iteration-1',
+          sourceReference: null,
+          status: 'active',
+          updatedAt: null,
+        }],
+        nextCursor: null,
+      }),
+      listProjects: async () => ({
+        items: [{
+          canonicalServerId: 'server-1',
+          createdAt: '2026-07-26T00:00:00Z',
+          metadata: {},
+          name: 'Atlas',
+          projectId: 'project-1',
+          rootPath: '/projects/atlas',
+          sourceProjectId: 'source-project-1',
+          sourceReference: null,
+          updatedAt: null,
+        }],
+        nextCursor: null,
+      }),
+      semanticSearch: async () => ({ items: [], nextCursor: null }),
+      traceGraph: async () => ({
+        edges: [],
+        nodes: [],
+        root: {
+          content: null,
+          documentId: null,
+          iterationId: null,
+          label: 'Root',
+          metadata: {},
+          naturalKey: 'root',
+          nodeId: 'root',
+          nodeKind: 'DOCUMENT',
+          projectId: 'project-1',
+          runId: null,
+          taskId: null,
+        },
+        truncated: false,
+      }),
+    }
+
+    setLocation('/browse')
+    const browse = render(
+      <BrowserRouter>
+        <BrowseRouteSlot apiClient={apiClient} />
+      </BrowserRouter>,
+    )
+
+    fireEvent.click(await screen.findByRole('treeitem', { name: '프로젝트 Atlas' }))
+    fireEvent.click(await screen.findByRole('treeitem', { name: '이터레이션 Iteration one' }))
+    const artifact = await screen.findByRole('treeitem', { name: '작업 Gate D 승인' })
+    fireEvent.click(artifact)
+
+    expect(window.location.search).toContain('selectedArtifactType=TASK')
+    expect(window.location.search).toContain('selectedArtifactId=task-1')
+    expect(screen.getByRole('treeitem', { current: true, name: '작업 Gate D 승인' })).toBeTruthy()
+
+    browse.unmount()
+    setLocation('/artifact/TASK/task-1')
+    render(
+      <BrowserRouter>
+        <Routes>
+          <Route element={<ArtifactRouteSlot artifactClient={apiClient} />} path="/artifact/:artifactType/:artifactId" />
+        </Routes>
+      </BrowserRouter>,
+    )
+
+    expect(await screen.findByRole('heading', { name: 'Gate D 승인' })).toBeTruthy()
+    expect(selections).toEqual([{ artifactId: 'task-1', artifactType: 'TASK' }])
+  })
 })
+
+function artifactLookup(): ArtifactLookupItem {
+  return {
+    artifactId: 'task-1',
+    artifactType: 'TASK',
+    contentHash: null,
+    createdAt: null,
+    iterationId: 'iteration-1',
+    lineage: {
+      contentHash: null,
+      iterationId: 'iteration-1',
+      projectId: 'project-1',
+      runId: null,
+      snapshotVersion: null,
+      sourcePath: null,
+      taskId: 'task-1',
+    },
+    metadata: {},
+    projectId: 'project-1',
+    runId: null,
+    snapshotVersion: null,
+    sourceIds: {
+      sourceChunkId: null,
+      sourceDocumentId: null,
+      sourceIterationId: null,
+      sourceProjectId: null,
+      sourceRunId: null,
+      sourceTaskGraphId: null,
+      sourceTaskId: null,
+    },
+    sourcePath: null,
+    sourceReference: null,
+    taskId: 'task-1',
+    title: 'Gate D 승인',
+    updatedAt: null,
+  }
+}
+
+function artifactDetail(artifactId: string, artifactType: DashboardArtifactType): ArtifactDetail {
+  return {
+    artifactId,
+    artifactType,
+    createdAt: null,
+    iterationId: 'iteration-1',
+    lineage: {
+      artifactRefs: [],
+      contentHash: null,
+      documentId: null,
+      iterationId: 'iteration-1',
+      projectId: 'project-1',
+      runId: null,
+      snapshotVersion: null,
+      taskGraphId: null,
+      taskId: artifactId,
+    },
+    mediaType: 'application/json',
+    metadata: {},
+    projectId: 'project-1',
+    rawContent: '{}',
+    source: {
+      sourceDocumentId: null,
+      sourceIterationId: null,
+      sourcePath: null,
+      sourceProjectId: null,
+      sourceReference: null,
+      sourceRunId: null,
+      sourceTaskGraphId: null,
+      sourceTaskId: null,
+    },
+    title: 'Gate D 승인',
+    updatedAt: null,
+  }
+}

@@ -1,0 +1,123 @@
+.search-route {
+  display: grid;
+  gap: var(--spacing-5);
+  max-width: 68rem;
+}
+
+.search-route__form {
+  align-items: end;
+  display: grid;
+  gap: var(--spacing-4);
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+}
+
+.search-route__field,
+.search-route__fusion {
+  display: grid;
+  gap: var(--spacing-2);
+}
+
+.search-route__field--query {
+  grid-column: span 2;
+}
+
+.search-route__field input,
+.search-route__field select {
+  min-block-size: 2.75rem;
+}
+
+.search-route__fusion {
+  border: 1px solid var(--color-border-default);
+  grid-column: span 2;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: var(--spacing-3);
+}
+
+.search-route__fusion legend {
+  padding-inline: var(--spacing-1);
+}
+
+.search-route__validation,
+.search-route__error,
+.search-route__state,
+.search-route__result {
+  border: 1px solid var(--color-border-default);
+  padding: var(--spacing-4);
+}
+
+.search-route__validation,
+.search-route__error {
+  border-color: var(--color-border-danger);
+}
+
+.search-route__results {
+  display: grid;
+  gap: var(--spacing-4);
+}
+
+.search-route__results-header,
+.search-route__result header,
+.search-route__links {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-3);
+  justify-content: space-between;
+}
+
+.search-route__result-list {
+  display: grid;
+  gap: var(--spacing-3);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.search-route__result {
+  display: grid;
+  gap: var(--spacing-3);
+}
+
+.search-route__result-type {
+  font-weight: 700;
+}
+
+.search-route__result-content {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.search-route__result-metadata {
+  display: grid;
+  gap: var(--spacing-2);
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  margin: 0;
+}
+
+.search-route__result-metadata div {
+  display: grid;
+  gap: var(--spacing-1);
+}
+
+.search-route__result-metadata dd,
+.search-route__result-metadata dt {
+  margin: 0;
+}
+
+.search-route__unmapped {
+  color: var(--color-text-danger);
+  margin: 0;
+}
+
+.search-route__links {
+  justify-content: start;
+  margin: 0;
+}
+
+@media (max-width: 47.99rem) {
+  .search-route__field--query,
+  .search-route__fusion {
+    grid-column: auto;
+  }
+}

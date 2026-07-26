@@ -3,9 +3,14 @@ import { NavIcon } from '@astryxdesign/core/NavIcon'
 import { SideNav, SideNavHeading, SideNavItem, SideNavSection } from '@astryxdesign/core/SideNav'
 import { Text } from '@astryxdesign/core/Text'
 import { TopNav, TopNavHeading } from '@astryxdesign/core/TopNav'
-import type { ReactNode } from 'react'
-import { Outlet, useLocation, useParams } from 'react-router-dom'
-import { DegradedState, EmptyStatePanel, ErrorState, LoadingState } from './dashboardState'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { useState, type ReactNode } from 'react'
+import { Outlet, useLocation, useNavigate, useParams } from 'react-router-dom'
+import { ArtifactTree, type ArtifactTreeSelection } from './artifact-tree'
+import { ArtifactViewer } from './artifact-viewer'
+import { dashboardApi, type DashboardApiClient, type DashboardArtifactType } from './data-access'
+import { DegradedState, ErrorState } from './dashboardState'
+import { SearchRoute } from './search'
 
 interface NavigationItem {
   readonly href: string
@@ -16,6 +21,14 @@ interface RouteSlotProps {
   readonly children: ReactNode
   readonly description: string
   readonly title: string
+}
+
+interface BrowseRouteSlotProps {
+  readonly apiClient?: DashboardApiClient
+}
+
+interface ArtifactRouteSlotProps {
+  readonly artifactClient?: Pick<DashboardApiClient, 'getArtifact'>
 }
 
 const navigationItems: readonly NavigationItem[] = [
@@ -107,33 +120,55 @@ export function DashboardShell() {
   )
 }
 
-export function BrowseRouteSlot() {
+export function BrowseRouteSlot({ apiClient = dashboardApi }: BrowseRouteSlotProps) {
+  const [queryClient] = useState(() => new QueryClient({
+    defaultOptions: {
+      queries: {
+        gcTime: 0,
+        retry: false,
+      },
+    },
+  }))
+
   return (
     <RouteSlot
       description="프로젝트, 이터레이션, 산출물 계층이 이 영역에 순서대로 표시됩니다."
       title="산출물 탐색"
     >
-      <LoadingState
-        description="탐색 계층을 표시할 준비를 하고 있습니다. 이후 단계에서 요청과 커서 탐색이 연결됩니다."
-        title="프로젝트 목록 준비 중"
-      />
+      <QueryClientProvider client={queryClient}>
+        <BrowseArtifactTree apiClient={apiClient} />
+      </QueryClientProvider>
     </RouteSlot>
   )
 }
 
-export function ArtifactRouteSlot() {
+function BrowseArtifactTree({ apiClient }: { readonly apiClient: DashboardApiClient }) {
+  const location = useLocation()
+  const navigate = useNavigate()
+  const selectedArtifact = selectionFromBrowseSearch(new URLSearchParams(location.search))
+
+  function selectArtifact(selection: ArtifactTreeSelection) {
+    navigate({ pathname: '/browse', search: browseSearchForSelection(selection) })
+  }
+
+  return (
+    <ArtifactTree
+      apiClient={apiClient}
+      onArtifactSelect={selectArtifact}
+      selectedArtifact={selectedArtifact}
+    />
+  )
+}
+
+export function ArtifactRouteSlot({ artifactClient }: ArtifactRouteSlotProps) {
   const { artifactId, artifactType } = useParams()
-  const artifactLabel = artifactId && artifactType ? `${artifactType} · ${artifactId}` : '선택한 산출물'
 
   return (
     <RouteSlot
       description="메타데이터, 안전한 미리보기와 원문 뷰어를 위한 읽기 전용 영역입니다."
       title="산출물 상세"
     >
-      <EmptyStatePanel
-        description={`${artifactLabel}의 상세 데이터가 연결되면 이 영역에 표시됩니다.`}
-        title="표시할 산출물이 없습니다"
-      />
+      <ArtifactViewer artifactId={artifactId ?? ''} artifactType={artifactType ?? ''} client={artifactClient} />
     </RouteSlot>
   )
 }
@@ -144,10 +179,7 @@ export function SearchRouteSlot() {
       description="키워드, 의미, 혼합 검색 결과가 구분되어 이 영역에 표시됩니다."
       title="검색"
     >
-      <EmptyStatePanel
-        description="검색어와 검색 방식을 선택하면 읽기 전용 결과 목록이 표시됩니다."
-        title="아직 검색 결과가 없습니다"
-      />
+      <SearchRoute />
     </RouteSlot>
   )
 }
@@ -175,4 +207,46 @@ export function NotFoundRouteSlot() {
       />
     </RouteSlot>
   )
+}
+
+function selectionFromBrowseSearch(params: URLSearchParams): ArtifactTreeSelection | null {
+  const artifactType = dashboardArtifactTypeFrom(params.get('selectedArtifactType'))
+  const artifactId = params.get('selectedArtifactId')?.trim()
+  const projectId = params.get('projectId')?.trim()
+  const iterationId = params.get('iterationId')?.trim()
+  if (artifactType === null || artifactId === undefined || artifactId.length === 0 || projectId === undefined || projectId.length === 0) {
+    return null
+  }
+
+  return {
+    artifactId,
+    artifactType,
+    iterationId: iterationId === undefined || iterationId.length === 0 ? null : iterationId,
+    projectId,
+  }
+}
+
+function browseSearchForSelection(selection: ArtifactTreeSelection) {
+  const params = new URLSearchParams({
+    projectId: selection.projectId,
+    selectedArtifactId: selection.artifactId,
+    selectedArtifactType: selection.artifactType,
+  })
+  if (selection.iterationId !== null) {
+    params.set('iterationId', selection.iterationId)
+  }
+  return `?${params.toString()}`
+}
+
+function dashboardArtifactTypeFrom(value: string | null): DashboardArtifactType | null {
+  switch (value) {
+    case 'DOCUMENT_SNAPSHOT':
+    case 'TASK_GRAPH':
+    case 'TASK':
+    case 'RUN_RECORD':
+    case 'PROPOSAL':
+      return value
+    default:
+      return null
+  }
 }
