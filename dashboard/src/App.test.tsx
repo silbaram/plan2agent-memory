@@ -44,7 +44,7 @@ describe('App', () => {
     expect(screen.getByRole('status').textContent).toContain('기본 방식은 키워드 검색입니다')
   })
 
-  it('provides artifact, degraded trace, and error state route slots', () => {
+  it('provides artifact, trace, and error state route slots', () => {
     setLocation('/artifact/TASK/example-artifact')
     const artifactRoute = render(<App />)
 
@@ -56,7 +56,7 @@ describe('App', () => {
     const traceRoute = render(<App />)
 
     expect(screen.getByRole('heading', { name: '계보 추적' })).toBeTruthy()
-    expect(screen.getByRole('alert').textContent).toContain('추적 데이터 연결을 준비하고 있습니다')
+    expect(screen.getByRole('status', { name: '추적 노드 목록을 불러오는 중' })).toBeTruthy()
 
     traceRoute.unmount()
     setLocation('/not-a-dashboard-route')

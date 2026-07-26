@@ -1,0 +1,91 @@
+.trace-route {
+  display: grid;
+  gap: var(--spacing-5);
+}
+
+.trace-route__selector,
+.trace-route__settings,
+.trace-route__accessible-list,
+.trace-route__hint,
+.trace-route__warning,
+.trace-route__validation {
+  background: var(--color-background-surface);
+  border: 1px solid var(--color-border-muted);
+  border-radius: var(--border-radius-2);
+  padding: var(--spacing-4);
+}
+
+.trace-route__selector,
+.trace-route__settings {
+  display: grid;
+  gap: var(--spacing-3);
+  max-width: 52rem;
+}
+
+.trace-route__selector h2,
+.trace-route__accessible-list h2 {
+  margin: 0;
+}
+
+.trace-route__settings {
+  grid-template-columns: max-content minmax(12rem, 18rem);
+}
+
+.trace-route__settings legend {
+  grid-column: 1 / -1;
+  padding-inline: var(--spacing-1);
+}
+
+.trace-route__result {
+  display: grid;
+  gap: var(--spacing-4);
+}
+
+.trace-route__canvas {
+  border: 1px solid var(--color-border-muted);
+  border-radius: var(--border-radius-2);
+  height: 34rem;
+  overflow: hidden;
+}
+
+.trace-route__canvas .react-flow__node {
+  max-width: 15rem;
+}
+
+.trace-route__accessible-list {
+  display: grid;
+  gap: var(--spacing-3);
+}
+
+.trace-route__accessible-list h3,
+.trace-route__accessible-list p {
+  margin: 0;
+}
+
+.trace-route__accessible-list ol {
+  display: grid;
+  gap: var(--spacing-3);
+  margin: 0;
+  padding-inline-start: var(--spacing-6);
+}
+
+.trace-route__accessible-list article {
+  display: grid;
+  gap: var(--spacing-1);
+}
+
+.trace-route__error {
+  display: grid;
+  gap: var(--spacing-3);
+  justify-items: start;
+}
+
+@media (max-width: 47.99rem) {
+  .trace-route__settings {
+    grid-template-columns: 1fr;
+  }
+
+  .trace-route__canvas {
+    height: 28rem;
+  }
+}

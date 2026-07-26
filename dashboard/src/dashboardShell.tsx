@@ -9,8 +9,9 @@ import { Outlet, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { ArtifactTree, type ArtifactTreeSelection } from './artifact-tree'
 import { ArtifactViewer } from './artifact-viewer'
 import { dashboardApi, type DashboardApiClient, type DashboardArtifactType } from './data-access'
-import { DegradedState, ErrorState } from './dashboardState'
+import { ErrorState } from './dashboardState'
 import { SearchRoute } from './search'
+import { TraceRoute } from './trace'
 
 interface NavigationItem {
   readonly href: string
@@ -190,10 +191,7 @@ export function TraceRouteSlot() {
       description="선택한 산출물의 노드와 간선 관계를 읽기 전용으로 확인하는 영역입니다."
       title="계보 추적"
     >
-      <DegradedState
-        description="추적 데이터를 사용할 수 없을 때도 탐색과 키워드 검색은 계속 사용할 수 있습니다."
-        title="추적 데이터 연결을 준비하고 있습니다"
-      />
+      <TraceRoute />
     </RouteSlot>
   )
 }
