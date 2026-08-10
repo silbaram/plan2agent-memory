@@ -24,11 +24,11 @@
 }
 
 .artifact-tree__item:focus-visible {
-  box-shadow: 0 0 0 0.1875rem var(--astryx-color-border-focus, #2557d6);
+  box-shadow: 0 0 0 0.1875rem var(--workspace-focus, var(--astryx-color-border-focus, #2557d6));
 }
 
 .artifact-tree__item[aria-current='true'] .artifact-tree__item-content {
-  background: var(--astryx-color-surface-selected, #e8efff);
+  background: var(--workspace-accent-surface, var(--astryx-color-surface-selected, #e8efff));
   font-weight: 700;
 }
 
