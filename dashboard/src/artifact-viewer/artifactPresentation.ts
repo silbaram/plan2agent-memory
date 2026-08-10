@@ -1,4 +1,4 @@
-import type { DashboardArtifactType } from '../data-access'
+import type { ArtifactLookupItem, DashboardArtifactType, Page } from '../data-access'
 
 export type PriorityDocumentKind =
   | 'product_spec'
@@ -36,6 +36,77 @@ export interface PriorityDocument {
   readonly explicitStatus: ExplicitArtifactStatus
   readonly linkedWorkCount: number
 }
+
+export interface PriorityDocumentLookupScope {
+  readonly projectId: string
+  readonly iterationId: string
+  readonly sourceIterationId: string
+}
+
+export interface PriorityDocumentSource {
+  readonly artifactType: 'DOCUMENT_SNAPSHOT' | 'TASK_GRAPH'
+  readonly canonicalKind: PriorityDocumentKind
+  readonly gate: string
+  readonly label: string
+  readonly purpose: string
+  readonly sourcePath: string
+}
+
+export interface PriorityDocumentClassification {
+  readonly priorityDocuments: readonly PriorityDocument[]
+  readonly selectedPriorityDocument: PriorityDocument | null
+  readonly supportingDocuments: readonly ArtifactLookupItem[]
+}
+
+export interface PriorityDocumentClassificationInput {
+  readonly currentPage?: Page<ArtifactLookupItem> | null
+  readonly lookup: readonly Page<ArtifactLookupItem>[]
+  readonly scope: PriorityDocumentLookupScope
+  readonly selection?: ArtifactIdentity | null
+}
+
+export const priorityDocumentSources = [
+  {
+    artifactType: 'DOCUMENT_SNAPSHOT',
+    canonicalKind: 'product_spec',
+    gate: 'Gate B',
+    label: 'Product specification',
+    purpose: 'Defines the approved product outcome for this iteration.',
+    sourcePath: 'gate-b-spec/product-spec.md',
+  },
+  {
+    artifactType: 'DOCUMENT_SNAPSHOT',
+    canonicalKind: 'implementation_plan',
+    gate: 'Gate B',
+    label: 'Implementation plan',
+    purpose: 'Describes the approved implementation approach for this iteration.',
+    sourcePath: 'gate-b-spec/implementation-plan.md',
+  },
+  {
+    artifactType: 'TASK_GRAPH',
+    canonicalKind: 'task_graph',
+    gate: 'Gate C',
+    label: 'Task graph',
+    purpose: 'Defines the dependency-aware implementation tasks for this iteration.',
+    sourcePath: 'gate-c-task-graph/task-graph.json',
+  },
+  {
+    artifactType: 'DOCUMENT_SNAPSHOT',
+    canonicalKind: 'visual_experience',
+    gate: 'Gate B',
+    label: 'Experience specification',
+    purpose: 'Defines the approved visual experience when this iteration has one.',
+    sourcePath: 'gate-b-spec/experience-spec.json',
+  },
+  {
+    artifactType: 'DOCUMENT_SNAPSHOT',
+    canonicalKind: 'final_review',
+    gate: 'Gate D',
+    label: 'Final review',
+    purpose: 'Records the canonical final review for this iteration.',
+    sourcePath: 'gate-d-review/review.json',
+  },
+] as const satisfies readonly PriorityDocumentSource[]
 
 export interface GateProgressItem {
   readonly gate: string
@@ -104,6 +175,69 @@ export function parseArtifactPresentationContent(rawContent: unknown): ArtifactP
 
 export function parseArtifactPresentationMetadata(metadata: unknown): ArtifactPresentationMetadata | null {
   return isArtifactPresentationMetadata(metadata) ? metadata : null
+}
+
+export function normalizePriorityDocumentLookupScope(scope: PriorityDocumentLookupScope): PriorityDocumentLookupScope {
+  return {
+    iterationId: requireScopeValue(scope.iterationId, 'iterationId'),
+    projectId: requireScopeValue(scope.projectId, 'projectId'),
+    sourceIterationId: requirePathSegment(scope.sourceIterationId, 'sourceIterationId'),
+  }
+}
+
+export function normalizePriorityDocumentSourcePath(sourcePath: string | null, sourceIterationId: string): string | null {
+  if (sourcePath === null) {
+    return null
+  }
+
+  const segments = sourcePath.trim().replaceAll('\\', '/').split('/')
+  const normalizedSegments: string[] = []
+  for (const segment of segments) {
+    if (segment.length === 0 || segment === '.') {
+      continue
+    }
+    if (segment === '..') {
+      return null
+    }
+    normalizedSegments.push(segment)
+  }
+
+  const normalizedPath = normalizedSegments.join('/')
+  const normalizedSourceIterationId = sourceIterationId.trim()
+  const iterationPrefix = `iterations/${normalizedSourceIterationId}/`
+  return normalizedPath.startsWith(iterationPrefix)
+    ? normalizedPath.slice(iterationPrefix.length)
+    : normalizedPath
+}
+
+export function classifyPriorityDocuments({
+  currentPage = null,
+  lookup,
+  scope: scopeInput,
+  selection = null,
+}: PriorityDocumentClassificationInput): PriorityDocumentClassification {
+  const scope = normalizePriorityDocumentLookupScope(scopeInput)
+  const lookupItems = lookup.flatMap((page) => page.items)
+  const currentPageItems = currentPage?.items ?? []
+  const candidates = uniqueScopedArtifacts([...lookupItems, ...currentPageItems], scope)
+  const priorityEntries = priorityDocumentSources.flatMap((source) => {
+    const matches = candidates.filter((artifact) => matchesPriorityDocumentSource(artifact, source, scope.sourceIterationId))
+    const selectedMatch = selection === null
+      ? undefined
+      : matches.find((artifact) => artifactMatchesIdentity(artifact, selection))
+    const artifact = selectedMatch ?? matches[0]
+    return artifact === undefined ? [] : [toPriorityDocument(source, artifact)]
+  })
+  const priorityIdentities = new Set(priorityEntries.map((document) => artifactIdentityKey(document.identity)))
+  const selectedPriorityDocument = selection === null
+    ? null
+    : priorityEntries.find((document) => artifactIdentityKey(document.identity) === artifactIdentityKey(selection)) ?? null
+
+  return {
+    priorityDocuments: priorityEntries,
+    selectedPriorityDocument,
+    supportingDocuments: candidates.filter((artifact) => !priorityIdentities.has(artifactIdentityKey(artifact))),
+  }
 }
 
 export function isArtifactPresentationContent(value: unknown): value is ArtifactPresentationContent {
@@ -209,6 +343,79 @@ function isPriorityDocumentKind(value: unknown): value is PriorityDocumentKind {
     || value === 'task_graph'
     || value === 'visual_experience'
     || value === 'final_review'
+}
+
+function uniqueScopedArtifacts(
+  artifacts: readonly ArtifactLookupItem[],
+  scope: PriorityDocumentLookupScope,
+): readonly ArtifactLookupItem[] {
+  const identities = new Set<string>()
+  const uniqueArtifacts: ArtifactLookupItem[] = []
+  for (const artifact of artifacts) {
+    if (artifact.projectId !== scope.projectId || artifact.iterationId !== scope.iterationId) {
+      continue
+    }
+    const identity = artifactIdentityKey(artifact)
+    if (!identities.has(identity)) {
+      identities.add(identity)
+      uniqueArtifacts.push(artifact)
+    }
+  }
+  return uniqueArtifacts
+}
+
+function matchesPriorityDocumentSource(
+  artifact: ArtifactLookupItem,
+  source: PriorityDocumentSource,
+  sourceIterationId: string,
+): boolean {
+  return artifact.artifactType === source.artifactType
+    && normalizePriorityDocumentSourcePath(artifact.sourcePath, sourceIterationId) === source.sourcePath
+}
+
+function toPriorityDocument(source: PriorityDocumentSource, artifact: ArtifactLookupItem): PriorityDocument {
+  return {
+    canonicalKind: source.canonicalKind,
+    explicitStatus: 'unknown',
+    gate: source.gate,
+    identity: {
+      artifactId: artifact.artifactId,
+      artifactType: source.artifactType,
+    },
+    label: source.label,
+    linkedWorkCount: 0,
+    purpose: source.purpose,
+    sourcePath: source.sourcePath,
+  }
+}
+
+interface ArtifactIdentityLike {
+  readonly artifactId: string
+  readonly artifactType: string
+}
+
+function artifactMatchesIdentity(artifact: ArtifactLookupItem, identity: ArtifactIdentity): boolean {
+  return artifactIdentityKey(artifact) === artifactIdentityKey(identity)
+}
+
+function artifactIdentityKey(identity: ArtifactIdentityLike): string {
+  return `${identity.artifactType}:${identity.artifactId}`
+}
+
+function requireScopeValue(value: string, field: string): string {
+  const normalized = value.trim()
+  if (normalized.length === 0) {
+    throw new Error(`${field} must not be blank`)
+  }
+  return normalized
+}
+
+function requirePathSegment(value: string, field: string): string {
+  const normalized = requireScopeValue(value, field)
+  if (normalized === '.' || normalized === '..' || normalized.includes('/') || normalized.includes('\\')) {
+    throw new Error(`${field} must be one path segment`)
+  }
+  return normalized
 }
 
 function isExplicitArtifactStatus(value: unknown): value is ExplicitArtifactStatus {

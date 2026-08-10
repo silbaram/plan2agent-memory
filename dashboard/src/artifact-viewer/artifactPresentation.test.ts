@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  classifyPriorityDocuments,
   isArtifactPresentationContent,
   isArtifactPresentationMetadata,
   isDocumentOutlineEntry,
@@ -8,6 +9,7 @@ import {
   parseArtifactPresentationContent,
   parseArtifactPresentationMetadata,
 } from './artifactPresentation'
+import type { ArtifactLookupItem, DashboardArtifactType, Page } from '../data-access'
 
 const identity = {
   artifactId: 'artifact-001',
@@ -23,6 +25,12 @@ const linkedWork = {
   relation: 'derived_from',
   status: 'in_progress',
   taskId: 'task-001',
+}
+
+const priorityScope = {
+  iterationId: 'iteration-1',
+  projectId: 'project-1',
+  sourceIterationId: 'v4-dashboard-refresh',
 }
 
 describe('artifact presentation models', () => {
@@ -131,4 +139,159 @@ describe('artifact presentation models', () => {
       linkedWork: [linkedWork, { label: 'Missing identity', relation: 'derived_from', status: 'todo' }],
     })).toBe(false)
   })
+
+  it('classifies only exact normalized source paths and allowed artifact types', () => {
+    const similarProductPath = artifactLookup({
+      artifactId: 'similar-product-path',
+      artifactType: 'DOCUMENT_SNAPSHOT',
+      sourcePath: 'iterations/v4-dashboard-refresh/gate-b-spec/product-spec.md.bak',
+      title: 'Product specification',
+    })
+    const wrongType = artifactLookup({
+      artifactId: 'wrong-product-type',
+      artifactType: 'TASK_GRAPH',
+      sourcePath: 'iterations/v4-dashboard-refresh/gate-b-spec/product-spec.md',
+      title: 'Product specification',
+    })
+
+    const classification = classifyPriorityDocuments({
+      lookup: [artifactPage([similarProductPath, wrongType])],
+      scope: priorityScope,
+    })
+
+    expect(classification.priorityDocuments).toEqual([])
+    expect(classification.selectedPriorityDocument).toBeNull()
+    expect(classification.supportingDocuments).toEqual([similarProductPath, wrongType])
+  })
+
+  it('keeps absent priority documents absent', () => {
+    const unrelatedArtifact = artifactLookup({
+      artifactId: 'unrelated-document',
+      artifactType: 'DOCUMENT_SNAPSHOT',
+      sourcePath: 'iterations/v4-dashboard-refresh/gate-a-intake/intake.md',
+      title: 'Intake',
+    })
+
+    const classification = classifyPriorityDocuments({
+      lookup: [artifactPage([unrelatedArtifact])],
+      scope: priorityScope,
+    })
+
+    expect(classification.priorityDocuments).toEqual([])
+    expect(classification.supportingDocuments).toEqual([unrelatedArtifact])
+  })
+
+  it('uses the first server snapshot for a kind while keeping priority order fixed', () => {
+    const taskGraph = artifactLookup({
+      artifactId: 'task-graph',
+      artifactType: 'TASK_GRAPH',
+      sourcePath: 'iterations/v4-dashboard-refresh/gate-c-task-graph/task-graph.json',
+      title: 'A title that is not used',
+    })
+    const firstProductSnapshot = artifactLookup({
+      artifactId: 'product-snapshot-first',
+      artifactType: 'DOCUMENT_SNAPSHOT',
+      sourcePath: './iterations/v4-dashboard-refresh/gate-b-spec/product-spec.md',
+      title: 'Another unrelated title',
+    })
+    const secondProductSnapshot = artifactLookup({
+      artifactId: 'product-snapshot-second',
+      artifactType: 'DOCUMENT_SNAPSHOT',
+      sourcePath: 'iterations/v4-dashboard-refresh/gate-b-spec/product-spec.md',
+      title: 'Product specification',
+    })
+
+    const classification = classifyPriorityDocuments({
+      lookup: [artifactPage([taskGraph]), artifactPage([firstProductSnapshot, secondProductSnapshot])],
+      scope: priorityScope,
+    })
+
+    expect(classification.priorityDocuments.map((document) => document.canonicalKind)).toEqual(['product_spec', 'task_graph'])
+    expect(classification.priorityDocuments.map((document) => document.identity.artifactId)).toEqual([
+      'product-snapshot-first',
+      'task-graph',
+    ])
+    expect(classification.supportingDocuments).toEqual([secondProductSnapshot])
+  })
+
+  it('deduplicates a selected artifact across lookup and current page before selection', () => {
+    const firstProductSnapshot = artifactLookup({
+      artifactId: 'product-snapshot-first',
+      artifactType: 'DOCUMENT_SNAPSHOT',
+      sourcePath: 'iterations/v4-dashboard-refresh/gate-b-spec/product-spec.md',
+      title: 'Product specification',
+    })
+    const selectedProductSnapshot = artifactLookup({
+      artifactId: 'product-snapshot-selected',
+      artifactType: 'DOCUMENT_SNAPSHOT',
+      sourcePath: 'iterations/v4-dashboard-refresh/gate-b-spec/product-spec.md',
+      title: 'Product specification duplicate',
+    })
+
+    const classification = classifyPriorityDocuments({
+      currentPage: artifactPage([firstProductSnapshot, selectedProductSnapshot]),
+      lookup: [artifactPage([firstProductSnapshot])],
+      scope: priorityScope,
+      selection: {
+        artifactId: selectedProductSnapshot.artifactId,
+        artifactType: 'DOCUMENT_SNAPSHOT',
+      },
+    })
+
+    expect(classification.priorityDocuments).toHaveLength(1)
+    expect(classification.priorityDocuments[0]?.identity.artifactId).toBe('product-snapshot-selected')
+    expect(classification.selectedPriorityDocument?.identity.artifactId).toBe('product-snapshot-selected')
+    expect(classification.supportingDocuments).toEqual([firstProductSnapshot])
+  })
 })
+
+function artifactPage(items: readonly ArtifactLookupItem[]): Page<ArtifactLookupItem> {
+  return { items, nextCursor: null }
+}
+
+function artifactLookup({
+  artifactId,
+  artifactType,
+  sourcePath,
+  title,
+}: {
+  readonly artifactId: string
+  readonly artifactType: DashboardArtifactType
+  readonly sourcePath: string
+  readonly title: string
+}): ArtifactLookupItem {
+  return {
+    artifactId,
+    artifactType,
+    contentHash: null,
+    createdAt: null,
+    iterationId: priorityScope.iterationId,
+    lineage: {
+      contentHash: null,
+      iterationId: priorityScope.iterationId,
+      projectId: priorityScope.projectId,
+      runId: null,
+      snapshotVersion: null,
+      sourcePath,
+      taskId: null,
+    },
+    metadata: {},
+    projectId: priorityScope.projectId,
+    runId: null,
+    snapshotVersion: null,
+    sourceIds: {
+      sourceChunkId: null,
+      sourceDocumentId: null,
+      sourceIterationId: priorityScope.sourceIterationId,
+      sourceProjectId: null,
+      sourceRunId: null,
+      sourceTaskGraphId: null,
+      sourceTaskId: null,
+    },
+    sourcePath,
+    sourceReference: null,
+    taskId: null,
+    title,
+    updatedAt: null,
+  }
+}

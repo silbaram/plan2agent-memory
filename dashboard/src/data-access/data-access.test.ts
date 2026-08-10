@@ -6,7 +6,11 @@ import {
   DashboardApiError,
   isDashboardApiError,
 } from './api'
-import { createDashboardQueries, dashboardQueryKeys } from './queries'
+import {
+  createDashboardQueries,
+  dashboardQueryKeys,
+  priorityDocumentLookupPageLimit,
+} from './queries'
 import { server } from '../test/mswServer'
 
 const projectId = '11111111-1111-4111-8111-111111111111'
@@ -251,6 +255,36 @@ describe('dashboard data access', () => {
     expect(dashboardQueryKeys.keywordSearch({ cursor: 'page-one', projectId, q: 'decision' })).not.toEqual(
       dashboardQueryKeys.keywordSearch({ cursor: 'page-two', projectId, q: 'decision' }),
     )
+
+    queryClient.clear()
+  })
+
+  it('loads only the first bounded page for each exact current-iteration priority source path', async () => {
+    const priorityRequests: URL[] = []
+    const priorityScope = {
+      iterationId: '44444444-4444-4444-8444-444444444444',
+      projectId,
+      sourceIterationId: 'v4-dashboard-refresh',
+    }
+    server.use(
+      http.get('/api/artifacts', ({ request }) => {
+        priorityRequests.push(new URL(request.url))
+        return HttpResponse.json({ items: [], nextCursor: 'next-page-must-not-be-requested' })
+      }),
+    )
+
+    const queryClient = new QueryClient()
+    const query = createDashboardQueries(createClient()).priorityDocumentLookup(priorityScope)
+    await queryClient.fetchQuery({ ...query, staleTime: Infinity })
+
+    expect(priorityRequests).toHaveLength(5)
+    expect(priorityRequests.map((url) => url.search)).toEqual([
+      `?projectId=${projectId}&iterationId=${priorityScope.iterationId}&artifactType=DOCUMENT_SNAPSHOT&sourcePath=iterations%2Fv4-dashboard-refresh%2Fgate-b-spec%2Fproduct-spec.md&limit=${priorityDocumentLookupPageLimit}`,
+      `?projectId=${projectId}&iterationId=${priorityScope.iterationId}&artifactType=DOCUMENT_SNAPSHOT&sourcePath=iterations%2Fv4-dashboard-refresh%2Fgate-b-spec%2Fimplementation-plan.md&limit=${priorityDocumentLookupPageLimit}`,
+      `?projectId=${projectId}&iterationId=${priorityScope.iterationId}&artifactType=TASK_GRAPH&sourcePath=iterations%2Fv4-dashboard-refresh%2Fgate-c-task-graph%2Ftask-graph.json&limit=${priorityDocumentLookupPageLimit}`,
+      `?projectId=${projectId}&iterationId=${priorityScope.iterationId}&artifactType=DOCUMENT_SNAPSHOT&sourcePath=iterations%2Fv4-dashboard-refresh%2Fgate-b-spec%2Fexperience-spec.json&limit=${priorityDocumentLookupPageLimit}`,
+      `?projectId=${projectId}&iterationId=${priorityScope.iterationId}&artifactType=DOCUMENT_SNAPSHOT&sourcePath=iterations%2Fv4-dashboard-refresh%2Fgate-d-review%2Freview.json&limit=${priorityDocumentLookupPageLimit}`,
+    ])
 
     queryClient.clear()
   })

@@ -16,5 +16,11 @@ export type {
   NormalizedSearchFilters,
   NormalizedSemanticSearchRequest,
 } from './api'
-export { createDashboardQueries, dashboardQueries, dashboardQueryKeys } from './queries'
+export {
+  createDashboardQueries,
+  dashboardQueries,
+  dashboardQueryKeys,
+  priorityDocumentLookupPageLimit,
+  priorityDocumentLookupRequests,
+} from './queries'
 export type * from './types'

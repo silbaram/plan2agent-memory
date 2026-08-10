@@ -1,5 +1,10 @@
 import { queryOptions } from '@tanstack/react-query'
 import {
+  normalizePriorityDocumentLookupScope,
+  priorityDocumentSources,
+  type PriorityDocumentLookupScope,
+} from '../artifact-viewer/artifactPresentation'
+import {
   dashboardApi,
   normalizeArtifactListRequest,
   normalizeGraphNodeListRequest,
@@ -22,6 +27,8 @@ import type {
   SemanticSearchRequest,
 } from './types'
 
+export const priorityDocumentLookupPageLimit = 10
+
 export const dashboardQueryKeys = {
   health: () => ['dashboard', 'health'] as const,
   projects: (request: ProjectListRequest = {}) => ['dashboard', 'projects', normalizePagination(request)] as const,
@@ -33,6 +40,11 @@ export const dashboardQueryKeys = {
     normalizePagination(request),
   ] as const,
   artifacts: (request: ArtifactListRequest = {}) => ['dashboard', 'artifacts', normalizeArtifactListRequest(request)] as const,
+  priorityDocumentLookup: (scope: PriorityDocumentLookupScope) => [
+    'dashboard',
+    'priority-documents',
+    normalizePriorityDocumentLookupScope(scope),
+  ] as const,
   artifact: (request: ArtifactDetailRequest) => ['dashboard', 'artifacts', request.artifactType, request.artifactId.trim()] as const,
   keywordSearch: (request: KeywordSearchRequest) => {
     const normalized = normalizeKeywordSearchRequest(request)
@@ -76,6 +88,12 @@ export function createDashboardQueries(client: DashboardApiClient) {
       queryKey: dashboardQueryKeys.artifacts(request),
       queryFn: ({ signal }) => client.listArtifacts(request, { signal }),
     }),
+    priorityDocumentLookup: (scope: PriorityDocumentLookupScope) => queryOptions({
+      queryKey: dashboardQueryKeys.priorityDocumentLookup(scope),
+      queryFn: ({ signal }) => Promise.all(priorityDocumentLookupRequests(scope).map(
+        (request) => client.listArtifacts(request, { signal }),
+      )),
+    }),
     artifact: (request: ArtifactDetailRequest) => queryOptions({
       queryKey: dashboardQueryKeys.artifact(request),
       queryFn: ({ signal }) => client.getArtifact(request, { signal }),
@@ -104,3 +122,14 @@ export function createDashboardQueries(client: DashboardApiClient) {
 }
 
 export const dashboardQueries = createDashboardQueries(dashboardApi)
+
+export function priorityDocumentLookupRequests(scopeInput: PriorityDocumentLookupScope): readonly ArtifactListRequest[] {
+  const scope = normalizePriorityDocumentLookupScope(scopeInput)
+  return priorityDocumentSources.map((source) => ({
+    artifactType: source.artifactType,
+    iterationId: scope.iterationId,
+    limit: priorityDocumentLookupPageLimit,
+    projectId: scope.projectId,
+    sourcePath: `iterations/${scope.sourceIterationId}/${source.sourcePath}`,
+  }))
+}
