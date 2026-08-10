@@ -6,7 +6,10 @@
 .trace-route__selector,
 .trace-route__settings,
 .trace-route__accessible-list,
+.trace-route__summary,
+.trace-route__completion,
 .trace-route__hint,
+.trace-route__empty,
 .trace-route__warning,
 .trace-route__validation {
   background: var(--color-background-surface);
@@ -23,7 +26,10 @@
 }
 
 .trace-route__selector h2,
-.trace-route__accessible-list h2 {
+.trace-route__accessible-list h2,
+.trace-route__summary h2,
+.trace-route__completion h3,
+.trace-route__completion h4 {
   margin: 0;
 }
 
@@ -41,6 +47,29 @@
   gap: var(--spacing-4);
 }
 
+.trace-route__summary,
+.trace-route__completion {
+  display: grid;
+  gap: var(--spacing-2);
+}
+
+.trace-route__summary > p,
+.trace-route__completion p {
+  margin: 0;
+}
+
+.trace-route__completion ol {
+  display: grid;
+  gap: var(--spacing-3);
+  margin: 0;
+  padding-inline-start: var(--spacing-6);
+}
+
+.trace-route__completion article {
+  display: grid;
+  gap: var(--spacing-1);
+}
+
 .trace-route__canvas {
   border: 1px solid var(--color-border-muted);
   border-radius: var(--border-radius-2);
@@ -50,6 +79,24 @@
 
 .trace-route__canvas .react-flow__node {
   max-width: 15rem;
+}
+
+.trace-route__canvas .trace-flow__node--primary {
+  border-color: var(--workspace-accent);
+  box-shadow: 0 0 0 1px var(--workspace-accent);
+}
+
+.trace-route__canvas .trace-flow__node--secondary {
+  border-style: dashed;
+}
+
+.trace-route__canvas .trace-flow__edge--primary .react-flow__edge-path {
+  stroke: var(--workspace-accent);
+  stroke-width: 2;
+}
+
+.trace-route__canvas .trace-flow__edge--secondary .react-flow__edge-path {
+  stroke-dasharray: 4 3;
 }
 
 .trace-route__accessible-list {

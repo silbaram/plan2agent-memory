@@ -25,7 +25,13 @@ import {
   type TraceFlowEdge,
   type TraceFlowNode,
   type TraceGraphLayout,
+  type TraceNodeHierarchy,
 } from './traceGraphLayout'
+import {
+  deriveTracePresentation,
+  type TraceCompletionContext,
+  type TracePresentation,
+} from './tracePresentation'
 import '@xyflow/react/dist/style.css'
 import './trace.css'
 
@@ -124,9 +130,7 @@ function TraceScreen({ apiClient }: { readonly apiClient: DashboardApiClient }) 
           trace={traceQuery.data}
         />
       ) : (
-        <section aria-label="trace 시작 안내" className="trace-route__hint" role="status">
-          시작 노드를 선택하면 방향과 최대 깊이를 지정해 읽기 전용 계보를 확인할 수 있습니다.
-        </section>
+        <TraceReadyState />
       )}
     </section>
   )
@@ -202,10 +206,12 @@ function TraceResult({ error, isLoading, onRetry, onSettingsChange, state, trace
 
 function LoadedTraceResult({ onSettingsChange, state, trace }: Pick<TraceResultProps, 'onSettingsChange' | 'state'> & { readonly trace: GraphTrace }) {
   const layout = useMemo(() => layoutTraceGraph(trace), [trace])
+  const presentation = useMemo(() => deriveTracePresentation(trace, layout), [layout, trace])
 
   return (
     <section aria-label="계보 결과" className="trace-route__result">
       <TraceSettings onChange={onSettingsChange} state={state} />
+      <TraceSummary layout={layout} presentation={presentation} />
       {trace.truncated ? (
         <DegradedState
           description={`최대 깊이 ${state.maxDepth}에서 응답이 잘렸습니다. 더 넓은 범위가 필요하면 최대 깊이를 늘리세요.`}
@@ -217,8 +223,13 @@ function LoadedTraceResult({ onSettingsChange, state, trace }: Pick<TraceResultP
           {layout.danglingEdges.length}개의 간선은 응답에 포함된 노드와 연결할 수 없어 canvas에서 제외했습니다. 아래 접근 가능한 목록에는 그대로 표시합니다.
         </section>
       ) : null}
+      {presentation.isEmpty ? (
+        <section aria-label="빈 계보 결과" className="trace-route__empty" role="status">
+          시작 노드 외에 반환된 graph node나 연결된 edge가 없습니다.
+        </section>
+      ) : null}
       <TraceCanvas layout={layout} />
-      <TraceAccessibleList layout={layout} root={trace.root} />
+      <TraceAccessibleList layout={layout} root={trace.root} truncated={trace.truncated} />
     </section>
   )
 }
@@ -288,18 +299,74 @@ function TraceCanvas({ layout }: { readonly layout: TraceGraphLayout }) {
   )
 }
 
-function TraceAccessibleList({ layout, root }: { readonly layout: TraceGraphLayout; readonly root: GraphNode }) {
+function TraceSummary({ layout, presentation }: { readonly layout: TraceGraphLayout; readonly presentation: TracePresentation }) {
+  return (
+    <section aria-labelledby="trace-summary" className="trace-route__summary">
+      <h2 id="trace-summary">계보 요약</h2>
+      <p role="status">
+        준비됨: API node {layout.nodeEntries.length}개, edge {layout.edgeEntries.length}개를 표시합니다.
+        주 계보 edge {presentation.primaryEdgeCount}개와 보조 edge {presentation.secondaryEdgeCount}개는 각각 반환된 edge 유형으로만 구분했습니다.
+      </p>
+      <TraceCompletionContextView context={presentation.completionContext} />
+    </section>
+  )
+}
+
+function TraceCompletionContextView({ context }: { readonly context: TraceCompletionContext }) {
+  if (context.availability === 'unavailable') {
+    const description = context.reason === 'missing_canonical_lineage'
+      ? '실제 graph edge와 canonical taskId가 함께 반환되지 않아 완료 작업 맥락을 표시할 수 없습니다.'
+      : 'canonical lineage에서 명시적으로 완료된 작업 상태가 반환되지 않았습니다.'
+    return (
+      <section aria-label="완료 작업 맥락" className="trace-route__completion">
+        <h3>완료 작업 맥락</h3>
+        <p role="status">{description}</p>
+      </section>
+    )
+  }
+
+  return (
+    <section aria-labelledby="trace-completion-context" className="trace-route__completion">
+      <h3 id="trace-completion-context">canonical lineage의 완료 작업</h3>
+      <ol>
+        {context.completedTasks.map((task) => (
+          <li key={task.taskId}>
+            <article>
+              <h4>{task.label}</h4>
+              <p>작업 ID: {task.taskId}</p>
+              <p>근거 edge 유형: {task.edgeTypes.join(', ')}</p>
+              <p>수행 내용: {task.content ?? 'graph 응답에 기록되지 않았습니다.'}</p>
+              <p>결과: {task.result ?? 'graph 응답에 기록되지 않았습니다.'}</p>
+              <p>완료 시각: {task.completedAt ?? 'graph 응답에 기록되지 않았습니다.'}</p>
+            </article>
+          </li>
+        ))}
+      </ol>
+    </section>
+  )
+}
+
+function TraceAccessibleList({
+  layout,
+  root,
+  truncated,
+}: {
+  readonly layout: TraceGraphLayout
+  readonly root: GraphNode
+  readonly truncated: boolean
+}) {
   return (
     <section aria-labelledby="trace-accessible-list" className="trace-route__accessible-list">
       <h2 id="trace-accessible-list">계보 노드와 간선 목록</h2>
-      <p>이 목록은 keyboard와 screen reader에서 canvas와 같은 API node, depth, edge 정보를 제공합니다.</p>
+      <p>이 목록은 keyboard와 screen reader에서 canvas와 같은 API node, depth, edge, 주·보조 관계 정보를 제공합니다.</p>
+      {truncated ? <p role="status">이 목록은 잘린 trace 응답과 동일한 node·edge만 포함합니다.</p> : null}
       <h3>시작 노드</h3>
       <p>{root.nodeId} · {root.nodeKind} · {root.naturalKey}</p>
       <h3>노드</h3>
       <ol>
         {layout.nodeEntries.map((entry) => (
           <li key={entry.node.nodeId}>
-            <NodeSummary depth={entry.depth} node={entry.node} />
+            <NodeSummary depth={entry.depth} hierarchy={nodeHierarchy(layout, entry.node.nodeId)} node={entry.node} />
           </li>
         ))}
       </ol>
@@ -308,10 +375,11 @@ function TraceAccessibleList({ layout, root }: { readonly layout: TraceGraphLayo
         <p role="status">표시할 간선이 없습니다.</p>
       ) : (
         <ol>
-          {layout.edgeEntries.map(({ edge, isDangling }) => (
+          {layout.edgeEntries.map(({ edge, hierarchy, isDangling }) => (
             <li key={`${edge.edgeId}:${edge.fromNodeId}:${edge.toNodeId}`}>
               <p>간선 ID: {edge.edgeId}</p>
               <p>유형: {edge.edgeType}</p>
+              <p>계보 구분: {hierarchy === 'primary' ? '주 관계' : '보조 관계'}</p>
               <p>출발 노드 ID: {edge.fromNodeId}</p>
               <p>도착 노드 ID: {edge.toNodeId}</p>
               {isDangling ? <p role="status">이 간선은 응답에 없는 노드를 참조합니다.</p> : null}
@@ -323,8 +391,21 @@ function TraceAccessibleList({ layout, root }: { readonly layout: TraceGraphLayo
   )
 }
 
-function NodeSummary({ depth, node }: { readonly depth: number; readonly node: GraphNode }) {
+function NodeSummary({
+  depth,
+  hierarchy,
+  node,
+}: {
+  readonly depth: number
+  readonly hierarchy: TraceNodeHierarchy
+  readonly node: GraphNode
+}) {
   const href = supportedArtifactHref(node)
+  const hierarchyLabel = hierarchy === 'primary'
+    ? '주 계보 edge에 연결됨'
+    : hierarchy === 'secondary'
+      ? '보조 edge에 연결됨'
+      : '반환된 edge 연결 없음'
 
   return (
     <article>
@@ -332,9 +413,22 @@ function NodeSummary({ depth, node }: { readonly depth: number; readonly node: G
       <p>유형: {node.nodeKind}</p>
       <p>깊이: {depth}</p>
       <p>Natural key: {node.naturalKey}</p>
-      {href === null ? <p>{node.label}</p> : <Link to={href}>{node.label} 산출물 열기</Link>}
+      <p>계보 구분: {hierarchyLabel}</p>
+      {href === null ? <p>{node.label}</p> : <Link to={href}>{node.nodeKind} {node.label} 산출물 열기</Link>}
     </article>
   )
+}
+
+function TraceReadyState() {
+  return (
+    <section aria-label="trace 시작 안내" className="trace-route__hint" role="status">
+      준비됨: 시작 노드를 선택하면 방향과 최대 깊이를 지정해 읽기 전용 계보를 확인할 수 있습니다.
+    </section>
+  )
+}
+
+function nodeHierarchy(layout: TraceGraphLayout, nodeId: string): TraceNodeHierarchy {
+  return layout.flowNodes.find((node) => node.id === nodeId)?.data.hierarchy ?? 'unrelated'
 }
 
 function TraceError({ description, onRetry, title }: { readonly description: string; readonly onRetry: () => void; readonly title: string }) {
