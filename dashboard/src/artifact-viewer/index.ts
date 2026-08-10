@@ -32,6 +32,11 @@ export {
   summarizeTaskGraph,
   summarizeTaskGraphContent,
 } from './taskGraphPresentation'
+export {
+  deriveGateProgressItem,
+  deriveLineageWork,
+  deriveRecentCompletedWork,
+} from './gateLineagePresentation'
 export { isSupportedArtifactType, supportedArtifactTypes } from './artifactTypes'
 export type {
   ArtifactIdentity,
@@ -63,6 +68,14 @@ export type {
   TaskGraphUnavailableReason,
   UnavailableTaskGraph,
 } from './taskGraphPresentation'
+export type {
+  AvailableLineageWork,
+  GateProgressInput,
+  LineageWorkDerivation,
+  LineageWorkInput,
+  LineageWorkUnavailableReason,
+  UnavailableLineageWork,
+} from './gateLineagePresentation'
 export type { ArtifactViewerProps } from './ArtifactViewer'
 export type {
   MarkdownDerivation,
