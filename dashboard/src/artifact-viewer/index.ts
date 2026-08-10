@@ -1,6 +1,12 @@
 export { ArtifactContent } from './ArtifactContent'
 export { ArtifactViewer } from './ArtifactViewer'
 export {
+  createMarkdownViewModel,
+  DEFAULT_MARKDOWN_OUTLINE_LIMIT,
+  DEFAULT_MARKDOWN_SOURCE_LIMIT,
+  DEFAULT_MARKDOWN_SUMMARY_LIMIT,
+} from './markdownViewModel'
+export {
   isArtifactIdentity,
   isArtifactPresentationContent,
   isArtifactPresentationMetadata,
@@ -50,3 +56,12 @@ export type {
   UnavailableTaskGraph,
 } from './taskGraphPresentation'
 export type { ArtifactViewerProps } from './ArtifactViewer'
+export type {
+  MarkdownDerivation,
+  MarkdownDerivationReason,
+  MarkdownDerivationStatus,
+  MarkdownOutlineEntry,
+  MarkdownSummary,
+  MarkdownViewModel,
+  MarkdownViewModelOptions,
+} from './markdownViewModel'
