@@ -14,6 +14,14 @@ export {
   parseArtifactPresentationContent,
   parseArtifactPresentationMetadata,
 } from './artifactPresentation'
+export {
+  isTaskGraph,
+  isTaskGraphTask,
+  parseTaskGraph,
+  parseTaskGraphContent,
+  summarizeTaskGraph,
+  summarizeTaskGraphContent,
+} from './taskGraphPresentation'
 export { isSupportedArtifactType, supportedArtifactTypes } from './artifactTypes'
 export type {
   ArtifactIdentity,
@@ -30,4 +38,15 @@ export type {
   TaskGraphSummary,
   TaskGraphStatusCount,
 } from './artifactPresentation'
+export type {
+  AvailableTaskGraph,
+  AvailableTaskGraphDerivedInfo,
+  TaskGraph,
+  TaskGraphDerivedInfo,
+  TaskGraphParseResult,
+  TaskGraphStatus,
+  TaskGraphTask,
+  TaskGraphUnavailableReason,
+  UnavailableTaskGraph,
+} from './taskGraphPresentation'
 export type { ArtifactViewerProps } from './ArtifactViewer'
