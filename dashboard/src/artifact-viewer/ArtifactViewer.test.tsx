@@ -1,6 +1,13 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { DashboardApiError, type ArtifactDetail, type ArtifactDetailRequest, type DashboardApiClient } from '../data-access'
+import {
+  DashboardApiError,
+  type ArtifactDetail,
+  type ArtifactDetailRequest,
+  type ArtifactLookupItem,
+  type DashboardApiClient,
+} from '../data-access'
+import { ARTIFACT_CONTENT_CHUNK_SIZE } from './artifactContentPresentation'
 import { ArtifactViewer } from './ArtifactViewer'
 
 const artifactId = '22222222-2222-4222-8222-222222222222'
@@ -53,6 +60,54 @@ function createClient(resolver: (request: ArtifactDetailRequest) => Promise<Arti
   return { getArtifact: resolver }
 }
 
+function createWorkArtifact(): ArtifactLookupItem {
+  return {
+    artifactId: 'run-1',
+    artifactType: 'RUN_RECORD',
+    contentHash: 'b'.repeat(64),
+    createdAt: '2026-07-26T09:20:00Z',
+    iterationId: 'iteration-1',
+    lineage: {
+      contentHash: 'b'.repeat(64),
+      iterationId: 'iteration-1',
+      projectId: 'project-1',
+      runId: 'run-1',
+      snapshotVersion: 1,
+      sourcePath: 'runs/run-1.json',
+      taskId: 'task-1',
+    },
+    metadata: { completedAt: '2026-07-26T09:20:00Z', result: 'passed', status: 'finished' },
+    projectId: 'project-1',
+    runId: 'run-1',
+    snapshotVersion: 1,
+    sourceIds: {
+      sourceChunkId: null,
+      sourceDocumentId: null,
+      sourceIterationId: 'source-iteration-1',
+      sourceProjectId: 'source-project-1',
+      sourceRunId: 'run-1',
+      sourceTaskGraphId: null,
+      sourceTaskId: 'task-1',
+    },
+    sourcePath: 'runs/run-1.json',
+    sourceReference: null,
+    taskId: 'task-1',
+    title: '검증 실행',
+    updatedAt: '2026-07-26T09:20:00Z',
+  }
+}
+
+function createDeferred<Value>() {
+  let resolvePromise: (value: Value) => void = () => {
+    throw new Error('Deferred promise was resolved before its initializer ran.')
+  }
+  const promise = new Promise<Value>((resolve) => {
+    resolvePromise = resolve
+  })
+
+  return { promise, resolve: resolvePromise }
+}
+
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
@@ -77,6 +132,125 @@ describe('ArtifactViewer', () => {
     expect(screen.getByText('p2a://memory/artifacts/task-1')).toBeTruthy()
     expect(screen.getByText('runs/run-1.json')).toBeTruthy()
     expect(screen.getByRole('tab', { name: '미리보기' }).getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('renders a Markdown reader in summary, table-of-contents, content, linked-work, and metadata order', async () => {
+    const markdown = [
+      '# 릴리스 계획',
+      '',
+      '이번 반복의 핵심 결정입니다.',
+      '',
+      '## 배포 순서',
+    ].join('\n')
+    const client = createClient(async () => createArtifact({ mediaType: 'text/markdown', rawContent: markdown }))
+
+    render(<ArtifactViewer artifactId={artifactId} artifactType="TASK" client={client} />)
+
+    await screen.findByRole('heading', { name: 'Stored task' })
+
+    const summary = screen.getByRole('heading', { name: '요약' })
+    const outline = screen.getByRole('heading', { name: '목차' })
+    const content = screen.getByRole('heading', { name: '내용' })
+    const linkedWork = screen.getByRole('heading', { name: '연결된 작업' })
+    const metadata = screen.getByRole('heading', { name: '메타데이터' })
+    expect(summary.compareDocumentPosition(outline) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(outline.compareDocumentPosition(content) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(content.compareDocumentPosition(linkedWork) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(linkedWork.compareDocumentPosition(metadata) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    const tocLink = screen.getByRole('link', { name: '배포 순서' })
+    const renderedHeading = screen.getByRole('heading', { level: 2, name: '배포 순서' })
+    expect(tocLink.getAttribute('href')).toBe(`#${renderedHeading.id}`)
+    expect(renderedHeading.id).toBe('배포-순서')
+    expect(screen.getByRole('heading', { name: '연결된 작업' }).parentElement?.textContent).toContain('dangling_lineage')
+  })
+
+  it('keeps a malformed task graph raw and reports its unavailable summary without guessed work', async () => {
+    const rawContent = '{"schema_version":'
+    const client = createClient(async () => createArtifact({
+      artifactType: 'TASK_GRAPH',
+      mediaType: 'application/json',
+      rawContent,
+    }))
+
+    render(<ArtifactViewer artifactId={artifactId} artifactType="TASK_GRAPH" client={client} />)
+
+    expect((await screen.findByText(/작업 그래프 요약을 만들 수 없습니다/)).textContent).toContain('malformed_json')
+    fireEvent.click(screen.getByRole('tab', { name: '원문' }))
+    expect(screen.getByLabelText('이스케이프된 원문').textContent).toBe(rawContent)
+    expect(screen.getByRole('heading', { name: '연결된 작업' }).parentElement?.textContent).toContain('dangling_lineage')
+  })
+
+  it('renders only verified lineage work supplied by the owning lookup layer', async () => {
+    const artifact = createArtifact()
+    const client = createClient(async () => ({
+      ...artifact,
+      lineage: { ...artifact.lineage, runId: null, taskId: null },
+      source: { ...artifact.source, sourceRunId: null, sourceTaskId: null },
+    }))
+
+    render(
+      <ArtifactViewer
+        artifactId={artifactId}
+        artifactType="TASK"
+        client={client}
+        workArtifacts={[createWorkArtifact()]}
+      />,
+    )
+
+    const workLink = await screen.findByRole('link', { name: '검증 실행' })
+    expect(workLink.getAttribute('href')).toBe('/artifact/RUN_RECORD/run-1')
+    expect(screen.getByRole('heading', { name: '연결된 작업' }).parentElement?.textContent).toContain('lineage_artifact_ref')
+  })
+
+  it('provides keyboard tabs without changing the selected artifact URL', async () => {
+    const client = createClient(async () => createArtifact({ mediaType: 'text/markdown', rawContent: '# 제목\n\n본문' }))
+    const originalUrl = window.location.href
+
+    render(<ArtifactViewer artifactId={artifactId} artifactType="TASK" client={client} />)
+
+    const previewTab = await screen.findByRole('tab', { name: '미리보기' })
+    const rawTab = screen.getByRole('tab', { name: '원문' })
+    previewTab.focus()
+    fireEvent.keyDown(previewTab, { key: 'ArrowRight' })
+    expect(rawTab.getAttribute('aria-selected')).toBe('true')
+    expect(document.activeElement).toBe(rawTab)
+
+    fireEvent.keyDown(rawTab, { key: 'Home' })
+    expect(previewTab.getAttribute('aria-selected')).toBe('true')
+    expect(document.activeElement).toBe(previewTab)
+
+    fireEvent.keyDown(previewTab, { key: 'End' })
+    expect(rawTab.getAttribute('aria-selected')).toBe('true')
+    fireEvent.keyDown(rawTab, { key: 'ArrowLeft' })
+    expect(previewTab.getAttribute('aria-selected')).toBe('true')
+    expect(window.location.href).toBe(originalUrl)
+  })
+
+  it('keeps oversized content below the DOM window until an explicit expansion action', async () => {
+    const rawContent = 'a'.repeat(ARTIFACT_CONTENT_CHUNK_SIZE + 1)
+    const client = createClient(async () => createArtifact({ rawContent }))
+
+    render(<ArtifactViewer artifactId={artifactId} artifactType="TASK" client={client} />)
+
+    await screen.findByRole('heading', { name: 'Stored task' })
+    expect(screen.getByText(/처음 200,000자만 표시합니다/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('tab', { name: '원문' }))
+    expect(screen.getByLabelText('이스케이프된 원문').textContent).toHaveLength(ARTIFACT_CONTENT_CHUNK_SIZE)
+
+    fireEvent.click(screen.getByRole('button', { name: '다음 200,000자 표시' }))
+    expect(screen.getByLabelText('이스케이프된 원문').textContent).toHaveLength(rawContent.length)
+  })
+
+  it('renders loading until the artifact request resolves', async () => {
+    const deferred = createDeferred<ArtifactDetail>()
+    const client = createClient(async () => deferred.promise)
+
+    render(<ArtifactViewer artifactId={artifactId} artifactType="TASK" client={client} />)
+
+    expect(screen.getByRole('status').textContent).toContain('산출물을 불러오는 중')
+    deferred.resolve(createArtifact())
+    expect(await screen.findByRole('heading', { name: 'Stored task' })).toBeTruthy()
   })
 
   it('renders Markdown with a fixed sanitizer while blocking raw HTML, MDX, unsafe links, and external images', async () => {

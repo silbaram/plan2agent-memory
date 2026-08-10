@@ -3,17 +3,23 @@ import {
   dashboardApi,
   isDashboardApiError,
   type ArtifactDetail,
+  type ArtifactLookupItem,
   type DashboardApiClient,
   type SourceReference,
 } from '../data-access'
 import { ArtifactContent } from './ArtifactContent'
+import { isMarkdownMediaType } from './artifactContentPresentation'
 import { isSupportedArtifactType } from './artifactTypes'
+import { deriveLineageWork, type LineageWorkDerivation } from './gateLineagePresentation'
+import { createMarkdownViewModel, type MarkdownViewModel } from './markdownViewModel'
+import { summarizeTaskGraphContent, type TaskGraphDerivedInfo } from './taskGraphPresentation'
 import './artifactViewer.css'
 
 export interface ArtifactViewerProps {
   readonly artifactId: string
   readonly artifactType: string
   readonly client?: Pick<DashboardApiClient, 'getArtifact'>
+  readonly workArtifacts?: readonly ArtifactLookupItem[]
 }
 
 interface MetadataRow {
@@ -123,8 +129,8 @@ function StoredMetadata({ metadata }: { readonly metadata: Readonly<Record<strin
 
 function ArtifactMetadata({ artifact }: { readonly artifact: ArtifactDetail }) {
   return (
-    <section aria-labelledby="artifact-viewer-artifact-metadata" className="artifact-viewer__section">
-      <h3 id="artifact-viewer-artifact-metadata">산출물 메타데이터</h3>
+    <section aria-labelledby="artifact-viewer-artifact-metadata" className="artifact-viewer__metadata-section">
+      <h4 id="artifact-viewer-artifact-metadata">산출물 메타데이터</h4>
       <MetadataList
         rows={[
           { label: 'Type', value: artifact.artifactType },
@@ -144,8 +150,8 @@ function ArtifactMetadata({ artifact }: { readonly artifact: ArtifactDetail }) {
 
 function SourceMetadata({ artifact }: { readonly artifact: ArtifactDetail }) {
   return (
-    <section aria-labelledby="artifact-viewer-source-metadata" className="artifact-viewer__section">
-      <h3 id="artifact-viewer-source-metadata">원본 메타데이터</h3>
+    <section aria-labelledby="artifact-viewer-source-metadata" className="artifact-viewer__metadata-section">
+      <h4 id="artifact-viewer-source-metadata">원본 메타데이터</h4>
       <MetadataList
         rows={[
           { label: 'Source project ID', value: artifact.source.sourceProjectId },
@@ -166,8 +172,8 @@ function SourceMetadata({ artifact }: { readonly artifact: ArtifactDetail }) {
 function LineageMetadata({ artifact }: { readonly artifact: ArtifactDetail }) {
   const { lineage } = artifact
   return (
-    <section aria-labelledby="artifact-viewer-lineage-metadata" className="artifact-viewer__section">
-      <h3 id="artifact-viewer-lineage-metadata">계보 메타데이터</h3>
+    <section aria-labelledby="artifact-viewer-lineage-metadata" className="artifact-viewer__metadata-section">
+      <h4 id="artifact-viewer-lineage-metadata">계보 메타데이터</h4>
       <MetadataList
         rows={[
           { label: 'Project ID', value: lineage.projectId },
@@ -198,6 +204,164 @@ function LineageMetadata({ artifact }: { readonly artifact: ArtifactDetail }) {
   )
 }
 
+function ReaderMetadata({ artifact }: { readonly artifact: ArtifactDetail }) {
+  return (
+    <section aria-labelledby="artifact-viewer-metadata" className="artifact-viewer__section">
+      <h3 id="artifact-viewer-metadata">메타데이터</h3>
+      <div className="artifact-viewer__metadata-sections">
+        <ArtifactMetadata artifact={artifact} />
+        <SourceMetadata artifact={artifact} />
+        <LineageMetadata artifact={artifact} />
+      </div>
+    </section>
+  )
+}
+
+interface ReaderSummaryProps {
+  readonly artifact: ArtifactDetail
+  readonly markdownViewModel: MarkdownViewModel | null
+  readonly taskGraphInfo: TaskGraphDerivedInfo | null
+}
+
+function ReaderSummary({ artifact, markdownViewModel, taskGraphInfo }: ReaderSummaryProps) {
+  return (
+    <section aria-labelledby="artifact-viewer-summary" className="artifact-viewer__section">
+      <h3 id="artifact-viewer-summary">요약</h3>
+      {markdownViewModel !== null ? <MarkdownSummary model={markdownViewModel} /> : null}
+      {taskGraphInfo !== null ? <TaskGraphSummary info={taskGraphInfo} /> : null}
+      {markdownViewModel === null && taskGraphInfo === null ? (
+        <p className="artifact-viewer__empty" role="status">
+          {artifact.mediaType} 원문에서는 파생 요약을 제공하지 않습니다. 원문 내용은 그대로 유지됩니다.
+        </p>
+      ) : null}
+    </section>
+  )
+}
+
+function MarkdownSummary({ model }: { readonly model: MarkdownViewModel }) {
+  if (model.derivation.status === 'unavailable') {
+    return (
+      <p className="artifact-viewer__empty" role="status">
+        Markdown 요약을 만들 수 없습니다 ({model.derivation.reasons.join(', ')}). 원문은 내용 영역에서 확인할 수 있습니다.
+      </p>
+    )
+  }
+
+  if (model.summary === null) {
+    return <p className="artifact-viewer__empty" role="status">표시할 Markdown 요약이 없습니다. 원문은 내용 영역에서 확인할 수 있습니다.</p>
+  }
+
+  return (
+    <>
+      {model.derivation.status === 'partial' ? (
+        <p className="artifact-viewer__notice" role="status">
+          일부 원문만 바탕으로 요약했습니다 ({model.derivation.reasons.join(', ')}).
+        </p>
+      ) : null}
+      <dl className="artifact-viewer__summary-list">
+        <div>
+          <dt>문서 제목</dt>
+          <dd>{model.summary.title ?? '—'}</dd>
+        </div>
+        <div>
+          <dt>요약</dt>
+          <dd>{model.summary.excerpt ?? '—'}</dd>
+        </div>
+      </dl>
+    </>
+  )
+}
+
+function TaskGraphSummary({ info }: { readonly info: TaskGraphDerivedInfo }) {
+  if (info.availability === 'unavailable') {
+    return (
+      <p className="artifact-viewer__empty" role="status">
+        작업 그래프 요약을 만들 수 없습니다 ({info.reason}). 원문은 내용 영역에서 확인할 수 있습니다.
+      </p>
+    )
+  }
+
+  const statusCounts = info.summary.statusCounts.length === 0
+    ? '저장된 작업 상태가 없습니다.'
+    : info.summary.statusCounts.map(({ count, status }) => `${status}: ${count}`).join(', ')
+
+  return (
+    <dl className="artifact-viewer__summary-list">
+      <div>
+        <dt>작업 수</dt>
+        <dd>{info.summary.taskCount}</dd>
+      </div>
+      <div>
+        <dt>의존성 수</dt>
+        <dd>{info.summary.dependencyCount}</dd>
+      </div>
+      <div>
+        <dt>상태</dt>
+        <dd>{statusCounts}</dd>
+      </div>
+      <div>
+        <dt>현재 작업</dt>
+        <dd>{info.summary.currentTaskId ?? '—'}</dd>
+      </div>
+    </dl>
+  )
+}
+
+function DocumentOutline({ model }: { readonly model: MarkdownViewModel }) {
+  return (
+    <section aria-labelledby="artifact-viewer-outline" className="artifact-viewer__section">
+      <h3 id="artifact-viewer-outline">목차</h3>
+      {model.derivation.status === 'unavailable' ? (
+        <p className="artifact-viewer__empty" role="status">
+          목차를 만들 수 없습니다 ({model.derivation.reasons.join(', ')}). 원문은 내용 영역에서 확인할 수 있습니다.
+        </p>
+      ) : model.outline.length === 0 ? (
+        <p className="artifact-viewer__empty" role="status">표시할 Markdown heading이 없습니다.</p>
+      ) : (
+        <nav aria-label="문서 목차">
+          <ol className="artifact-viewer__outline-list">
+            {model.outline.map((entry) => (
+              <li key={entry.fragmentId}>
+                <a href={`#${entry.fragmentId}`}>{entry.label || '제목 없음'}</a>
+              </li>
+            ))}
+          </ol>
+        </nav>
+      )}
+      {model.derivation.status === 'partial' ? (
+        <p className="artifact-viewer__notice" role="status">
+          일부 원문에서 만든 목차입니다 ({model.derivation.reasons.join(', ')}).
+        </p>
+      ) : null}
+    </section>
+  )
+}
+
+function LinkedWork({ lineageWork }: { readonly lineageWork: LineageWorkDerivation }) {
+  return (
+    <section aria-labelledby="artifact-viewer-linked-work" className="artifact-viewer__section">
+      <h3 id="artifact-viewer-linked-work">연결된 작업</h3>
+      {lineageWork.availability === 'unavailable' ? (
+        <p className="artifact-viewer__empty" role="status">
+          확인된 계보만 연결합니다. 연결된 작업을 확인할 수 없습니다 ({lineageWork.reason}).
+        </p>
+      ) : lineageWork.linkedWork.length === 0 ? (
+        <p className="artifact-viewer__empty" role="status">확인된 계보에 연결된 task 또는 run이 없습니다.</p>
+      ) : (
+        <ul className="artifact-viewer__linked-work-list">
+          {lineageWork.linkedWork.map((work) => (
+            <li key={`${work.identity.artifactType}:${work.identity.artifactId}`}>
+              {work.href === undefined ? <span>{work.label}</span> : <a href={work.href}>{work.label}</a>}
+              <span>{work.status}</span>
+              <span>{work.relation}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
 function ViewerErrorState({ description, title }: ArtifactViewerError) {
   return (
     <section className="artifact-viewer__state" role="alert">
@@ -216,7 +380,17 @@ function ViewerLoadingState() {
   )
 }
 
-export function ArtifactViewer({ artifactId: artifactIdInput, artifactType: artifactTypeInput, client = dashboardApi }: ArtifactViewerProps) {
+function storedArtifactStatus(artifact: ArtifactDetail): string {
+  const status = artifact.metadata.status?.trim()
+  return status === undefined || status.length === 0 ? 'unknown' : status
+}
+
+export function ArtifactViewer({
+  artifactId: artifactIdInput,
+  artifactType: artifactTypeInput,
+  client = dashboardApi,
+  workArtifacts = [],
+}: ArtifactViewerProps) {
   const artifactId = artifactIdInput.trim()
   const artifactType = artifactTypeInput.trim()
   const supportedArtifactType = isSupportedArtifactType(artifactType) ? artifactType : null
@@ -272,17 +446,40 @@ export function ArtifactViewer({ artifactId: artifactIdInput, artifactType: arti
   }
 
   const { artifact } = state
+  const markdownViewModel = isMarkdownMediaType(artifact.mediaType)
+    ? createMarkdownViewModel(artifact.rawContent)
+    : null
+  const taskGraphInfo = artifact.artifactType === 'TASK_GRAPH'
+    ? summarizeTaskGraphContent(artifact.rawContent)
+    : null
+  const lineageWork = deriveLineageWork({ artifact, workArtifacts })
+
   return (
     <article aria-labelledby="artifact-viewer-title" className="artifact-viewer">
       <header className="artifact-viewer__header">
         <p className="artifact-viewer__type">{artifact.artifactType}</p>
         <h2 id="artifact-viewer-title">{artifact.title}</h2>
         <p className="artifact-viewer__identifier">{artifact.artifactId}</p>
+        <dl className="artifact-viewer__identity-list">
+          <div>
+            <dt>원본 경로</dt>
+            <dd>{artifact.source.sourcePath ?? '—'}</dd>
+          </div>
+          <div>
+            <dt>상태</dt>
+            <dd>{storedArtifactStatus(artifact)}</dd>
+          </div>
+        </dl>
       </header>
-      <ArtifactMetadata artifact={artifact} />
-      <SourceMetadata artifact={artifact} />
-      <LineageMetadata artifact={artifact} />
-      <ArtifactContent mediaType={artifact.mediaType} rawContent={artifact.rawContent} />
+      <ReaderSummary artifact={artifact} markdownViewModel={markdownViewModel} taskGraphInfo={taskGraphInfo} />
+      {markdownViewModel === null ? null : <DocumentOutline model={markdownViewModel} />}
+      <ArtifactContent
+        markdownOutline={markdownViewModel?.outline}
+        mediaType={artifact.mediaType}
+        rawContent={artifact.rawContent}
+      />
+      <LinkedWork lineageWork={lineageWork} />
+      <ReaderMetadata artifact={artifact} />
     </article>
   )
 }

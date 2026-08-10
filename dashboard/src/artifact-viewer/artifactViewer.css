@@ -35,8 +35,35 @@
 
 .artifact-viewer__identifier,
 .artifact-viewer__content,
-.artifact-viewer__references span {
+.artifact-viewer__references span,
+.artifact-viewer__identity-list dd {
   font-family: var(--font-family-mono);
+  overflow-wrap: anywhere;
+}
+
+.artifact-viewer__identity-list,
+.artifact-viewer__summary-list {
+  display: grid;
+  gap: var(--spacing-2);
+  margin: 0;
+}
+
+.artifact-viewer__identity-list > div,
+.artifact-viewer__summary-list > div {
+  display: grid;
+  gap: var(--spacing-1);
+}
+
+.artifact-viewer__identity-list dt,
+.artifact-viewer__summary-list dt {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+}
+
+.artifact-viewer__identity-list dd,
+.artifact-viewer__summary-list dd {
+  margin: 0;
   overflow-wrap: anywhere;
 }
 
@@ -62,6 +89,17 @@
   overflow-wrap: anywhere;
 }
 
+.artifact-viewer__metadata-sections,
+.artifact-viewer__metadata-section {
+  display: grid;
+  gap: var(--spacing-3);
+}
+
+.artifact-viewer__metadata-section + .artifact-viewer__metadata-section {
+  border-top: 1px solid var(--color-border-subtle);
+  padding-top: var(--spacing-4);
+}
+
 .artifact-viewer__references {
   display: grid;
   gap: var(--spacing-2);
@@ -72,6 +110,24 @@
 .artifact-viewer__references li {
   display: grid;
   gap: var(--spacing-1);
+}
+
+.artifact-viewer__outline-list,
+.artifact-viewer__linked-work-list {
+  display: grid;
+  gap: var(--spacing-2);
+  margin: 0;
+  padding-inline-start: var(--spacing-5);
+}
+
+.artifact-viewer__linked-work-list li {
+  display: grid;
+  gap: var(--spacing-1);
+}
+
+.artifact-viewer__linked-work-list span {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
 }
 
 .artifact-viewer__tabs {
@@ -98,6 +154,23 @@
 
 .artifact-viewer__tab-panel {
   min-width: 0;
+}
+
+.artifact-viewer__content-window {
+  border: 1px solid var(--color-border-subtle);
+  display: grid;
+  gap: var(--spacing-2);
+  padding: var(--spacing-3);
+}
+
+.artifact-viewer__content-window p {
+  margin: 0;
+}
+
+.artifact-viewer__content-window > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-2);
 }
 
 .artifact-viewer__content {
