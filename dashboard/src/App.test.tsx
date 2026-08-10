@@ -29,6 +29,20 @@ describe('App', () => {
     expect(screen.getByRole('link', { name: '본문으로 건너뛰기' }).getAttribute('href')).toBe('#main-content')
   })
 
+  it('keeps the approved wide-workbench regions and Gate progress in the shell', () => {
+    render(<App />)
+
+    const gateProgress = screen.getByRole('navigation', { name: 'Gate 진행 상태' })
+    expect(gateProgress).toBeTruthy()
+    expect(within(gateProgress).getByText('Task graph').closest('li')?.getAttribute('aria-current')).toBe('step')
+    expect(screen.getByTestId('dashboard-workbench')).toBeTruthy()
+    expect(screen.getByTestId('workbench-library')).toBeTruthy()
+    expect(screen.getByTestId('workbench-content')).toBeTruthy()
+    expect(screen.getByTestId('workbench-context')).toBeTruthy()
+    expect(screen.getByRole('complementary', { name: '문서 탐색' })).toBeTruthy()
+    expect(screen.getByRole('complementary', { name: '실행 맥락' })).toBeTruthy()
+  })
+
   it('keeps route navigation keyboard focusable and opens the search slot', () => {
     render(<App />)
 

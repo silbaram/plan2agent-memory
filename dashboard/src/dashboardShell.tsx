@@ -38,6 +38,14 @@ const navigationItems: readonly NavigationItem[] = [
   { href: '/trace', label: '추적' },
 ]
 
+const gateProgress: readonly { readonly label: string; readonly state: 'complete' | 'current' | 'upcoming' }[] = [
+  { label: 'Intake', state: 'complete' },
+  { label: '제품 명세', state: 'complete' },
+  { label: '구현 계획', state: 'complete' },
+  { label: 'Task graph', state: 'current' },
+  { label: '실행 검토', state: 'upcoming' },
+]
+
 function isCurrentNavigationRoute(pathname: string, href: string) {
   if (href === '/browse') {
     return pathname === '/' || pathname === href
@@ -68,6 +76,7 @@ function DashboardNavigation() {
   return (
     <SideNav
       aria-label="주요 탐색"
+      className="dashboard-rail"
       footer={
         <Text as="p" color="primary" type="supporting">
           서버 데이터를 변경하지 않는 읽기 전용 화면입니다.
@@ -95,9 +104,66 @@ function DashboardNavigation() {
   )
 }
 
+function GateProgressStrip() {
+  return (
+    <nav aria-label="Gate 진행 상태" className="gate-progress-strip">
+      <ol>
+        {gateProgress.map((gate, index) => (
+          <li aria-current={gate.state === 'current' ? 'step' : undefined} data-state={gate.state} key={gate.label}>
+            <span>G{index + 1}</span>
+            <strong>{gate.label}</strong>
+            <small>{gate.state === 'complete' ? '확인됨' : gate.state === 'current' ? '진행 중' : '대기'}</small>
+          </li>
+        ))}
+      </ol>
+    </nav>
+  )
+}
+
+function WorkbenchFrame() {
+  return (
+    <div className="dashboard-workbench" data-testid="dashboard-workbench">
+      <aside aria-label="문서 탐색" className="dashboard-workbench__pane dashboard-workbench__pane--library" data-testid="workbench-library">
+        <div className="dashboard-workbench__pane-heading">
+          <p>문서 탐색</p>
+          <span>우선순위</span>
+        </div>
+        <div className="dashboard-workbench__placeholder">
+          <strong>핵심 P2A 문서</strong>
+          <p>선택한 프로젝트와 이터레이션의 문서가 이 영역에서 먼저 정리됩니다.</p>
+        </div>
+      </aside>
+      <div className="dashboard-workbench__content" data-testid="workbench-content">
+        <Outlet />
+      </div>
+      <aside aria-label="실행 맥락" className="dashboard-workbench__pane dashboard-workbench__pane--context" data-testid="workbench-context">
+        <div className="dashboard-workbench__pane-heading">
+          <p>실행 맥락</p>
+          <span>읽기 전용</span>
+        </div>
+        <dl className="dashboard-workbench__context-list">
+          <div>
+            <dt>현재 단계</dt>
+            <dd>Task graph</dd>
+          </div>
+          <div>
+            <dt>다음 정보</dt>
+            <dd>선택 문서의 연결 작업</dd>
+          </div>
+          <div>
+            <dt>상태</dt>
+            <dd>로컬 · 변경 없음</dd>
+          </div>
+        </dl>
+      </aside>
+    </div>
+  )
+}
+
 export function DashboardShell() {
   return (
     <AppShell
+      className="dashboard-shell"
       contentPadding={0}
       height="auto"
       mobileNav={{ breakpoint: 'md' }}
@@ -105,17 +171,24 @@ export function DashboardShell() {
       topNav={
         <TopNav
           endContent={
-            <Text color="primary" type="supporting">
-              읽기 전용
-            </Text>
+            <span className="dashboard-topbar__status">
+              <span aria-hidden="true" className="dashboard-topbar__status-dot" />
+              local · 읽기 전용
+            </span>
           }
           heading={<TopNavHeading heading="Plan2Agent Memory" headingHref="/browse" />}
           label="대시보드 탐색"
+          startContent={
+            <span className="dashboard-topbar__scope">
+              현재 작업공간 <span>Plan2Agent / Memory</span>
+            </span>
+          }
         />
       }
       variant="elevated"
     >
-      <Outlet />
+      <GateProgressStrip />
+      <WorkbenchFrame />
     </AppShell>
   )
 }
