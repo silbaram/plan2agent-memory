@@ -4,7 +4,7 @@ import { SideNav, SideNavHeading, SideNavItem, SideNavSection } from '@astryxdes
 import { Text } from '@astryxdesign/core/Text'
 import { TopNav, TopNavHeading } from '@astryxdesign/core/TopNav'
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
-import { useCallback, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useState, type ReactNode } from 'react'
 import { Outlet, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { ArtifactTree, type ArtifactTreeSelection } from './artifact-tree'
 import {
@@ -62,6 +62,19 @@ interface BrowseExecutionContextProps {
   readonly workArtifacts: readonly ArtifactLookupItem[]
 }
 
+interface WorkbenchContextPaneProps {
+  readonly children: ReactNode
+}
+
+interface ContextDisclosureState {
+  readonly isCompact: boolean
+  readonly isExpanded: boolean
+}
+
+type ContextDisclosureAction =
+  | { readonly type: 'media-change'; readonly isCompact: boolean }
+  | { readonly type: 'toggle' }
+
 const navigationItems: readonly NavigationItem[] = [
   { href: '/browse', label: '탐색' },
   { href: '/search', label: '검색' },
@@ -83,6 +96,7 @@ const disabledBrowseScope: PriorityDocumentLookupScope = {
 }
 
 const BROWSE_CURRENT_PAGE_LIMIT = 50
+const compactWorkbenchMediaQuery = '(max-width: 70rem)'
 
 const browseArtifactTypes: readonly DashboardArtifactType[] = [
   'DOCUMENT_SNAPSHOT',
@@ -180,6 +194,49 @@ function isBrowseRoute(pathname: string) {
   return pathname === '/' || pathname === '/browse'
 }
 
+function mediaQueryMatches(query: string) {
+  return typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia(query).matches
+}
+
+function createContextDisclosureState(): ContextDisclosureState {
+  const isCompact = mediaQueryMatches(compactWorkbenchMediaQuery)
+  return { isCompact, isExpanded: !isCompact }
+}
+
+function reduceContextDisclosure(state: ContextDisclosureState, action: ContextDisclosureAction): ContextDisclosureState {
+  if (action.type === 'media-change') {
+    return {
+      isCompact: action.isCompact,
+      isExpanded: !action.isCompact,
+    }
+  }
+
+  return { ...state, isExpanded: !state.isExpanded }
+}
+
+function useContextDisclosure() {
+  const [state, dispatch] = useReducer(reduceContextDisclosure, undefined, createContextDisclosureState)
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+      return undefined
+    }
+
+    const mediaQuery = window.matchMedia(compactWorkbenchMediaQuery)
+    const updateDisclosure = (event: MediaQueryListEvent) => {
+      dispatch({ isCompact: event.matches, type: 'media-change' })
+    }
+
+    mediaQuery.addEventListener('change', updateDisclosure)
+
+    return () => {
+      mediaQuery.removeEventListener('change', updateDisclosure)
+    }
+  }, [])
+
+  return { state, toggle: () => dispatch({ type: 'toggle' }) }
+}
+
 function WorkbenchFrame() {
   const location = useLocation()
 
@@ -206,11 +263,7 @@ function StaticWorkbenchPanels() {
       <div className="dashboard-workbench__content" data-testid="workbench-content">
         <Outlet />
       </div>
-      <aside aria-label="실행 맥락" className="dashboard-workbench__pane dashboard-workbench__pane--context" data-testid="workbench-context">
-        <div className="dashboard-workbench__pane-heading">
-          <p>실행 맥락</p>
-          <span>읽기 전용</span>
-        </div>
+      <WorkbenchContextPane>
         <dl className="dashboard-workbench__context-list">
           <div>
             <dt>현재 단계</dt>
@@ -225,8 +278,41 @@ function StaticWorkbenchPanels() {
             <dd>로컬 · 변경 없음</dd>
           </div>
         </dl>
-      </aside>
+      </WorkbenchContextPane>
     </>
+  )
+}
+
+function WorkbenchContextPane({ children }: WorkbenchContextPaneProps) {
+  const { state, toggle } = useContextDisclosure()
+  const isCollapsed = state.isCompact && !state.isExpanded
+
+  return (
+    <aside
+      aria-label="실행 맥락"
+      className="dashboard-workbench__pane dashboard-workbench__pane--context"
+      data-context-layout={state.isCompact ? 'disclosure' : 'panel'}
+      data-testid="workbench-context"
+    >
+      <div className="dashboard-workbench__pane-heading dashboard-workbench__pane-heading--context">
+        <p>실행 맥락</p>
+        <span>읽기 전용</span>
+        {state.isCompact ? (
+          <button
+            aria-controls="workbench-context-content"
+            aria-expanded={state.isExpanded}
+            className="dashboard-workbench__context-toggle"
+            onClick={toggle}
+            type="button"
+          >
+            {state.isExpanded ? '맥락 접기' : '맥락 펼치기'}
+          </button>
+        ) : null}
+      </div>
+      <div className="dashboard-workbench__context-content" hidden={isCollapsed} id="workbench-context-content">
+        {children}
+      </div>
+    </aside>
   )
 }
 
@@ -378,18 +464,14 @@ function BrowseWorkbench({ apiClient }: { readonly apiClient: DashboardApiClient
           )}
         </RouteSlot>
       </div>
-      <aside aria-label="실행 맥락" className="dashboard-workbench__pane dashboard-workbench__pane--context" data-testid="workbench-context">
-        <div className="dashboard-workbench__pane-heading">
-          <p>실행 맥락</p>
-          <span>읽기 전용</span>
-        </div>
+      <WorkbenchContextPane>
         <BrowseExecutionContext
           artifact={visibleArtifact}
           classification={classification}
           selectedArtifact={selectedArtifact}
           workArtifacts={workArtifacts}
         />
-      </aside>
+      </WorkbenchContextPane>
     </>
   )
 }

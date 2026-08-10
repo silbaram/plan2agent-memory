@@ -43,6 +43,54 @@ describe('App', () => {
     expect(screen.getByRole('complementary', { name: '실행 맥락' })).toBeTruthy()
   })
 
+  it('uses a progressive context disclosure below the wide workbench without changing route state', () => {
+    const defaultMatchMedia = window.matchMedia
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: (query: string) => ({
+        addEventListener: () => {},
+        addListener: () => {},
+        dispatchEvent: () => false,
+        matches: query === '(max-width: 70rem)',
+        media: query,
+        onchange: null,
+        removeEventListener: () => {},
+        removeListener: () => {},
+      }),
+      writable: true,
+    })
+    setLocation('/browse?projectId=project-1&iterationId=iteration-1&cursor=page-2')
+
+    try {
+      render(<App />)
+
+      const workbench = screen.getByTestId('dashboard-workbench')
+      expect(Array.from(workbench.children).map((child) => child.getAttribute('data-testid'))).toEqual([
+        'workbench-library',
+        'workbench-content',
+        'workbench-context',
+      ])
+
+      const context = screen.getByTestId('workbench-context')
+      const toggle = screen.getByRole('button', { name: '맥락 펼치기' })
+      expect(context.getAttribute('data-context-layout')).toBe('disclosure')
+      expect(toggle.getAttribute('aria-expanded')).toBe('false')
+      expect(document.getElementById('workbench-context-content')?.hidden).toBe(true)
+
+      fireEvent.click(toggle)
+
+      expect(screen.getByRole('button', { name: '맥락 접기' }).getAttribute('aria-expanded')).toBe('true')
+      expect(document.getElementById('workbench-context-content')?.hidden).toBe(false)
+      expect(window.location.search).toBe('?projectId=project-1&iterationId=iteration-1&cursor=page-2')
+    } finally {
+      Object.defineProperty(window, 'matchMedia', {
+        configurable: true,
+        value: defaultMatchMedia,
+        writable: true,
+      })
+    }
+  })
+
   it('keeps route navigation keyboard focusable and opens the search slot', () => {
     render(<App />)
 
