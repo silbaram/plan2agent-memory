@@ -38,6 +38,7 @@ export interface ArtifactTreeSelection {
   readonly artifactType: DashboardArtifactType
   readonly iterationId: string | null
   readonly projectId: string
+  readonly sourceIterationId: string | null
 }
 
 export interface ArtifactTreeProps {
@@ -461,6 +462,7 @@ function IterationArtifacts({
             artifactType: artifact.artifactType,
             iterationId: artifact.iterationId,
             projectId: artifact.projectId,
+            sourceIterationId: iteration.sourceIterationId,
           }
           const isSelected = selectionsMatch(selectedArtifact, nextSelection)
 

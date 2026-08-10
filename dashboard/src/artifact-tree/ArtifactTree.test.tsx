@@ -192,6 +192,7 @@ describe('ArtifactTree', () => {
       artifactType: 'TASK',
       iterationId,
       projectId,
+      sourceIterationId: `source-${iterationId}`,
     }])
 
     fireEvent.keyDown(artifactItem, { key: 'ArrowLeft' })

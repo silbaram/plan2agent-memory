@@ -19,6 +19,7 @@ export interface ArtifactViewerProps {
   readonly artifactId: string
   readonly artifactType: string
   readonly client?: Pick<DashboardApiClient, 'getArtifact'>
+  readonly onArtifactLoad?: (artifact: ArtifactDetail | null) => void
   readonly workArtifacts?: readonly ArtifactLookupItem[]
 }
 
@@ -389,6 +390,7 @@ export function ArtifactViewer({
   artifactId: artifactIdInput,
   artifactType: artifactTypeInput,
   client = dashboardApi,
+  onArtifactLoad,
   workArtifacts = [],
 }: ArtifactViewerProps) {
   const artifactId = artifactIdInput.trim()
@@ -399,10 +401,12 @@ export function ArtifactViewer({
 
   useEffect(() => {
     if (supportedArtifactType === null || artifactId.length === 0) {
+      onArtifactLoad?.(null)
       return undefined
     }
 
     const abortController = new AbortController()
+    onArtifactLoad?.(null)
     void client.getArtifact(
       { artifactId, artifactType: supportedArtifactType },
       { signal: abortController.signal },
@@ -410,6 +414,7 @@ export function ArtifactViewer({
       (artifact) => {
         if (!abortController.signal.aborted) {
           setState({ artifact, requestKey, status: 'success' })
+          onArtifactLoad?.(artifact)
         }
       },
       (error: unknown) => {
@@ -420,7 +425,7 @@ export function ArtifactViewer({
     )
 
     return () => abortController.abort()
-  }, [artifactId, client, requestKey, supportedArtifactType])
+  }, [artifactId, client, onArtifactLoad, requestKey, supportedArtifactType])
 
   if (supportedArtifactType === null) {
     return (

@@ -158,6 +158,7 @@ describe('App', () => {
 
     expect(window.location.search).toContain('selectedArtifactType=TASK')
     expect(window.location.search).toContain('selectedArtifactId=task-1')
+    expect(window.location.search).toContain('sourceIterationId=source-iteration-1')
     expect(screen.getByRole('treeitem', { current: true, name: '작업 Gate D 승인' })).toBeTruthy()
 
     browse.unmount()
@@ -171,7 +172,10 @@ describe('App', () => {
     )
 
     expect(await screen.findByRole('heading', { name: 'Gate D 승인' })).toBeTruthy()
-    expect(selections).toEqual([{ artifactId: 'task-1', artifactType: 'TASK' }])
+    expect(selections).toEqual([
+      { artifactId: 'task-1', artifactType: 'TASK' },
+      { artifactId: 'task-1', artifactType: 'TASK' },
+    ])
   })
 })
 
