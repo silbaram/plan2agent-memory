@@ -2,30 +2,16 @@
 
 This repository owns its Plan2Agent planning and development loop in-place.
 
-## Start a greenfield plan
+## Start or resume work
 
-1. Open Claude Code, Codex, or Gemini in this directory and run:
+Use one state-based entry point whenever you begin or finish a Plan2Agent action:
 
-   `/p2a-harness "<one sentence idea>"`
+- Terminal: `node .plan2agent/scripts/p2a.mjs next`
+- Claude Code, Codex, or Gemini agent session: `/p2a-next`
 
-   Planning Gates A-D write artifacts under `.plan2agent/artifacts/<project>/gate-*`.
+The result provides exactly one next action and its reason. Continue a returned skill in the same agent session; review and approve a returned CLI or approval action before running it. After that action is complete, run `next` again.
 
-2. Convert approved planning artifacts into the iteration structure:
-
-   `node .plan2agent/scripts/p2a.mjs iteration init --artifacts .plan2agent/artifacts/<project>`
-
-3. Develop from ready tasks and track execution:
-
-   - `node .plan2agent/scripts/p2a.mjs info`
-   - `node .plan2agent/scripts/p2a.mjs execute plan|start|finish|status`
-   - `node .plan2agent/scripts/p2a.mjs orchestrate plan|handoff`
-   - `node .plan2agent/scripts/p2a.mjs proposals mine|review|curate|draft-patch|approve-draft|digest`
-   - `node .plan2agent/scripts/p2a.mjs tasks ready|prompt|start|done`
-   - `node .plan2agent/scripts/p2a.mjs runs start|verify|finish`
-
-4. Open the next iteration in this same project:
-
-   `node .plan2agent/scripts/p2a.mjs iteration open|draft|context|promote-tasks`
+The project constitution remains at `.plan2agent/constitution.json`. Planning Gates A-C, iteration artifacts, execution runs, and proposal records remain under `.plan2agent/artifacts/<project>/` and `.plan2agent/proposals/`. Treat individual P2A CLI commands as references: use them only when `next` returns them.
 
 ## Storage policy
 
