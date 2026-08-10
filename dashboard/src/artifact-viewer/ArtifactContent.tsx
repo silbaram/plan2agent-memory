@@ -176,15 +176,18 @@ function markdownComponentsFor(rawContent: string, outline: readonly MarkdownOut
     const line = node?.position?.start.line
     return line === undefined ? undefined : fragmentIdsByLine.get(line)
   }
+  const EmbeddedHeading = ({ node, ...props }: ComponentPropsWithoutRef<'h1'> & ExtraProps) => (
+    <h4 {...props} id={fragmentIdForNode(node)} />
+  )
 
   return {
     a: SafeMarkdownLink,
-    h1: ({ node, ...props }) => <h1 {...props} id={fragmentIdForNode(node)} />,
-    h2: ({ node, ...props }) => <h2 {...props} id={fragmentIdForNode(node)} />,
-    h3: ({ node, ...props }) => <h3 {...props} id={fragmentIdForNode(node)} />,
-    h4: ({ node, ...props }) => <h4 {...props} id={fragmentIdForNode(node)} />,
-    h5: ({ node, ...props }) => <h5 {...props} id={fragmentIdForNode(node)} />,
-    h6: ({ node, ...props }) => <h6 {...props} id={fragmentIdForNode(node)} />,
+    h1: EmbeddedHeading,
+    h2: EmbeddedHeading,
+    h3: EmbeddedHeading,
+    h4: EmbeddedHeading,
+    h5: EmbeddedHeading,
+    h6: EmbeddedHeading,
     img: BlockedMarkdownImage,
   }
 }

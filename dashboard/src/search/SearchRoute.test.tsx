@@ -100,7 +100,11 @@ describe('SearchRoute', () => {
 
     expect(screen.getByRole('status', { name: '검색 시작 안내' }).textContent).toContain('검색어와 방식을 선택한 뒤 검색하세요')
     fireEvent.click(screen.getByRole('button', { name: '검색' }))
-    expect(screen.getByRole('alert').textContent).toContain('검색어를 입력하세요')
+    const validationAlert = screen.getByRole('alert')
+    expect(validationAlert.textContent).toContain('검색어를 입력하세요')
+    const queryInput = screen.getByLabelText('검색어')
+    expect(queryInput.getAttribute('aria-invalid')).toBe('true')
+    expect(queryInput.getAttribute('aria-describedby')).toBe(validationAlert.id)
     expect(keywordRequests).toBe(0)
 
     fireEvent.change(screen.getByLabelText('검색어'), { target: { value: 'no matching artifact' } })

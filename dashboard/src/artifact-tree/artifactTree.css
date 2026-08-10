@@ -45,7 +45,7 @@
 }
 
 .artifact-tree__type {
-  color: var(--astryx-color-text-secondary, #5f6370);
+  color: var(--workspace-text-faint);
   font-size: 0.875rem;
 }
 

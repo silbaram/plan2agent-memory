@@ -10,7 +10,15 @@ export interface DashboardApiRequest {
   readonly path: string
 }
 
-export async function mockDashboardApi(page: Page, requests: DashboardApiRequest[] = []) {
+export interface DashboardApiMockOptions {
+  readonly traceTruncated?: boolean
+}
+
+export async function mockDashboardApi(
+  page: Page,
+  requests: DashboardApiRequest[] = [],
+  options: DashboardApiMockOptions = {},
+) {
   await page.route('**/api/**', async (route) => {
     const request = route.request()
     const url = new URL(request.url())
@@ -21,13 +29,13 @@ export async function mockDashboardApi(page: Page, requests: DashboardApiRequest
     })
 
     await route.fulfill({
-      body: JSON.stringify(apiResponse(url, request.method())),
+      body: JSON.stringify(apiResponse(url, request.method(), options)),
       contentType: 'application/json; charset=utf-8',
     })
   })
 }
 
-function apiResponse(url: URL, method: string): unknown {
+function apiResponse(url: URL, method: string, options: DashboardApiMockOptions): unknown {
   if (method !== 'GET') {
     return { items: [], nextCursor: null }
   }
@@ -46,7 +54,7 @@ function apiResponse(url: URL, method: string): unknown {
     case '/api/graph/nodes':
       return [taskNodeFixture()]
     case '/api/graph/trace':
-      return traceFixture()
+      return traceFixture(options.traceTruncated)
     case '/api/health':
       return { status: 'UP', timestamp: '2026-07-26T00:00:00Z' }
     default:
@@ -207,7 +215,7 @@ function taskNodeFixture() {
   }
 }
 
-function traceFixture() {
+function traceFixture(truncated = false) {
   const root = taskNodeFixture()
   const documentNode = {
     content: null,
@@ -237,7 +245,7 @@ function traceFixture() {
       { depth: 1, node: documentNode },
     ],
     root,
-    truncated: false,
+    truncated,
   }
 }
 

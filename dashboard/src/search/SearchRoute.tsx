@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
-import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent } from 'react'
+import { useEffect, useId, useMemo, useState, type ChangeEvent, type FormEvent } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
   createDashboardQueries,
@@ -21,8 +21,10 @@ import {
   formStateFromSearchUrl,
   parseSearchUrl,
   searchUrlFromForm,
+  validationFieldsForForm,
   serializeSearchUrl,
   validationMessageForForm,
+  type SearchFormFieldName,
   type SearchFormState,
   type SearchMode,
   type SearchUrlState,
@@ -151,6 +153,12 @@ interface SearchFormProps {
 function SearchForm({ initialForm, onSearch }: SearchFormProps) {
   const [form, setForm] = useState(initialForm)
   const [validationMessage, setValidationMessage] = useState<string | null>(null)
+  const validationMessageId = useId()
+  const invalidFields = validationMessage === null ? [] : validationFieldsForForm(form)
+
+  function hasInvalidField(field: SearchFormFieldName) {
+    return invalidFields.includes(field)
+  }
 
   function updateForm(event: ChangeEvent<HTMLInputElement | HTMLSelectElement>) {
     const { name, value } = event.target
@@ -205,6 +213,8 @@ function SearchForm({ initialForm, onSearch }: SearchFormProps) {
         <div className="search-route__field search-route__field--query">
           <label htmlFor="search-q">검색어</label>
           <input
+            aria-describedby={hasInvalidField('q') ? validationMessageId : undefined}
+            aria-invalid={hasInvalidField('q') || undefined}
             autoComplete="off"
             id="search-q"
             name="q"
@@ -242,13 +252,29 @@ function SearchForm({ initialForm, onSearch }: SearchFormProps) {
         {form.scopeKind === 'all' ? null : (
           <div className="search-route__field">
             <label htmlFor="search-project-id">프로젝트 ID</label>
-            <input id="search-project-id" name="projectId" onChange={updateForm} type="text" value={form.projectId} />
+            <input
+              aria-describedby={hasInvalidField('projectId') ? validationMessageId : undefined}
+              aria-invalid={hasInvalidField('projectId') || undefined}
+              id="search-project-id"
+              name="projectId"
+              onChange={updateForm}
+              type="text"
+              value={form.projectId}
+            />
           </div>
         )}
         {form.scopeKind !== 'iteration' ? null : (
           <div className="search-route__field">
             <label htmlFor="search-iteration-id">이터레이션 ID</label>
-            <input id="search-iteration-id" name="iterationId" onChange={updateForm} type="text" value={form.iterationId} />
+            <input
+              aria-describedby={hasInvalidField('iterationId') ? validationMessageId : undefined}
+              aria-invalid={hasInvalidField('iterationId') || undefined}
+              id="search-iteration-id"
+              name="iterationId"
+              onChange={updateForm}
+              type="text"
+              value={form.iterationId}
+            />
           </div>
         )}
         {form.mode !== 'hybrid' ? null : (
@@ -256,17 +282,37 @@ function SearchForm({ initialForm, onSearch }: SearchFormProps) {
             <legend>혼합 점수 설정</legend>
             <div className="search-route__field">
               <label htmlFor="search-candidate-limit">후보 수</label>
-              <input id="search-candidate-limit" inputMode="numeric" min={SEARCH_PAGE_SIZE} name="candidateLimit" onChange={updateForm} type="number" value={form.candidateLimit} />
+              <input
+                aria-describedby={hasInvalidField('candidateLimit') ? validationMessageId : undefined}
+                aria-invalid={hasInvalidField('candidateLimit') || undefined}
+                id="search-candidate-limit"
+                inputMode="numeric"
+                min={SEARCH_PAGE_SIZE}
+                name="candidateLimit"
+                onChange={updateForm}
+                type="number"
+                value={form.candidateLimit}
+              />
             </div>
             <div className="search-route__field">
               <label htmlFor="search-rrf-k">RRF k</label>
-              <input id="search-rrf-k" inputMode="numeric" min="1" name="rrfK" onChange={updateForm} type="number" value={form.rrfK} />
+              <input
+                aria-describedby={hasInvalidField('rrfK') ? validationMessageId : undefined}
+                aria-invalid={hasInvalidField('rrfK') || undefined}
+                id="search-rrf-k"
+                inputMode="numeric"
+                min="1"
+                name="rrfK"
+                onChange={updateForm}
+                type="number"
+                value={form.rrfK}
+              />
             </div>
           </fieldset>
         )}
         <button type="submit">검색</button>
       </form>
-      {validationMessage === null ? null : <p className="search-route__validation" role="alert">{validationMessage}</p>}
+      {validationMessage === null ? null : <p className="search-route__validation" id={validationMessageId} role="alert">{validationMessage}</p>}
     </>
   )
 }

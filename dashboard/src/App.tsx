@@ -25,7 +25,7 @@ const DashboardRouterLink = forwardRef<HTMLAnchorElement, DashboardRouterLinkPro
 
 export function App() {
   return (
-    <Theme theme={neutralTheme}>
+    <Theme mode="dark" theme={neutralTheme}>
       <BrowserRouter>
         <LinkProvider component={DashboardRouterLink}>
           <a className="skip-link" href="#main-content">

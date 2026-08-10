@@ -159,7 +159,7 @@ describe('ArtifactViewer', () => {
     expect(linkedWork.compareDocumentPosition(metadata) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
 
     const tocLink = screen.getByRole('link', { name: '배포 순서' })
-    const renderedHeading = screen.getByRole('heading', { level: 2, name: '배포 순서' })
+    const renderedHeading = screen.getByRole('heading', { level: 4, name: '배포 순서' })
     expect(tocLink.getAttribute('href')).toBe(`#${renderedHeading.id}`)
     expect(renderedHeading.id).toBe('배포-순서')
     expect(screen.getByRole('heading', { name: '연결된 작업' }).parentElement?.textContent).toContain('dangling_lineage')
@@ -280,7 +280,7 @@ describe('ArtifactViewer', () => {
 
     const { container } = render(<ArtifactViewer artifactId={artifactId} artifactType="TASK" client={client} />)
 
-    expect(await screen.findByRole('heading', { level: 1, name: '안전한 결정' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { level: 4, name: '안전한 결정' })).toBeTruthy()
     expect(screen.getByRole('link', { name: '안전한 링크' }).getAttribute('href')).toBe('https://example.com/decision')
     expect(screen.getByRole('link', { name: '앵커 링크' }).getAttribute('href')).toBe('#metadata')
     expect(screen.queryByRole('link', { name: '메일 링크' })).toBeNull()
