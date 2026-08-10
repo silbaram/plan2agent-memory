@@ -27,6 +27,12 @@ import {
   type SearchMode,
   type SearchUrlState,
 } from './searchUrlState'
+import {
+  approvalStatusLabel,
+  groupCurrentSearchResults,
+  type GroupedSearchResult,
+  type PrioritySearchDocument,
+} from './searchPresentation'
 import './search.css'
 
 type SearchItem = KeywordSearchItem | SemanticSearchItem | HybridSearchItem
@@ -326,20 +332,65 @@ function SearchResults({ error, isLoading, mode, onNextPage, page, pageData, q }
     return <section aria-label="검색 결과 없음" className="search-route__state" role="status">일치하는 검색 결과가 없습니다.</section>
   }
 
+  const groupedResults = groupCurrentSearchResults(pageData.items)
+
   return (
     <section aria-label="검색 결과" className="search-route__results">
       <header className="search-route__results-header">
         <h2>검색 결과</h2>
         <p>페이지 {page}</p>
       </header>
-      <ol className="search-route__result-list">
-        {pageData.items.map((item, index) => (
-          <SearchResultCard item={item} key={searchItemKey(item, index)} mode={mode} />
-        ))}
-      </ol>
+      {groupedResults.priorityResults.length === 0 ? null : (
+        <SearchResultGroup
+          description="현재 페이지에서 핵심 P2A 문서로 식별된 결과입니다. 이 목록 안의 서버 순서를 유지합니다."
+          heading="핵심 P2A 문서"
+          mode={mode}
+          results={groupedResults.priorityResults}
+        />
+      )}
+      <SearchResultGroup
+        description={groupedResults.priorityResults.length === 0
+          ? '현재 페이지에서 핵심 P2A 문서를 찾지 못했습니다. 서버가 반환한 순서를 유지합니다.'
+          : '현재 페이지의 나머지 결과입니다. 이 목록 안의 서버 순서를 유지합니다.'}
+        heading="관련 산출물"
+        mode={mode}
+        results={groupedResults.supportingResults}
+      />
       {pageData.nextCursor === null ? null : (
         <button onClick={onNextPage} type="button">다음 페이지</button>
       )}
+    </section>
+  )
+}
+
+interface SearchResultGroupProps {
+  readonly description: string
+  readonly heading: string
+  readonly mode: SearchMode
+  readonly results: readonly GroupedSearchResult<SearchItem>[]
+}
+
+function SearchResultGroup({ description, heading, mode, results }: SearchResultGroupProps) {
+  const headingId = heading === '핵심 P2A 문서'
+    ? 'priority-search-results'
+    : 'supporting-search-results'
+
+  return (
+    <section aria-labelledby={headingId} className="search-route__result-group">
+      <header className="search-route__result-group-header">
+        <h3 id={headingId}>{heading}</h3>
+        <p>{description}</p>
+      </header>
+      <ol className="search-route__result-list">
+        {results.map(({ item, priorityDocument, serverIndex }) => (
+          <SearchResultCard
+            item={item}
+            key={searchItemKey(item, serverIndex)}
+            mode={mode}
+            priorityDocument={priorityDocument}
+          />
+        ))}
+      </ol>
     </section>
   )
 }
@@ -370,16 +421,23 @@ function SearchError({ error, mode }: { readonly error: Error; readonly mode: Se
   )
 }
 
-function SearchResultCard({ item, mode }: { readonly item: SearchItem; readonly mode: SearchMode }) {
+interface SearchResultCardProps {
+  readonly item: SearchItem
+  readonly mode: SearchMode
+  readonly priorityDocument: PrioritySearchDocument | null
+}
+
+function SearchResultCard({ item, mode, priorityDocument }: SearchResultCardProps) {
   const parentArtifact = resolveParentArtifact(item)
 
   return (
     <li>
       <article className="search-route__result">
         <header>
-          <p className="search-route__result-type">{item.artifactType}</p>
+          <p className="search-route__result-type">{priorityDocument?.label ?? item.artifactType}</p>
           <p>점수 {item.score}</p>
         </header>
+        {priorityDocument === null ? null : <PriorityDocumentMetadata document={priorityDocument} />}
         <p className="search-route__result-content">{item.content}</p>
         <dl className="search-route__result-metadata">
           <div><dt>문서 ID</dt><dd>{item.documentId ?? '—'}</dd></div>
@@ -399,6 +457,17 @@ function SearchResultCard({ item, mode }: { readonly item: SearchItem; readonly 
         )}
       </article>
     </li>
+  )
+}
+
+function PriorityDocumentMetadata({ document }: { readonly document: PrioritySearchDocument }) {
+  return (
+    <dl className="search-route__priority-metadata">
+      <div><dt>Gate</dt><dd>{document.gate}</dd></div>
+      <div><dt>승인 상태</dt><dd>{approvalStatusLabel(document.approvalStatus)}</dd></div>
+      <div><dt>목적</dt><dd>{document.purpose}</dd></div>
+      <div><dt>연결 작업 수</dt><dd>{document.linkedWorkCount === null ? '확인 불가' : document.linkedWorkCount}</dd></div>
+    </dl>
   )
 }
 
