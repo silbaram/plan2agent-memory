@@ -62,7 +62,7 @@ interface TreeNodeProps {
   readonly selected?: boolean
 }
 
-interface TreePageProps<T> {
+interface TreePageAuxiliaryProps<T = unknown> {
   readonly emptyDescription: string
   readonly errorDescription: string
   readonly errorTitle: string
@@ -74,6 +74,9 @@ interface TreePageProps<T> {
   readonly loadingLabel: string
   readonly onLoadMore: () => void
   readonly onRetry: () => void
+}
+
+interface TreePageProps<T> extends TreePageAuxiliaryProps<T> {
   readonly renderItem: (item: T) => ReactNode
 }
 
@@ -207,6 +210,23 @@ export function ArtifactTree({
         {ariaLabel}
       </h2>
       <TreeRovingFocusContext.Provider value={{ activeNodeId, onTreeNodeFocus, scheduleRovingFocusCheck }}>
+        <TreePageAuxiliary
+          emptyDescription="표시할 프로젝트가 없습니다."
+          errorDescription="프로젝트 목록을 다시 불러오세요."
+          errorTitle="프로젝트 목록을 불러올 수 없습니다"
+          hasNextPage={projects.hasNextPage}
+          isError={projects.isError}
+          isFetchingNextPage={projects.isFetchingNextPage}
+          isPending={projects.isPending}
+          items={projectItems}
+          loadingLabel="프로젝트 목록을 불러오는 중"
+          onLoadMore={() => {
+            void projects.fetchNextPage()
+          }}
+          onRetry={() => {
+            void projects.refetch()
+          }}
+        />
         <div
           aria-label={ariaLabel}
           className="artifact-tree__root"
@@ -326,36 +346,57 @@ function ProjectIterations({
   const iterationItems = useUniqueItems(iterations.data?.pages, (iteration) => iteration.iterationId)
 
   return (
-    <div className="artifact-tree__branch" onClick={stopTreeItemActivation} role="group">
-      <TreePage
-        emptyDescription="이 프로젝트에는 표시할 이터레이션이 없습니다."
-        errorDescription="이 프로젝트의 이터레이션을 다시 불러오세요."
-        errorTitle="이터레이션을 불러올 수 없습니다"
-        hasNextPage={iterations.hasNextPage}
-        isError={iterations.isError}
-        isFetchingNextPage={iterations.isFetchingNextPage}
-        isPending={iterations.isPending}
-        items={iterationItems}
-        loadingLabel="이터레이션 목록을 불러오는 중"
-        onLoadMore={() => {
-          void iterations.fetchNextPage()
-        }}
-        onRetry={() => {
-          void iterations.refetch()
-        }}
-        renderItem={(iteration) => (
-          <IterationNode
-            apiClient={apiClient}
-            iteration={iteration}
-            key={iteration.iterationId}
-            onArtifactSelect={onArtifactSelect}
-            pageSize={pageSize}
-            projectNodeId={projectNodeId}
-            selectedArtifact={selectedArtifact}
-          />
-        )}
-      />
-    </div>
+    <>
+      <div className="artifact-tree__branch" onClick={stopTreeItemActivation} role="group">
+        <TreePage
+          emptyDescription="이 프로젝트에는 표시할 이터레이션이 없습니다."
+          errorDescription="이 프로젝트의 이터레이션을 다시 불러오세요."
+          errorTitle="이터레이션을 불러올 수 없습니다"
+          hasNextPage={iterations.hasNextPage}
+          isError={iterations.isError}
+          isFetchingNextPage={iterations.isFetchingNextPage}
+          isPending={iterations.isPending}
+          items={iterationItems}
+          loadingLabel="이터레이션 목록을 불러오는 중"
+          onLoadMore={() => {
+            void iterations.fetchNextPage()
+          }}
+          onRetry={() => {
+            void iterations.refetch()
+          }}
+          renderItem={(iteration) => (
+            <IterationNode
+              apiClient={apiClient}
+              iteration={iteration}
+              key={iteration.iterationId}
+              onArtifactSelect={onArtifactSelect}
+              pageSize={pageSize}
+              projectNodeId={projectNodeId}
+              selectedArtifact={selectedArtifact}
+            />
+          )}
+        />
+      </div>
+      <div className="artifact-tree__auxiliary" onClick={stopTreeItemActivation}>
+        <TreePageAuxiliary
+          emptyDescription="이 프로젝트에는 표시할 이터레이션이 없습니다."
+          errorDescription="이 프로젝트의 이터레이션을 다시 불러오세요."
+          errorTitle="이터레이션을 불러올 수 없습니다"
+          hasNextPage={iterations.hasNextPage}
+          isError={iterations.isError}
+          isFetchingNextPage={iterations.isFetchingNextPage}
+          isPending={iterations.isPending}
+          items={iterationItems}
+          loadingLabel="이터레이션 목록을 불러오는 중"
+          onLoadMore={() => {
+            void iterations.fetchNextPage()
+          }}
+          onRetry={() => {
+            void iterations.refetch()
+          }}
+        />
+      </div>
+    </>
   )
 }
 
@@ -439,55 +480,76 @@ function IterationArtifacts({
   const visibleArtifacts = artifactItems.filter(isTreeArtifact)
 
   return (
-    <div className="artifact-tree__branch" onClick={stopTreeItemActivation} role="group">
-      <TreePage
-        emptyDescription="이 이터레이션에는 표시할 산출물이 없습니다."
-        errorDescription="이 이터레이션의 산출물을 다시 불러오세요."
-        errorTitle="산출물을 불러올 수 없습니다"
-        hasNextPage={artifacts.hasNextPage}
-        isError={artifacts.isError}
-        isFetchingNextPage={artifacts.isFetchingNextPage}
-        isPending={artifacts.isPending}
-        items={visibleArtifacts}
-        loadingLabel="산출물 목록을 불러오는 중"
-        onLoadMore={() => {
-          void artifacts.fetchNextPage()
-        }}
-        onRetry={() => {
-          void artifacts.refetch()
-        }}
-        renderItem={(artifact) => {
-          const nextSelection: ArtifactTreeSelection = {
-            artifactId: artifact.artifactId,
-            artifactType: artifact.artifactType,
-            iterationId: artifact.iterationId,
-            projectId: artifact.projectId,
-            sourceIterationId: iteration.sourceIterationId,
-          }
-          const isSelected = selectionsMatch(selectedArtifact, nextSelection)
+    <>
+      <div className="artifact-tree__branch" onClick={stopTreeItemActivation} role="group">
+        <TreePage
+          emptyDescription="이 이터레이션에는 표시할 산출물이 없습니다."
+          errorDescription="이 이터레이션의 산출물을 다시 불러오세요."
+          errorTitle="산출물을 불러올 수 없습니다"
+          hasNextPage={artifacts.hasNextPage}
+          isError={artifacts.isError}
+          isFetchingNextPage={artifacts.isFetchingNextPage}
+          isPending={artifacts.isPending}
+          items={visibleArtifacts}
+          loadingLabel="산출물 목록을 불러오는 중"
+          onLoadMore={() => {
+            void artifacts.fetchNextPage()
+          }}
+          onRetry={() => {
+            void artifacts.refetch()
+          }}
+          renderItem={(artifact) => {
+            const nextSelection: ArtifactTreeSelection = {
+              artifactId: artifact.artifactId,
+              artifactType: artifact.artifactType,
+              iterationId: artifact.iterationId,
+              projectId: artifact.projectId,
+              sourceIterationId: iteration.sourceIterationId,
+            }
+            const isSelected = selectionsMatch(selectedArtifact, nextSelection)
 
-          return (
-            <TreeNode
-              key={`${artifact.artifactType}:${artifact.artifactId}`}
-              label={`${artifactTypeLabel(artifact.artifactType)} ${artifact.title}`}
-              level={3}
-              nodeId={artifactTreeNodeId(artifact)}
-              onActivate={() => {
-                onArtifactSelect(nextSelection)
-              }}
-              selectable
-              selected={isSelected}
-              parentNodeId={parentNodeId}
-            >
-              <span className="artifact-tree__type" aria-hidden="true">
-                {artifactTypeLabel(artifact.artifactType)}
-              </span>
-              <span className="artifact-tree__label">{artifact.title}</span>
-            </TreeNode>
-          )
-        }}
-      />
-    </div>
+            return (
+              <TreeNode
+                key={`${artifact.artifactType}:${artifact.artifactId}`}
+                label={`${artifactTypeLabel(artifact.artifactType)} ${artifact.title}`}
+                level={3}
+                nodeId={artifactTreeNodeId(artifact)}
+                onActivate={() => {
+                  onArtifactSelect(nextSelection)
+                }}
+                selectable
+                selected={isSelected}
+                parentNodeId={parentNodeId}
+              >
+                <span className="artifact-tree__type" aria-hidden="true">
+                  {artifactTypeLabel(artifact.artifactType)}
+                </span>
+                <span className="artifact-tree__label">{artifact.title}</span>
+              </TreeNode>
+            )
+          }}
+        />
+      </div>
+      <div className="artifact-tree__auxiliary" onClick={stopTreeItemActivation}>
+        <TreePageAuxiliary
+          emptyDescription="이 이터레이션에는 표시할 산출물이 없습니다."
+          errorDescription="이 이터레이션의 산출물을 다시 불러오세요."
+          errorTitle="산출물을 불러올 수 없습니다"
+          hasNextPage={artifacts.hasNextPage}
+          isError={artifacts.isError}
+          isFetchingNextPage={artifacts.isFetchingNextPage}
+          isPending={artifacts.isPending}
+          items={visibleArtifacts}
+          loadingLabel="산출물 목록을 불러오는 중"
+          onLoadMore={() => {
+            void artifacts.fetchNextPage()
+          }}
+          onRetry={() => {
+            void artifacts.refetch()
+          }}
+        />
+      </div>
+    </>
   )
 }
 
@@ -555,6 +617,26 @@ function TreeNode({
 }
 
 function TreePage<T>({
+  hasNextPage,
+  isError,
+  isPending,
+  items,
+  renderItem,
+}: TreePageProps<T>) {
+  const { scheduleRovingFocusCheck } = useTreeRovingFocus()
+
+  useEffect(() => {
+    scheduleRovingFocusCheck()
+  }, [hasNextPage, isError, isPending, items, scheduleRovingFocusCheck])
+
+  if (isPending || isError) {
+    return null
+  }
+
+  return items.map(renderItem)
+}
+
+function TreePageAuxiliary({
   emptyDescription,
   errorDescription,
   errorTitle,
@@ -566,14 +648,7 @@ function TreePage<T>({
   loadingLabel,
   onLoadMore,
   onRetry,
-  renderItem,
-}: TreePageProps<T>) {
-  const { scheduleRovingFocusCheck } = useTreeRovingFocus()
-
-  useEffect(() => {
-    scheduleRovingFocusCheck()
-  }, [hasNextPage, isError, isPending, items, scheduleRovingFocusCheck])
-
+}: TreePageAuxiliaryProps) {
   if (isPending) {
     return <TreeStatus label={loadingLabel} />
   }
@@ -592,7 +667,7 @@ function TreePage<T>({
 
   return (
     <>
-      {items.length === 0 ? <TreeStatus label={emptyDescription} /> : items.map(renderItem)}
+      {items.length === 0 ? <TreeStatus label={emptyDescription} /> : null}
       {hasNextPage ? (
         <div className="artifact-tree__load-more">
           <button disabled={isFetchingNextPage} onClick={onLoadMore} type="button">

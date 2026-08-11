@@ -57,7 +57,8 @@
 .artifact-tree__label {
   grid-column: 3;
   min-inline-size: 0;
-  overflow-wrap: anywhere;
+  overflow-wrap: normal;
+  word-break: keep-all;
 }
 
 .artifact-tree__item[aria-level='3'] .artifact-tree__item-content {
@@ -69,7 +70,7 @@
   grid-column: 1;
 }
 
-.artifact-tree__item-content > .artifact-tree__branch {
+.artifact-tree__item-content > :where(.artifact-tree__branch, .artifact-tree__auxiliary, .artifact-tree__message, .artifact-tree__load-more) {
   grid-column: 1 / -1;
   min-inline-size: 0;
 }

@@ -149,6 +149,40 @@ describe('ArtifactTree', () => {
     expect(iterationAttempts).toBe(2)
   })
 
+  it.each([
+    {
+      name: 'loading',
+      response: () => new Promise<Response>(() => {}),
+      role: 'status',
+      statusName: '프로젝트 목록을 불러오는 중',
+    },
+    {
+      name: 'empty',
+      response: () => HttpResponse.json(page([])),
+      role: 'status',
+      statusName: '표시할 프로젝트가 없습니다.',
+    },
+    {
+      name: 'error',
+      response: () => new HttpResponse(null, { status: 503 }),
+      role: 'alert',
+      statusName: '프로젝트 목록을 불러올 수 없습니다',
+    },
+  ] as const)('keeps its root $name message outside the tree', async ({ response, role, statusName }) => {
+    server.use(http.get('/api/projects', response))
+
+    renderArtifactTree()
+
+    const messageText = await screen.findByText(statusName)
+    const message = messageText.closest<HTMLElement>(`[role="${role}"]`)
+    if (message === null) {
+      throw new Error(`Expected the ${role} message container.`)
+    }
+    const tree = screen.getByRole('tree', { name: '산출물 계층' })
+    expect(tree.contains(message)).toBe(false)
+    expect(tree.querySelector('[role="status"], [role="alert"]')).toBeNull()
+  })
+
   it('supports keyboard expand, collapse, focus movement, and an accessible current selection', async () => {
     const selections: ArtifactTreeSelection[] = []
     server.use(

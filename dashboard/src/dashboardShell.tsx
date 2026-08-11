@@ -176,7 +176,7 @@ function DashboardNavigation() {
 
 function GateProgressStrip() {
   return (
-    <nav aria-label="Gate 진행 상태" className="gate-progress-strip">
+    <nav aria-label="Gate 진행 상태" className="gate-progress-strip" tabIndex={0}>
       <ol>
         {gateProgress.map((gate, index) => (
           <li aria-current={gate.state === 'current' ? 'step' : undefined} data-state={gate.state} key={gate.label}>

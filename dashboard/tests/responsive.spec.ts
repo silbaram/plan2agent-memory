@@ -120,6 +120,29 @@ for (const viewport of artifactTreeViewports) {
     const leaves = page.locator('[role="treeitem"][aria-level="3"]')
     await expect(leaves).toHaveCount(thirdLevelArtifactTitles.length)
     const layouts = await leaves.evaluateAll((items) => items.map((item) => {
+      const lineCharacterCounts = (element: HTMLElement) => {
+        const textNode = element.firstChild
+        if (textNode === null || textNode.nodeType !== Node.TEXT_NODE) {
+          throw new Error('Expected an artifact label text node.')
+        }
+
+        const text = textNode.textContent ?? ''
+        const lines = new Map<number, number>()
+        for (let index = 0; index < text.length; index += 1) {
+          const character = text[index]
+          if (character.trim().length === 0) {
+            continue
+          }
+
+          const range = document.createRange()
+          range.setStart(textNode, index)
+          range.setEnd(textNode, index + 1)
+          const top = Math.round(range.getBoundingClientRect().top)
+          lines.set(top, (lines.get(top) ?? 0) + 1)
+        }
+
+        return Array.from(lines.values())
+      }
       const itemContent = item.querySelector<HTMLElement>('.artifact-tree__item-content')
       const label = item.querySelector<HTMLElement>('.artifact-tree__label')
       const type = item.querySelector<HTMLElement>('.artifact-tree__type')
@@ -134,6 +157,7 @@ for (const viewport of artifactTreeViewports) {
       return {
         itemContentDisplay: itemContentStyle.display,
         itemContentGridTemplateColumns: itemContentStyle.gridTemplateColumns,
+        labelLineCharacterCounts: lineCharacterCounts(label),
         labelBoxHeight: labelBox.height,
         labelBoxWidth: labelBox.width,
         labelClientWidth: label.clientWidth,
@@ -154,6 +178,7 @@ for (const viewport of artifactTreeViewports) {
       expect(layout.labelBoxWidth).toBeGreaterThan(96)
       expect(layout.labelBoxWidth).toBeGreaterThan(layout.labelBoxHeight)
       expect(layout.labelScrollWidth).toBeLessThanOrEqual(layout.labelClientWidth + 1)
+      expect(layout.labelLineCharacterCounts.every((count) => count > 1)).toBe(true)
       expect(layout.typeBoxWidth).toBeGreaterThanOrEqual(layout.typeBoxHeight)
       expect(layout.typeScrollWidth).toBeLessThanOrEqual(layout.typeBoxWidth + 1)
     }

@@ -43,6 +43,16 @@ describe('App', () => {
     expect(screen.getByRole('complementary', { name: '실행 맥락' })).toBeTruthy()
   })
 
+  it('keeps the Gate progress strip keyboard-focusable when it scrolls on narrow screens', () => {
+    render(<App />)
+
+    const gateProgress = screen.getByRole('navigation', { name: 'Gate 진행 상태' })
+    gateProgress.focus()
+
+    expect(gateProgress.getAttribute('tabindex')).toBe('0')
+    expect(document.activeElement).toBe(gateProgress)
+  })
+
   it('uses a progressive context disclosure below the wide workbench without changing route state', () => {
     const defaultMatchMedia = window.matchMedia
     Object.defineProperty(window, 'matchMedia', {

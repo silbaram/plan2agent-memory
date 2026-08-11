@@ -8,6 +8,13 @@ async function expectNoAxeViolations(page: Page) {
   expect(accessibilityScanResults.violations).toEqual([])
 }
 
+interface TreeState {
+  readonly message: string
+  readonly name: 'loading' | 'empty' | 'error'
+  readonly response?: unknown
+  readonly status?: number
+}
+
 async function selectTraceRoot(page: Page) {
   await page.getByLabel('추적 시작 노드').selectOption('node-task-024')
   await expect(page.getByRole('region', { name: '계보 노드와 간선 목록' })).toBeVisible()
@@ -31,6 +38,47 @@ test('production Fastify browse, viewer, search, and trace states have no automa
   await page.goto('/trace')
   await selectTraceRoot(page)
   await expectNoAxeViolations(page)
+})
+
+test('loading, empty, and error tree messages stay outside the production tree semantics', async ({ page }) => {
+  await mockDashboardApi(page)
+
+  const treeStates: readonly TreeState[] = [
+    { message: '프로젝트 목록을 불러오는 중', name: 'loading' },
+    { message: '표시할 프로젝트가 없습니다.', name: 'empty', response: { items: [], nextCursor: null } },
+    { message: '프로젝트 목록을 불러올 수 없습니다', name: 'error', response: { error: 'unavailable' }, status: 503 },
+  ]
+
+  for (const state of treeStates) {
+    let releasePendingRequest: () => void = () => {}
+    const pendingRequest = new Promise<void>((resolve) => {
+      releasePendingRequest = resolve
+    })
+    await page.route('**/api/projects*', async (route) => {
+      if (state.name === 'loading') {
+        await pendingRequest
+      }
+      await route.fulfill({
+        body: JSON.stringify(state.response ?? { items: [], nextCursor: null }),
+        contentType: 'application/json; charset=utf-8',
+        status: state.status ?? 200,
+      })
+    })
+
+    try {
+      await page.goto('/browse', { waitUntil: 'domcontentloaded' })
+      const message = page.getByText(state.message)
+      await expect(message).toBeVisible()
+      const tree = page.getByRole('tree', { name: '산출물 계층' })
+      await expect(tree.locator('[role="status"], [role="alert"]')).toHaveCount(0)
+
+      const results = await new AxeBuilder({ page }).withRules(['aria-required-children']).analyze()
+      expect(results.violations).toEqual([])
+    } finally {
+      releasePendingRequest()
+      await page.unroute('**/api/projects*')
+    }
+  }
 })
 
 test('keyboard-only navigation exposes landmarks, focus, tree selection, tabs, and the compact disclosure', async ({ page }) => {
@@ -81,6 +129,28 @@ test('keyboard-only navigation exposes landmarks, focus, tree selection, tabs, a
   await expect(rawTab).toBeFocused()
   await expect(rawTab).toHaveAttribute('aria-selected', 'true')
   await expect(page.getByRole('tabpanel')).toHaveAttribute('aria-labelledby', await rawTab.getAttribute('id') ?? '')
+})
+
+test('narrow screens keep scrollable Gate progress keyboard-focusable and React Flow attribution visible at AA contrast', async ({ page }) => {
+  await mockDashboardApi(page)
+  await page.setViewportSize({ height: 844, width: 390 })
+
+  await page.goto('/browse')
+  const gateProgress = page.getByRole('navigation', { name: 'Gate 진행 상태' })
+  await gateProgress.focus()
+  await expect(gateProgress).toBeFocused()
+  await expect.poll(() => gateProgress.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true)
+
+  await page.goto('/trace')
+  await selectTraceRoot(page)
+  const attribution = page.locator('.trace-route__canvas .react-flow__attribution')
+  await expect(attribution).toBeVisible()
+
+  const results = await new AxeBuilder({ page })
+    .include('.trace-route__canvas')
+    .withRules(['color-contrast'])
+    .analyze()
+  expect(results.violations).toEqual([])
 })
 
 test('invalid search, unavailable trace context, and truncation announce once with programmatic state', async ({ page }) => {
