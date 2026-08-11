@@ -12,6 +12,19 @@ const stackedViewports: readonly ViewportCase[] = [
   { height: 844, name: '390×844', width: 390 },
 ]
 
+const artifactTreeViewports: readonly ViewportCase[] = [
+  { height: 900, name: '1440×900', width: 1440 },
+  { height: 768, name: '1024×768', width: 1024 },
+  { height: 1024, name: '768×1024', width: 768 },
+  { height: 844, name: '390×844', width: 390 },
+]
+
+const thirdLevelArtifactTitles = [
+  '프로덕션 대시보드 검증',
+  '완료된 검증 실행',
+  '실패한 검증 실행',
+]
+
 async function openBrowseWorkbench(page: Page, viewport: ViewportCase) {
   await page.setViewportSize(viewport)
   await mockDashboardApi(page)
@@ -86,5 +99,68 @@ for (const viewport of stackedViewports) {
     expect(contextBox?.y).toBeGreaterThan(contentBox?.y ?? 0)
     await expect(page.getByTestId('workbench-context')).toHaveAttribute('data-context-layout', 'disclosure')
     await expectNoPageOverflow(page)
+  })
+}
+
+for (const viewport of artifactTreeViewports) {
+  test(`${viewport.name} keeps every third-level artifact label readable`, async ({ page }) => {
+    await openBrowseWorkbench(page, viewport)
+
+    const project = page.getByRole('treeitem', { name: '프로젝트 예제 프로젝트' })
+    await project.click()
+    const iteration = page.getByRole('treeitem', { name: '이터레이션 대시보드 검증' })
+    await iteration.click()
+    const artifact = page.getByRole('treeitem', { name: '작업 프로덕션 대시보드 검증' })
+    await artifact.click()
+
+    await expect(artifact).toHaveAttribute('aria-current', 'true')
+    await expect(artifact).toHaveAttribute('tabindex', '0')
+    await expect(page).toHaveURL(/selectedArtifactId=44444444-4444-4444-8444-444444444444/)
+
+    const leaves = page.locator('[role="treeitem"][aria-level="3"]')
+    await expect(leaves).toHaveCount(thirdLevelArtifactTitles.length)
+    const layouts = await leaves.evaluateAll((items) => items.map((item) => {
+      const itemContent = item.querySelector<HTMLElement>('.artifact-tree__item-content')
+      const label = item.querySelector<HTMLElement>('.artifact-tree__label')
+      const type = item.querySelector<HTMLElement>('.artifact-tree__type')
+      if (itemContent === null || label === null || type === null) {
+        throw new Error('Expected every third-level artifact to include type and label content.')
+      }
+
+      const labelBox = label.getBoundingClientRect()
+      const typeBox = type.getBoundingClientRect()
+      const labelStyle = getComputedStyle(label)
+      const itemContentStyle = getComputedStyle(itemContent)
+      return {
+        itemContentDisplay: itemContentStyle.display,
+        itemContentGridTemplateColumns: itemContentStyle.gridTemplateColumns,
+        labelBoxHeight: labelBox.height,
+        labelBoxWidth: labelBox.width,
+        labelClientWidth: label.clientWidth,
+        labelMinInlineSize: labelStyle.minInlineSize,
+        labelScrollWidth: label.scrollWidth,
+        title: label.textContent,
+        typeBoxHeight: typeBox.height,
+        typeBoxWidth: typeBox.width,
+        typeScrollWidth: type.scrollWidth,
+      }
+    }))
+
+    expect(layouts.map((layout) => layout.title)).toEqual(thirdLevelArtifactTitles)
+    for (const layout of layouts) {
+      expect(layout.itemContentDisplay).toBe('grid')
+      expect(layout.itemContentGridTemplateColumns).not.toBe('none')
+      expect(layout.labelMinInlineSize).toBe('0px')
+      expect(layout.labelBoxWidth).toBeGreaterThan(96)
+      expect(layout.labelBoxWidth).toBeGreaterThan(layout.labelBoxHeight)
+      expect(layout.labelScrollWidth).toBeLessThanOrEqual(layout.labelClientWidth + 1)
+      expect(layout.typeBoxWidth).toBeGreaterThanOrEqual(layout.typeBoxHeight)
+      expect(layout.typeScrollWidth).toBeLessThanOrEqual(layout.typeBoxWidth + 1)
+    }
+
+    await expectNoPageOverflow(page)
+    await expect(page.getByTestId('workbench-library')).toHaveScreenshot(
+      `artifact-tree-third-level-labels-${viewport.width}x${viewport.height}.png`,
+    )
   })
 }
