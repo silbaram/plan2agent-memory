@@ -197,6 +197,67 @@ describe('dashboard data access', () => {
     expect(received.graphTrace?.url.search).toBe(`?projectId=${projectId}&naturalKey=task%3Asource-task-1&iterationId=iteration-1&direction=UPSTREAM&maxDepth=2`)
   })
 
+  it('preserves keyword scores and citations from the API response', async () => {
+    const citation = {
+      lineage: {
+        chunkId: 'citation-chunk',
+        chunkIndex: 4,
+        documentId: artifactId,
+        iterationId: 'iteration-1',
+        projectId,
+        sourcePath: 'docs/citation.md',
+      },
+      sourceIds: {
+        sourceChunkId: 'source-chunk-4',
+        sourceDocumentId: 'source-document-1',
+        sourceIterationId: 'source-iteration-1',
+        sourceProjectId: 'source-project-1',
+        sourceRunId: 'source-run-1',
+        sourceTaskGraphId: 'source-graph-1',
+        sourceTaskId: 'source-task-1',
+      },
+      sourceReference: {
+        canonicalServerId: 'server-1',
+        endLine: 27,
+        fragment: 'evidence',
+        path: 'docs/citation.md',
+        startLine: 20,
+        uri: 'p2a://memory/artifacts/citation',
+      },
+    }
+    server.use(
+      http.get('/api/search/keyword', () => HttpResponse.json({
+        items: [{
+          artifactType: 'DOCUMENT_CHUNK',
+          chunkId: 'citation-chunk',
+          chunkIndex: 4,
+          citation,
+          content: 'Citation-preserving search result',
+          documentId: artifactId,
+          iterationId: 'iteration-1',
+          lineage: citation.lineage,
+          matchReason: 'content',
+          metadata: { phase: 'verification' },
+          projectId,
+          score: 0.991,
+          sourceIds: citation.sourceIds,
+          sourcePath: 'docs/citation.md',
+          sourceReference: citation.sourceReference,
+        }],
+        nextCursor: 'citation-next-page',
+      })),
+    )
+
+    const result = await createClient().keywordSearch({ q: 'citation' })
+
+    expect(result.nextCursor).toBe('citation-next-page')
+    expect(result.items).toHaveLength(1)
+    expect(result.items[0]).toMatchObject({
+      citation,
+      score: 0.991,
+    })
+  })
+
   it('isolates TanStack Query cache entries by scope, search mode, filters, fusion, root, depth, and cursor', async () => {
     let semanticRequests = 0
     let hybridRequests = 0
