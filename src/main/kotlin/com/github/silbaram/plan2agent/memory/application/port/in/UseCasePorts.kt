@@ -4,6 +4,7 @@ import com.github.silbaram.plan2agent.memory.application.usecase.FindArtifactsQu
 import com.github.silbaram.plan2agent.memory.application.usecase.FindArtifactDetailQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.FindIterationSummariesQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.FindProjectSummariesQuery
+import com.github.silbaram.plan2agent.memory.application.usecase.DocumentChunkingStrategy
 import com.github.silbaram.plan2agent.memory.application.usecase.HybridSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.KeywordSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.PagedResult
@@ -15,6 +16,7 @@ import com.github.silbaram.plan2agent.memory.application.usecase.ArtifactGraphSn
 import com.github.silbaram.plan2agent.memory.application.usecase.GraphNodeSearchQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.GraphTraceQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveDocumentSnapshotCommand
+import com.github.silbaram.plan2agent.memory.application.usecase.SaveChunkedDocumentSnapshotResult
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveRunRecordCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveTaskGraphCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveTasksCommand
@@ -51,6 +53,13 @@ interface RegisterIterationUseCase {
 
 interface SaveDocumentSnapshotUseCase {
     fun saveDocumentSnapshot(command: SaveDocumentSnapshotCommand): DocumentSnapshot
+}
+
+interface SaveChunkedDocumentSnapshotUseCase {
+    fun saveChunkedDocumentSnapshot(
+        snapshotCommand: SaveDocumentSnapshotCommand,
+        strategy: DocumentChunkingStrategy,
+    ): SaveChunkedDocumentSnapshotResult
 }
 
 interface SaveTaskGraphUseCase {

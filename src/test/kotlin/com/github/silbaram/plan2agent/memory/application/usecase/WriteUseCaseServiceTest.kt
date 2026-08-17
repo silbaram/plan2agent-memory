@@ -170,6 +170,108 @@ class WriteUseCaseServiceTest {
     }
 
     @Test
+    fun `chunked snapshot uses canonical snapshot identity and backfills chunks and jobs idempotently`() {
+        val requestedDocumentId = DocumentId(uuid(36))
+        val command = SaveDocumentSnapshotCommand(
+            id = requestedDocumentId,
+            projectId = ids.projectId,
+            iterationId = ids.iterationId,
+            sourceDocumentId = SourceDocumentId("different-request-source-id"),
+            sourcePath = ids.document.sourcePath,
+            snapshotVersion = 99,
+            artifactType = ids.document.artifactType,
+            title = "Repeated spec",
+            content = ids.document.content,
+            contentHash = ids.document.contentHash,
+            capturedAt = now,
+            createdAt = now,
+        )
+
+        val first = service.saveChunkedDocumentSnapshot(command, DocumentChunkingStrategy.PARAGRAPH_2000)
+        val second = service.saveChunkedDocumentSnapshot(command, DocumentChunkingStrategy.PARAGRAPH_2000)
+        val expected = Paragraph2000DocumentChunker().chunk(ids.document).single()
+
+        assertThat(first.snapshot.id).isEqualTo(ids.documentId)
+        assertThat(first.snapshot.id).isNotEqualTo(requestedDocumentId)
+        assertThat(first.chunks).singleElement().isEqualTo(expected)
+        assertThat(second.snapshot).isEqualTo(first.snapshot)
+        assertThat(second.chunks).isEqualTo(first.chunks)
+        assertThat(stores.documentSnapshots.saveCalls).isZero()
+        assertThat(stores.documentChunks.chunks.count { it.id == expected.id }).isEqualTo(1)
+        assertThat(stores.embeddingJobs.jobs.count { it.chunkId == expected.id }).isEqualTo(1)
+    }
+
+    @Test
+    fun `chunked snapshot calculates authoritative metadata and source reference`() {
+        val requestedDocumentId = DocumentId(uuid(37))
+        val result = service.saveChunkedDocumentSnapshot(
+            SaveDocumentSnapshotCommand(
+                id = requestedDocumentId,
+                projectId = ids.projectId,
+                iterationId = ids.iterationId,
+                sourceDocumentId = SourceDocumentId("source-new-spec"),
+                sourcePath = "nested\\new-spec.md",
+                snapshotVersion = 1,
+                artifactType = ArtifactType.DOCUMENT_SNAPSHOT,
+                title = "New spec",
+                content = " first \n\n second ",
+                contentHash = ContentHash("new-spec-hash"),
+                sourceReference = SourceReference(
+                    canonicalServerId = CanonicalServerId(requestedDocumentId.value),
+                    uri = "file:///repo/nested/new-spec.md",
+                    path = "nested/new-spec.md",
+                ),
+                capturedAt = now,
+                createdAt = now,
+                metadata = mapOf(
+                    "documentRole" to "spec",
+                    "sourceChunkId" to "client-value",
+                    "parentDocumentId" to "client-value",
+                    "chunkStrategy" to "client-value",
+                ),
+            ),
+            DocumentChunkingStrategy.PARAGRAPH_2000,
+        )
+
+        assertThat(result.strategy).isEqualTo(DocumentChunkingStrategy.PARAGRAPH_2000)
+        assertThat(result.chunks).hasSize(1)
+        val chunk = result.chunks.single()
+        assertThat(chunk.documentId).isEqualTo(requestedDocumentId)
+        assertThat(chunk.sourcePath).isEqualTo("nested/new-spec.md")
+        assertThat(chunk.content).isEqualTo("first\n\nsecond")
+        assertThat(chunk.metadata).containsEntry("sourceChunkId", "source-new-spec:chunk-0")
+        assertThat(chunk.metadata).containsEntry("parentDocumentId", requestedDocumentId.value)
+        assertThat(chunk.metadata).containsEntry("chunkStrategy", "paragraph-2000")
+        assertThat(chunk.metadata).containsEntry("documentRole", "spec")
+        assertThat(chunk.sourceReference?.canonicalServerId?.value).isEqualTo(chunk.id.value)
+        assertThat(chunk.sourceReference?.uri).isEqualTo("file:///repo/nested/new-spec.md")
+        assertThat(chunk.sourceReference?.fragment).isEqualTo("chunk-0")
+    }
+
+    @Test
+    fun `snapshot-only save does not generate chunks or embedding jobs`() {
+        service.saveDocumentSnapshot(
+            SaveDocumentSnapshotCommand(
+                id = DocumentId(uuid(38)),
+                projectId = ids.projectId,
+                iterationId = ids.iterationId,
+                sourceDocumentId = SourceDocumentId("source-snapshot-only"),
+                sourcePath = "snapshot-only.md",
+                snapshotVersion = 1,
+                artifactType = ArtifactType.DOCUMENT_SNAPSHOT,
+                title = "Snapshot only",
+                content = "snapshot only content",
+                contentHash = ContentHash("snapshot-only-hash"),
+                capturedAt = now,
+                createdAt = now,
+            ),
+        )
+
+        assertThat(stores.documentChunks.savedBatches).isEmpty()
+        assertThat(stores.embeddingJobs.jobs).isEmpty()
+    }
+
+    @Test
     fun `task graph save returns the existing canonical graph for the same source and hash`() {
         val existing = stores.taskGraphs.graphs.first()
 

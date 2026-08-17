@@ -444,10 +444,39 @@ Iteration을 프로젝트에 연결해 등록 또는 upsert합니다.
 | `sourceReference` | 선택 | 원본 위치 참조 정보입니다. |
 | `capturedAt` | 선택 | Snapshot 수집 시각입니다. |
 | `metadata` | 선택 | 확장 metadata입니다. |
+| `chunking` | 선택 | 서버 chunk 생성 opt-in입니다. 이번 계약은 정확히 `{ "strategy": "paragraph-2000" }`만 허용합니다. |
 
 | Response | 포함 정보 |
 | --- | --- |
-| `DocumentSnapshotResponse` | Snapshot 정보와 `lineage.contentHash`, `lineage.snapshotVersion`, `metadata.sourceDocumentId` |
+| `DocumentSnapshotResponse` | Snapshot 정보와 `lineage.contentHash`, `lineage.snapshotVersion`, `metadata.sourceDocumentId`. Opt-in 성공 시에만 `chunking.strategy`, 양의 정수 `chunking.chunkCount`가 추가됩니다. |
+
+`chunking`이 없으면 기존 snapshot-only 동작을 그대로 유지하며 자동 chunk나 embedding job을 만들지 않습니다. `chunking`이 malformed이거나 strategy가 `paragraph-2000`과 정확히 일치하지 않으면 snapshot을 쓰기 전에 `400 validation_error`로 거부합니다.
+
+`paragraph-2000` opt-in은 본문을 P2A와 같은 UTF-16 최대 2000자, paragraph 결합, overlap 없음 규칙으로 나눕니다. 서버는 idempotency가 반환한 canonical snapshot ID를 기준으로 chunk ID와 hash를 만들고, snapshot-first 상태에서는 누락된 chunk와 embedding job만 backfill합니다. Snapshot, 생성된 모든 chunk, active embedding target 확인과 chunk별 durable job enqueue는 요청 하나의 transaction이므로 어느 단계에서든 실패하면 그 요청에서 새로 만든 row가 모두 rollback됩니다.
+
+```json
+{
+  "documentId": "<document-id>",
+  "projectId": "<project-id>",
+  "sourceDocumentId": "<source-document-id>",
+  "sourcePath": "iterations/v2/gate-b-spec/product-spec.md",
+  "artifactType": "DOCUMENT_SNAPSHOT",
+  "title": "Product spec",
+  "content": "# Product spec\n\n...",
+  "contentHash": "<sha256>",
+  "chunking": { "strategy": "paragraph-2000" }
+}
+```
+
+```json
+{
+  "documentId": "<canonical-document-id>",
+  "chunking": {
+    "strategy": "paragraph-2000",
+    "chunkCount": 3
+  }
+}
+```
 
 ### `POST /api/task-graphs`
 
@@ -524,7 +553,7 @@ Task 실행 기록을 저장합니다.
 
 ### `POST /api/document-chunks/bulk`
 
-문서 chunk만 저장합니다. 서버는 저장 성공 후 활성 embedding 구성에 대한 durable embedding 작업을 enqueue합니다. 요청에는 `embeddingSet`, `embedding`, `embeddingHash`를 포함할 수 없으며, 제거된 field는 unknown-field validation error로 거부됩니다.
+문서 chunk만 저장합니다. 서버는 저장 성공 후 활성 embedding 구성에 대한 durable embedding 작업을 enqueue합니다. 요청에는 `embeddingSet`, `embedding`, `embeddingHash`를 포함할 수 없으며, 제거된 field는 unknown-field validation error로 거부됩니다. Snapshot opt-in이 추가된 뒤에도 이 endpoint의 요청·응답과 enqueue 동작은 기존 client를 위해 그대로 유지됩니다.
 
 | Request field | 필수 | 설명 |
 | --- | --- | --- |

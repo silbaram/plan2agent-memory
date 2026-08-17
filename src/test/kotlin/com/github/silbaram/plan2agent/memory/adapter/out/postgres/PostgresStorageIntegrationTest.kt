@@ -29,6 +29,7 @@ import com.github.silbaram.plan2agent.memory.application.port.out.ProjectStorePo
 import com.github.silbaram.plan2agent.memory.application.port.out.RunRecordStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.TaskGraphStorePort
 import com.github.silbaram.plan2agent.memory.application.port.out.TaskStorePort
+import com.github.silbaram.plan2agent.memory.application.usecase.DocumentChunkingStrategy
 import com.github.silbaram.plan2agent.memory.application.usecase.DocumentChunkWrite
 import com.github.silbaram.plan2agent.memory.application.usecase.FindArtifactsQuery
 import com.github.silbaram.plan2agent.memory.application.usecase.GraphTraceDirection
@@ -1605,6 +1606,128 @@ class PostgresStorageIntegrationTest {
             .singleElement()
             .extracting { it.embeddingSetId }
             .isEqualTo(activeEmbeddingSetId)
+    }
+
+    @Test
+    fun `server-owned chunking backfills snapshot-first writes and preserves changed versions`() {
+        val fixture = saveProjectAndIteration("server-chunk-backfill")
+        val firstCommand = documentCommand(
+            scope = "server-chunk-backfill-first",
+            projectId = fixture.project.id,
+            iterationId = fixture.iteration.id,
+            sourcePath = "docs/server-chunk.md",
+            contentHash = "server-chunk-hash-a",
+            content = "first paragraph\n\nsecond paragraph",
+        )
+        val snapshotOnly = writeUseCase.saveDocumentSnapshot(firstCommand)
+        assertThat(rowCount("document_chunks")).isZero()
+        assertThat(rowCount("embedding_jobs")).isZero()
+
+        val retryCommand = documentCommand(
+            scope = "server-chunk-backfill-retry",
+            projectId = fixture.project.id,
+            iterationId = fixture.iteration.id,
+            sourcePath = firstCommand.sourcePath,
+            contentHash = firstCommand.contentHash.value,
+            content = firstCommand.content,
+        )
+        val backfilled = writeUseCase.saveChunkedDocumentSnapshot(
+            retryCommand,
+            DocumentChunkingStrategy.PARAGRAPH_2000,
+        )
+        val repeated = writeUseCase.saveChunkedDocumentSnapshot(
+            retryCommand,
+            DocumentChunkingStrategy.PARAGRAPH_2000,
+        )
+
+        assertThat(backfilled.snapshot.id).isEqualTo(snapshotOnly.id)
+        assertThat(backfilled.snapshot.id).isNotEqualTo(retryCommand.id)
+        assertThat(backfilled.chunks).hasSize(1)
+        assertThat(repeated.snapshot.id).isEqualTo(snapshotOnly.id)
+        assertThat(repeated.chunks.map { it.id }).isEqualTo(backfilled.chunks.map { it.id })
+        assertThat(rowCount("documents")).isEqualTo(1)
+        assertThat(rowCount("document_chunks")).isEqualTo(1)
+        assertThat(rowCount("embedding_jobs")).isEqualTo(1)
+
+        val changed = writeUseCase.saveChunkedDocumentSnapshot(
+            documentCommand(
+                scope = "server-chunk-backfill-changed",
+                projectId = fixture.project.id,
+                iterationId = fixture.iteration.id,
+                sourcePath = firstCommand.sourcePath,
+                contentHash = "server-chunk-hash-b",
+                content = "changed paragraph",
+            ),
+            DocumentChunkingStrategy.PARAGRAPH_2000,
+        )
+
+        assertThat(changed.snapshot.snapshotVersion).isEqualTo(2)
+        assertThat(changed.snapshot.id).isNotEqualTo(snapshotOnly.id)
+        assertThat(changed.chunks.single().documentId).isEqualTo(changed.snapshot.id)
+        assertThat(rowCount("documents")).isEqualTo(2)
+        assertThat(rowCount("document_chunks")).isEqualTo(2)
+        assertThat(rowCount("embedding_jobs")).isEqualTo(2)
+        assertThat(documentSnapshotStore.findById(snapshotOnly.id)).isEqualTo(snapshotOnly)
+    }
+
+    @Test
+    fun `server-owned chunk transaction rolls back snapshot and chunks when job enqueue fails`() {
+        val fixture = saveProjectAndIteration("server-chunk-rollback")
+        val preExistingSnapshot = writeUseCase.saveDocumentSnapshot(
+            documentCommand(
+                scope = "server-chunk-rollback-existing",
+                projectId = fixture.project.id,
+                iterationId = fixture.iteration.id,
+                sourcePath = "docs/existing.md",
+                contentHash = "existing-hash",
+            ),
+        )
+        val activeEmbeddingSetId = ensurePersistedActiveEmbeddingTarget()
+        jdbc.execute(
+            """
+            CREATE FUNCTION fail_server_chunk_embedding_job_insert()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS 'BEGIN RAISE EXCEPTION ''induced embedding job insert failure''; END;'
+            """.trimIndent(),
+        )
+        jdbc.execute(
+            """
+            CREATE TRIGGER trg_fail_server_chunk_embedding_job_insert
+            BEFORE INSERT ON embedding_jobs
+            FOR EACH ROW
+            EXECUTE FUNCTION fail_server_chunk_embedding_job_insert()
+            """.trimIndent(),
+        )
+
+        try {
+            assertThatThrownBy {
+                writeUseCase.saveChunkedDocumentSnapshot(
+                    documentCommand(
+                        scope = "server-chunk-rollback-new",
+                        projectId = fixture.project.id,
+                        iterationId = fixture.iteration.id,
+                        sourcePath = "docs/new.md",
+                        contentHash = "new-hash",
+                        content = "new snapshot content",
+                    ),
+                    DocumentChunkingStrategy.PARAGRAPH_2000,
+                )
+            }
+                .isInstanceOf(DataAccessException::class.java)
+                .rootCause()
+                .hasMessageContaining("induced embedding job insert failure")
+        } finally {
+            jdbc.execute("DROP TRIGGER trg_fail_server_chunk_embedding_job_insert ON embedding_jobs")
+            jdbc.execute("DROP FUNCTION fail_server_chunk_embedding_job_insert()")
+        }
+
+        assertThat(rowCount("documents")).isEqualTo(1)
+        assertThat(rowCount("document_chunks")).isZero()
+        assertThat(rowCount("embedding_jobs")).isZero()
+        assertThat(rowCount("embedding_sets")).isEqualTo(1)
+        assertThat(documentSnapshotStore.findById(preExistingSnapshot.id)).isEqualTo(preExistingSnapshot)
+        assertThat(activeProfilePointer()).isEqualTo(activeEmbeddingSetId.value)
     }
 
     @Test

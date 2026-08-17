@@ -7,6 +7,7 @@ import com.github.silbaram.plan2agent.memory.domain.ContentHash
 import com.github.silbaram.plan2agent.memory.domain.DistanceMetric
 import com.github.silbaram.plan2agent.memory.domain.DocumentChunk
 import com.github.silbaram.plan2agent.memory.domain.DocumentId
+import com.github.silbaram.plan2agent.memory.domain.DocumentSnapshot
 import com.github.silbaram.plan2agent.memory.domain.Embedding
 import com.github.silbaram.plan2agent.memory.domain.EmbeddingSet
 import com.github.silbaram.plan2agent.memory.domain.IterationId
@@ -68,6 +69,23 @@ data class SaveDocumentSnapshotCommand(
     val updatedAt: Instant? = null,
     val metadata: Map<String, String> = emptyMap(),
 )
+
+enum class DocumentChunkingStrategy(val apiValue: String) {
+    PARAGRAPH_2000(Paragraph2000DocumentChunker.STRATEGY),
+}
+
+data class SaveChunkedDocumentSnapshotResult(
+    val snapshot: DocumentSnapshot,
+    val strategy: DocumentChunkingStrategy,
+    val chunks: List<DocumentChunk>,
+) {
+    init {
+        require(chunks.isNotEmpty()) { "Chunked document snapshot result must contain at least one chunk" }
+        require(chunks.all { it.documentId == snapshot.id }) {
+            "Chunked document snapshot result chunks must belong to the canonical snapshot"
+        }
+    }
+}
 
 data class SaveTaskGraphCommand(
     val id: TaskGraphId,

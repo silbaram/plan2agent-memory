@@ -1,10 +1,15 @@
 package com.github.silbaram.plan2agent.memory.adapter.`in`.rest
 
+import com.fasterxml.jackson.annotation.JsonInclude
+import com.fasterxml.jackson.annotation.JsonSetter
+import com.fasterxml.jackson.annotation.Nulls
+import com.github.silbaram.plan2agent.memory.application.usecase.DocumentChunkingStrategy
 import com.github.silbaram.plan2agent.memory.application.usecase.DocumentChunkWrite
 import com.github.silbaram.plan2agent.memory.application.usecase.RegisterIterationCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.RegisterProjectCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveDocumentChunksCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveDocumentSnapshotCommand
+import com.github.silbaram.plan2agent.memory.application.usecase.SaveChunkedDocumentSnapshotResult
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveRunRecordCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.SaveArtifactGraphSnapshotCommand
 import com.github.silbaram.plan2agent.memory.application.usecase.ArtifactGraphSnapshotResult
@@ -143,6 +148,30 @@ data class DocumentSnapshotWriteRequest(
     val createdAt: Instant? = null,
     val updatedAt: Instant? = null,
     val metadata: Map<String, String> = emptyMap(),
+) {
+    private var requestedChunking: DocumentSnapshotChunkingRequest? = null
+
+    @JsonSetter("chunking", nulls = Nulls.FAIL)
+    fun readChunking(value: DocumentSnapshotChunkingRequest?) {
+        requestedChunking = requireNotNull(value) { "chunking must be an object" }
+    }
+
+    fun toChunkingStrategy(): DocumentChunkingStrategy? {
+        val requested = requestedChunking ?: return null
+        require(requested.strategy == DocumentChunkingStrategy.PARAGRAPH_2000.apiValue) {
+            "chunking.strategy has invalid value"
+        }
+        return DocumentChunkingStrategy.PARAGRAPH_2000
+    }
+}
+
+data class DocumentSnapshotChunkingRequest(
+    val strategy: String? = null,
+)
+
+data class DocumentSnapshotChunkingResponse(
+    val strategy: String,
+    val chunkCount: Int,
 )
 
 data class DocumentSnapshotResponse(
@@ -161,6 +190,8 @@ data class DocumentSnapshotResponse(
     val createdAt: Instant,
     val updatedAt: Instant? = null,
     val metadata: Map<String, String>,
+    @field:JsonInclude(JsonInclude.Include.NON_NULL)
+    val chunking: DocumentSnapshotChunkingResponse? = null,
 )
 
 data class TaskGraphWriteRequest(
@@ -466,6 +497,14 @@ fun DocumentSnapshot.toResponse(): DocumentSnapshotResponse =
         createdAt = createdAt,
         updatedAt = updatedAt,
         metadata = metadata + mapOf("sourceDocumentId" to sourceDocumentId.value),
+    )
+
+fun SaveChunkedDocumentSnapshotResult.toResponse(): DocumentSnapshotResponse =
+    snapshot.toResponse().copy(
+        chunking = DocumentSnapshotChunkingResponse(
+            strategy = strategy.apiValue,
+            chunkCount = chunks.size,
+        ),
     )
 
 fun TaskGraph.toResponse(): TaskGraphResponse =
