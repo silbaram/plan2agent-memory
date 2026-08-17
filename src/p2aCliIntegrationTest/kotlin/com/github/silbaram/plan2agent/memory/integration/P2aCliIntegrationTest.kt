@@ -12,6 +12,7 @@ import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.context.SpringBootTest.WebEnvironment.RANDOM_PORT
@@ -55,6 +56,9 @@ import java.util.concurrent.atomic.AtomicInteger
 )
 @Import(P2aCliRequestCaptureConfiguration::class)
 class P2aCliIntegrationTest {
+    @TempDir
+    private lateinit var tempDir: Path
+
     @LocalServerPort
     private var serverPort: Int = 0
 
@@ -95,11 +99,13 @@ class P2aCliIntegrationTest {
 
     @Test
     fun `actual P2A planning docs push delegates chunks and converges on retry and concurrent backfill`() {
-        val fixtureRoot = Path.of(
+        val fixtureSource = Path.of(
             requireNotNull(javaClass.getResource("/fixtures/planning-docs")) {
                 "Missing p2aCliIntegrationTest planning-docs fixture"
             }.toURI(),
         )
+        val fixtureRoot = tempDir.resolve("planning-docs")
+        copyFixtureTree(fixtureSource, fixtureRoot)
 
         val first = runP2aPush(fixtureRoot)
         assertThat(first.path("result").path("chunks").asInt()).isZero()
@@ -203,6 +209,20 @@ class P2aCliIntegrationTest {
             .withFailMessage("Actual P2A CLI push failed. stdout=%s stderr=%s", stdout, stderr)
             .isZero()
         return objectMapper.readTree(stdout)
+    }
+
+    private fun copyFixtureTree(source: Path, target: Path) {
+        Files.walk(source).use { paths ->
+            paths.forEach { path ->
+                val destination = target.resolve(source.relativize(path).toString())
+                if (Files.isDirectory(path)) {
+                    Files.createDirectories(destination)
+                } else {
+                    Files.createDirectories(destination.parent)
+                    Files.copy(path, destination)
+                }
+            }
+        }
     }
 
     private fun concurrentSnapshotRequest(capturedRequest: JsonNode): ObjectNode {
