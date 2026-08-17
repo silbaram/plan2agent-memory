@@ -1,11 +1,11 @@
 ---
 name: p2a-task-author
-description: Use when authoring a Gate C task graph draft from a Plan2Agent context bundle so an agent proposes tasks and a human approves them at the gate.
+description: Use when authoring and validating a Gate C task graph draft from a Plan2Agent context bundle before canonical promotion.
 ---
 
 # Plan2Agent Task Author
 
-Author a reviewable Gate C task graph draft from an approved active Plan2Agent iteration context. This is a sibling to `p2a-task-breakdown`, but it writes only a draft and hands off to a human approval gate before any canonical task graph is promoted.
+Author a reviewable Gate C task graph draft from an approved active Plan2Agent iteration context. This is a sibling to `p2a-task-breakdown`: it writes a draft, validates it, and promotes only validator-clean content to the canonical graph.
 
 ## Ownership
 
@@ -15,14 +15,14 @@ Author a reviewable Gate C task graph draft from an approved active Plan2Agent i
 
 ## When to use
 
-Use this skill when the active iteration has an approved Gate B spec and needs a Gate C task graph authored as a reviewable draft. The draft is agent-proposed work, not the canonical Gate C artifact; a human must review and approve it before promotion.
+Use this skill when the active iteration has an approved Gate B spec and needs a Gate C task graph authored as a reviewable draft. The draft is agent-proposed work, not the canonical Gate C artifact; it becomes canonical only after the Gate C validator passes.
 
 ## Inputs
 
 The skill owner runs the context command to get the `p2a.task_context.v1` JSON bundle before invoking the task-author subagent:
 
 ```bash
-node .plan2agent/scripts/p2a_iteration.mjs context --artifacts <root>
+node .plan2agent/scripts/p2a.mjs iteration context --artifacts <root>
 ```
 
 Use these context fields:
@@ -48,7 +48,7 @@ The task-author subagent returns the complete draft JSON to the skill owner with
 iterations/<active_iteration>/gate-c-task-graph/task-graph.draft.json
 ```
 
-The draft must conform to `.plan2agent/schemas/task-graph.schema.json` (`p2a.task_graph.v1`) and include:
+The draft must conform to `p2a` package schema `task-graph.schema.json` (`p2a.task_graph.v1`) and include:
 
 - `schema_version`: `p2a.task_graph.v1`
 - `projectId`: copied exactly from `context.project_id`.
@@ -67,8 +67,9 @@ Each task must include:
 - `targetArea`
 - `suggestedAgentPrompt`: a paste-ready, scope-bounded prompt for the implementing agent.
 - `sourceSpecRefs`: at least one reference to a real `effective_spec` field, such as `implementation.architecture`; add Memory and decision lineage refs only in addition to this field.
+- `workKind: ui | non_ui | mixed` on every task when the effective spec selects `full + current_iteration`; include lightweight `visualImpact.screenStates` only for `ui` or `mixed`. Overlap is allowed because impact routes remediation and does not own final-review cases.
 
-Never write `task-graph.json` directly. The canonical graph is created only by `promote-tasks` after human approval.
+Never write `task-graph.json` directly. The canonical graph is created only by `promote-tasks` after validation.
 
 ## Authoring rules
 
@@ -89,28 +90,26 @@ Never write `task-graph.json` directly. The canonical graph is created only by `
 
 ## Boundaries
 
-Only author tasks backed by the approved spec. If the requested work changes product meaning by adding a new user flow, API, data model, success criterion, or similar product decision, do not author it as a task. Tell the user that it requires a separate feature iteration through Gates A-D.
+Only author tasks backed by the approved spec. If the requested work changes product meaning by adding a new user flow, API, data model, success criterion, or similar product decision, do not author it as a task. Tell the user that it requires a separate feature iteration through Gates A-C.
 
 ## After authoring
 
-After the skill owner writes the draft, hand it to the human gate with these steps:
+After the skill owner writes the draft, validate and promote it with these steps:
 
 1. Validate the draft:
 
    ```bash
-   node .plan2agent/scripts/p2a_iteration.mjs validate --artifacts <root> --stage gate-c-draft
+   node .plan2agent/scripts/p2a.mjs iteration validate --artifacts <root> --stage gate-c-draft
    ```
 
-2. If the human approves after review, promote the approved draft and record the Gate C audit in `current-spec.json`:
+2. After validation succeeds, promote the draft:
 
    ```bash
-   node .plan2agent/scripts/p2a_iteration.mjs promote-tasks \
-     --artifacts <root> \
-     --approved-by user \
-     --approval-note "<review rationale>"
+   node .plan2agent/scripts/p2a.mjs iteration promote-tasks \
+     --artifacts <root>
    ```
 
-   `promote-tasks` records `current-spec.json.gate_c_approval_audits[active_iteration]`, writes `task-graph.draft.meta.json`, and promotes the draft to canonical `task-graph.json`.
+   `promote-tasks` writes provenance to `task-graph.draft.meta.json` and promotes the validated draft to canonical `task-graph.json`.
 
    When a canonical task graph already exists, the default promotion is rejected to prevent an incremental-only draft from deleting existing task state. Before execution starts, a complete replacement draft produced and reviewed through `diff-tasks --force` may be promoted only with explicit `--replace-existing`. After any task leaves `todo` or any run is recorded for the active iteration, replacement is rejected even if the task is later reopened to `todo`; the change must use a new feature iteration or maintenance task.
 
@@ -119,4 +118,4 @@ After the skill owner writes the draft, hand it to the human gate with these ste
 - The task-author subagent is strictly read-only and returns draft content without writing files or running commands.
 - The skill owner may write only the draft artifact and run the scoped validation command described above.
 - Do not change application code, dependencies, or non-draft artifacts.
-- Do not write canonical `task-graph.json`; promotion is the job of `promote-tasks` after the human approval gate.
+- Do not write canonical `task-graph.json`; promotion is the job of `promote-tasks` after the validator passes.

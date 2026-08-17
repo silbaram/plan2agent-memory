@@ -9,7 +9,7 @@ Break an approved implementation spec into tasks that an agent or developer can 
 
 ## Inputs
 
-- `spec_json` conforming to `.plan2agent/schemas/spec.schema.json`.
+- `spec_json` conforming to `p2a` package schema `spec.schema.json`.
 - `spec_json.approval: approved`.
 - `spec_json.open_decisions: []`.
 - Every intake `CQ-n` has a valid `spec_json.clarifying_question_disposition`.
@@ -18,7 +18,7 @@ Break an approved implementation spec into tasks that an agent or developer can 
 
 ## Output
 
-Return a `task_graph_json` object conforming to `.plan2agent/schemas/task-graph.schema.json` with:
+Return a `task_graph_json` object conforming to `p2a` package schema `task-graph.schema.json` with:
 
 - `schema_version`: `p2a.task_graph.v1`
 - `projectId`
@@ -37,6 +37,7 @@ Each task must include:
 - `targetArea`
 - `suggestedAgentPrompt`
 - `sourceSpecRefs`
+- explicit `workKind: ui | non_ui | mixed` for every task under an approved `full + current_iteration` visual experience, with lightweight and optionally overlapping `visualImpact.screenStates` on `ui` and `mixed` tasks
 
 ## Validation Gates
 
@@ -45,6 +46,7 @@ Each task must include:
 - Reject task breakdown if Gate B clarifying question dispositions are missing or invalid.
 - Dependencies must reference task ids in the same graph.
 - The dependency graph must be acyclic.
+- `ui` and `mixed` tasks under `full + current_iteration` must use canonical approved experience/prototype references and only the screen-state cases and exact viewport objects owned by that task.
 
 ## Rules
 

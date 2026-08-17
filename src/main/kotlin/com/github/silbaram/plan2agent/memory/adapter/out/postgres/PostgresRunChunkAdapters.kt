@@ -197,12 +197,17 @@ class PostgresDocumentChunkStoreAdapter(
                     :artifactType, :sourcePath, :rawSourcePath, :chunkIndex, :chunkHash, :content,
                     :tokenEstimate, CAST(:metadata AS jsonb), :createdAt, NULL
                 )
+                ON CONFLICT (document_id, chunk_hash) DO NOTHING
                 """.trimIndent(),
                 chunksToInsert.map(::documentChunkParams).toTypedArray(),
             )
         }
-        val insertedById = findByIds(chunksToInsert.map { it.id }).associateBy { it.id }
-        chunks.map { chunk -> existingByInputId[chunk.id] ?: insertedById.getValue(chunk.id) }
+        val persistedByInputId = chunksToInsert.associate { chunk ->
+            chunk.id to requireNotNull(findByDocumentIdAndChunkHash(chunk.documentId, chunk.chunkHash)) {
+                "document chunk ${chunk.id.value} was not persisted"
+            }
+        }
+        chunks.map { chunk -> existingByInputId[chunk.id] ?: persistedByInputId.getValue(chunk.id) }
     }
 
     override fun findByDocumentId(documentId: DocumentId): List<DocumentChunk> =
@@ -253,20 +258,6 @@ class PostgresDocumentChunkStoreAdapter(
             documentChunkMapper(json),
         )
 
-    private fun findByIds(ids: List<DocumentChunkId>): List<DocumentChunk> =
-        if (ids.isEmpty()) {
-            emptyList()
-        } else {
-            jdbc.query(
-                """
-                SELECT *
-                FROM document_chunks
-                WHERE chunk_id IN (:chunkIds)
-                """.trimIndent(),
-                MapSqlParameterSource("chunkIds", ids.map { uuid(it.value) }),
-                documentChunkMapper(json),
-            )
-        }
 }
 
 @Repository

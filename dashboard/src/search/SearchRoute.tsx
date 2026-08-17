@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
-import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent } from 'react'
+import { useEffect, useId, useMemo, useState, type ChangeEvent, type FormEvent } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
   createDashboardQueries,
@@ -21,12 +21,20 @@ import {
   formStateFromSearchUrl,
   parseSearchUrl,
   searchUrlFromForm,
+  validationFieldsForForm,
   serializeSearchUrl,
   validationMessageForForm,
+  type SearchFormFieldName,
   type SearchFormState,
   type SearchMode,
   type SearchUrlState,
 } from './searchUrlState'
+import {
+  approvalStatusLabel,
+  groupCurrentSearchResults,
+  type GroupedSearchResult,
+  type PrioritySearchDocument,
+} from './searchPresentation'
 import './search.css'
 
 type SearchItem = KeywordSearchItem | SemanticSearchItem | HybridSearchItem
@@ -145,6 +153,12 @@ interface SearchFormProps {
 function SearchForm({ initialForm, onSearch }: SearchFormProps) {
   const [form, setForm] = useState(initialForm)
   const [validationMessage, setValidationMessage] = useState<string | null>(null)
+  const validationMessageId = useId()
+  const invalidFields = validationMessage === null ? [] : validationFieldsForForm(form)
+
+  function hasInvalidField(field: SearchFormFieldName) {
+    return invalidFields.includes(field)
+  }
 
   function updateForm(event: ChangeEvent<HTMLInputElement | HTMLSelectElement>) {
     const { name, value } = event.target
@@ -199,6 +213,8 @@ function SearchForm({ initialForm, onSearch }: SearchFormProps) {
         <div className="search-route__field search-route__field--query">
           <label htmlFor="search-q">검색어</label>
           <input
+            aria-describedby={hasInvalidField('q') ? validationMessageId : undefined}
+            aria-invalid={hasInvalidField('q') || undefined}
             autoComplete="off"
             id="search-q"
             name="q"
@@ -236,13 +252,29 @@ function SearchForm({ initialForm, onSearch }: SearchFormProps) {
         {form.scopeKind === 'all' ? null : (
           <div className="search-route__field">
             <label htmlFor="search-project-id">프로젝트 ID</label>
-            <input id="search-project-id" name="projectId" onChange={updateForm} type="text" value={form.projectId} />
+            <input
+              aria-describedby={hasInvalidField('projectId') ? validationMessageId : undefined}
+              aria-invalid={hasInvalidField('projectId') || undefined}
+              id="search-project-id"
+              name="projectId"
+              onChange={updateForm}
+              type="text"
+              value={form.projectId}
+            />
           </div>
         )}
         {form.scopeKind !== 'iteration' ? null : (
           <div className="search-route__field">
             <label htmlFor="search-iteration-id">이터레이션 ID</label>
-            <input id="search-iteration-id" name="iterationId" onChange={updateForm} type="text" value={form.iterationId} />
+            <input
+              aria-describedby={hasInvalidField('iterationId') ? validationMessageId : undefined}
+              aria-invalid={hasInvalidField('iterationId') || undefined}
+              id="search-iteration-id"
+              name="iterationId"
+              onChange={updateForm}
+              type="text"
+              value={form.iterationId}
+            />
           </div>
         )}
         {form.mode !== 'hybrid' ? null : (
@@ -250,17 +282,37 @@ function SearchForm({ initialForm, onSearch }: SearchFormProps) {
             <legend>혼합 점수 설정</legend>
             <div className="search-route__field">
               <label htmlFor="search-candidate-limit">후보 수</label>
-              <input id="search-candidate-limit" inputMode="numeric" min={SEARCH_PAGE_SIZE} name="candidateLimit" onChange={updateForm} type="number" value={form.candidateLimit} />
+              <input
+                aria-describedby={hasInvalidField('candidateLimit') ? validationMessageId : undefined}
+                aria-invalid={hasInvalidField('candidateLimit') || undefined}
+                id="search-candidate-limit"
+                inputMode="numeric"
+                min={SEARCH_PAGE_SIZE}
+                name="candidateLimit"
+                onChange={updateForm}
+                type="number"
+                value={form.candidateLimit}
+              />
             </div>
             <div className="search-route__field">
               <label htmlFor="search-rrf-k">RRF k</label>
-              <input id="search-rrf-k" inputMode="numeric" min="1" name="rrfK" onChange={updateForm} type="number" value={form.rrfK} />
+              <input
+                aria-describedby={hasInvalidField('rrfK') ? validationMessageId : undefined}
+                aria-invalid={hasInvalidField('rrfK') || undefined}
+                id="search-rrf-k"
+                inputMode="numeric"
+                min="1"
+                name="rrfK"
+                onChange={updateForm}
+                type="number"
+                value={form.rrfK}
+              />
             </div>
           </fieldset>
         )}
         <button type="submit">검색</button>
       </form>
-      {validationMessage === null ? null : <p className="search-route__validation" role="alert">{validationMessage}</p>}
+      {validationMessage === null ? null : <p className="search-route__validation" id={validationMessageId} role="alert">{validationMessage}</p>}
     </>
   )
 }
@@ -326,20 +378,65 @@ function SearchResults({ error, isLoading, mode, onNextPage, page, pageData, q }
     return <section aria-label="검색 결과 없음" className="search-route__state" role="status">일치하는 검색 결과가 없습니다.</section>
   }
 
+  const groupedResults = groupCurrentSearchResults(pageData.items)
+
   return (
     <section aria-label="검색 결과" className="search-route__results">
       <header className="search-route__results-header">
         <h2>검색 결과</h2>
         <p>페이지 {page}</p>
       </header>
-      <ol className="search-route__result-list">
-        {pageData.items.map((item, index) => (
-          <SearchResultCard item={item} key={searchItemKey(item, index)} mode={mode} />
-        ))}
-      </ol>
+      {groupedResults.priorityResults.length === 0 ? null : (
+        <SearchResultGroup
+          description="현재 페이지에서 핵심 P2A 문서로 식별된 결과입니다. 이 목록 안의 서버 순서를 유지합니다."
+          heading="핵심 P2A 문서"
+          mode={mode}
+          results={groupedResults.priorityResults}
+        />
+      )}
+      <SearchResultGroup
+        description={groupedResults.priorityResults.length === 0
+          ? '현재 페이지에서 핵심 P2A 문서를 찾지 못했습니다. 서버가 반환한 순서를 유지합니다.'
+          : '현재 페이지의 나머지 결과입니다. 이 목록 안의 서버 순서를 유지합니다.'}
+        heading="관련 산출물"
+        mode={mode}
+        results={groupedResults.supportingResults}
+      />
       {pageData.nextCursor === null ? null : (
         <button onClick={onNextPage} type="button">다음 페이지</button>
       )}
+    </section>
+  )
+}
+
+interface SearchResultGroupProps {
+  readonly description: string
+  readonly heading: string
+  readonly mode: SearchMode
+  readonly results: readonly GroupedSearchResult<SearchItem>[]
+}
+
+function SearchResultGroup({ description, heading, mode, results }: SearchResultGroupProps) {
+  const headingId = heading === '핵심 P2A 문서'
+    ? 'priority-search-results'
+    : 'supporting-search-results'
+
+  return (
+    <section aria-labelledby={headingId} className="search-route__result-group">
+      <header className="search-route__result-group-header">
+        <h3 id={headingId}>{heading}</h3>
+        <p>{description}</p>
+      </header>
+      <ol className="search-route__result-list">
+        {results.map(({ item, priorityDocument, serverIndex }) => (
+          <SearchResultCard
+            item={item}
+            key={searchItemKey(item, serverIndex)}
+            mode={mode}
+            priorityDocument={priorityDocument}
+          />
+        ))}
+      </ol>
     </section>
   )
 }
@@ -370,16 +467,23 @@ function SearchError({ error, mode }: { readonly error: Error; readonly mode: Se
   )
 }
 
-function SearchResultCard({ item, mode }: { readonly item: SearchItem; readonly mode: SearchMode }) {
+interface SearchResultCardProps {
+  readonly item: SearchItem
+  readonly mode: SearchMode
+  readonly priorityDocument: PrioritySearchDocument | null
+}
+
+function SearchResultCard({ item, mode, priorityDocument }: SearchResultCardProps) {
   const parentArtifact = resolveParentArtifact(item)
 
   return (
     <li>
       <article className="search-route__result">
         <header>
-          <p className="search-route__result-type">{item.artifactType}</p>
+          <p className="search-route__result-type">{priorityDocument?.label ?? item.artifactType}</p>
           <p>점수 {item.score}</p>
         </header>
+        {priorityDocument === null ? null : <PriorityDocumentMetadata document={priorityDocument} />}
         <p className="search-route__result-content">{item.content}</p>
         <dl className="search-route__result-metadata">
           <div><dt>문서 ID</dt><dd>{item.documentId ?? '—'}</dd></div>
@@ -399,6 +503,17 @@ function SearchResultCard({ item, mode }: { readonly item: SearchItem; readonly 
         )}
       </article>
     </li>
+  )
+}
+
+function PriorityDocumentMetadata({ document }: { readonly document: PrioritySearchDocument }) {
+  return (
+    <dl className="search-route__priority-metadata">
+      <div><dt>Gate</dt><dd>{document.gate}</dd></div>
+      <div><dt>승인 상태</dt><dd>{approvalStatusLabel(document.approvalStatus)}</dd></div>
+      <div><dt>목적</dt><dd>{document.purpose}</dd></div>
+      <div><dt>연결 작업 수</dt><dd>{document.linkedWorkCount === null ? '확인 불가' : document.linkedWorkCount}</dd></div>
+    </dl>
   )
 }
 

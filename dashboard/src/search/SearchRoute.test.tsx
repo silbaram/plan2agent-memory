@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it } from 'vitest'
 import { BrowserRouter } from 'react-router-dom'
@@ -87,6 +87,45 @@ describe('search URL state', () => {
 })
 
 describe('SearchRoute', () => {
+  it('semantically renders ready, validation-error, and empty states', async () => {
+    let keywordRequests = 0
+    server.use(
+      http.get('/api/search/keyword', () => {
+        keywordRequests += 1
+        return HttpResponse.json(page([]))
+      }),
+    )
+    setLocation('/search')
+    renderSearch()
+
+    expect(screen.getByRole('status', { name: '검색 시작 안내' }).textContent).toContain('검색어와 방식을 선택한 뒤 검색하세요')
+    fireEvent.click(screen.getByRole('button', { name: '검색' }))
+    const validationAlert = screen.getByRole('alert')
+    expect(validationAlert.textContent).toContain('검색어를 입력하세요')
+    const queryInput = screen.getByLabelText('검색어')
+    expect(queryInput.getAttribute('aria-invalid')).toBe('true')
+    expect(queryInput.getAttribute('aria-describedby')).toBe(validationAlert.id)
+    expect(keywordRequests).toBe(0)
+
+    fireEvent.change(screen.getByLabelText('검색어'), { target: { value: 'no matching artifact' } })
+    fireEvent.click(screen.getByRole('button', { name: '검색' }))
+
+    const emptyState = await screen.findByRole('status', { name: '검색 결과 없음' })
+    expect(emptyState.textContent).toContain('일치하는 검색 결과가 없습니다')
+    expect(keywordRequests).toBe(1)
+  })
+
+  it('semantically renders the loading state while the current search request is pending', async () => {
+    server.use(
+      http.get('/api/search/keyword', () => new Promise<Response>(() => undefined)),
+    )
+    setLocation('/search?q=waiting')
+    renderSearch()
+
+    expect(await screen.findByRole('status')).toHaveProperty('textContent', '검색 결과를 불러오는 중입니다.')
+    expect(screen.getByRole('status').getAttribute('aria-busy')).toBe('true')
+  })
+
   it('restores a cursor-bound scoped URL into accessible controls and search navigation', async () => {
     const requestUrls: URL[] = []
     const restoredState: SearchUrlState = {
@@ -226,6 +265,56 @@ describe('SearchRoute', () => {
     })
     expect(screen.queryByRole('link', { name: '부모 산출물 열기' })).toBeNull()
   })
+
+  it('groups only current-page canonical P2A documents ahead of supporting results without changing request or intra-group order', async () => {
+    const requestUrls: URL[] = []
+    const sourceIterationId = 'v4-dashboard-ui-refresh'
+    server.use(
+      http.get('/api/search/keyword', ({ request }) => {
+        requestUrls.push(new URL(request.url))
+        return HttpResponse.json(page([
+          searchItem({ chunkId: 'supporting-first', content: 'supporting first', sourcePath: 'docs/notes.md' }),
+          searchItem({
+            chunkId: 'product-spec',
+            content: 'product specification result',
+            metadata: { explicitStatus: 'approved', linkedWorkCount: '3' },
+            sourceIterationId,
+            sourcePath: `iterations/${sourceIterationId}/gate-b-spec/product-spec.md`,
+          }),
+          searchItem({
+            chunkId: 'experience-spec',
+            content: 'experience specification result',
+            sourceIterationId,
+            sourcePath: `iterations/${sourceIterationId}/gate-b-spec/experience-spec.json`,
+          }),
+          searchItem({ chunkId: 'supporting-last', content: 'supporting last', sourcePath: 'docs/runs.md' }),
+        ], 'next-page'))
+      }),
+    )
+    setLocation('/search?q=dashboard')
+    renderSearch()
+
+    const priorityGroup = await screen.findByRole('region', { name: '핵심 P2A 문서' })
+    const priorityItems = within(priorityGroup).getAllByRole('listitem')
+    expect(priorityItems.map((item) => item.textContent)).toEqual([
+      expect.stringContaining('product specification result'),
+      expect.stringContaining('experience specification result'),
+    ])
+    expect(priorityGroup.textContent).toContain('Gate B')
+    expect(priorityGroup.textContent).toContain('승인됨')
+    expect(priorityGroup.textContent).toContain('연결 작업 수3')
+    expect(priorityGroup.textContent).toContain('확인 불가')
+
+    const supportingGroup = screen.getByRole('region', { name: '관련 산출물' })
+    const supportingItems = within(supportingGroup).getAllByRole('listitem')
+    expect(supportingItems.map((item) => item.textContent)).toEqual([
+      expect.stringContaining('supporting first'),
+      expect.stringContaining('supporting last'),
+    ])
+    expect(requestUrls).toHaveLength(1)
+    expect(requestUrls[0]?.searchParams.get('q')).toBe('dashboard')
+    expect(screen.getByRole('button', { name: '다음 페이지' })).toBeTruthy()
+  })
 })
 
 function renderSearch() {
@@ -248,12 +337,18 @@ interface SearchItemOverrides {
   readonly chunkId?: string | null
   readonly content?: string
   readonly documentId?: string | null
+  readonly metadata?: Readonly<Record<string, string>>
+  readonly sourceIterationId?: string | null
+  readonly sourcePath?: string | null
 }
 
 function searchItem({
   chunkId = 'chunk-1',
   content = 'approval decision content',
   documentId = 'document-1',
+  metadata = {},
+  sourceIterationId = null,
+  sourcePath = 'docs/approval.md',
 }: SearchItemOverrides = {}): Record<string, unknown> {
   return {
     artifactType: 'DOCUMENT_CHUNK',
@@ -266,9 +361,9 @@ function searchItem({
         documentId,
         iterationId,
         projectId,
-        sourcePath: 'docs/approval.md',
+        sourcePath,
       },
-      sourceIds: sourceIds(),
+      sourceIds: sourceIds(sourceIterationId),
       sourceReference: null,
     },
     content,
@@ -280,23 +375,23 @@ function searchItem({
       documentId,
       iterationId,
       projectId,
-      sourcePath: 'docs/approval.md',
+      sourcePath,
     },
     matchReason: 'content',
-    metadata: {},
+    metadata,
     projectId,
     score: 1,
-    sourceIds: sourceIds(),
-    sourcePath: 'docs/approval.md',
+    sourceIds: sourceIds(sourceIterationId),
+    sourcePath,
     sourceReference: null,
   }
 }
 
-function sourceIds() {
+function sourceIds(sourceIterationId: string | null = null) {
   return {
     sourceChunkId: null,
     sourceDocumentId: null,
-    sourceIterationId: null,
+    sourceIterationId,
     sourceProjectId: null,
     sourceRunId: null,
     sourceTaskGraphId: null,

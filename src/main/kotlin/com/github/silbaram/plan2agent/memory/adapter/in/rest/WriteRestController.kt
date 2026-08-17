@@ -2,6 +2,7 @@ package com.github.silbaram.plan2agent.memory.adapter.`in`.rest
 
 import com.github.silbaram.plan2agent.memory.application.port.`in`.RegisterIterationUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.RegisterProjectUseCase
+import com.github.silbaram.plan2agent.memory.application.port.`in`.SaveChunkedDocumentSnapshotUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.SaveDocumentChunksUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.SaveArtifactGraphSnapshotUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.SaveDocumentSnapshotUseCase
@@ -22,6 +23,7 @@ class WriteRestController(
     private val registerProjectUseCase: RegisterProjectUseCase,
     private val registerIterationUseCase: RegisterIterationUseCase,
     private val saveDocumentSnapshotUseCase: SaveDocumentSnapshotUseCase,
+    private val saveChunkedDocumentSnapshotUseCase: SaveChunkedDocumentSnapshotUseCase,
     private val saveTaskGraphUseCase: SaveTaskGraphUseCase,
     private val saveTasksUseCase: SaveTasksUseCase,
     private val saveRunRecordUseCase: SaveRunRecordUseCase,
@@ -43,8 +45,15 @@ class WriteRestController(
 
     @PostMapping("/documents/snapshots")
     @ResponseStatus(HttpStatus.CREATED)
-    fun saveDocumentSnapshot(@RequestBody request: DocumentSnapshotWriteRequest): DocumentSnapshotResponse =
-        saveDocumentSnapshotUseCase.saveDocumentSnapshot(request.toCommand()).toResponse()
+    fun saveDocumentSnapshot(@RequestBody request: DocumentSnapshotWriteRequest): DocumentSnapshotResponse {
+        val strategy = request.toChunkingStrategy()
+        val command = request.toCommand()
+        return if (strategy == null) {
+            saveDocumentSnapshotUseCase.saveDocumentSnapshot(command).toResponse()
+        } else {
+            saveChunkedDocumentSnapshotUseCase.saveChunkedDocumentSnapshot(command, strategy).toResponse()
+        }
+    }
 
     @PostMapping("/task-graphs")
     @ResponseStatus(HttpStatus.CREATED)

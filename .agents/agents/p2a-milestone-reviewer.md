@@ -15,12 +15,12 @@ Perform an independent, read-only review of completed work in an active iteratio
 Required inputs:
 - The full current iteration task graph with every task status, also preserved verbatim as the owner-built `source.task_graph_snapshot` for this checkpoint. The source envelope must include the raw task-graph file `task_graph_sha256` and deterministic `task_graph_snapshot_sha256` required by the milestone-review schema.
 - The approved product and implementation spec.
-- The project's `.plan2agent/style.md` contents when present.
-- An owner-built evidence envelope for every `done` task. Each entry must include `task_id`, `task_title`, the latest successful `run_id`, artifact-root-relative `run_ref` formed as `runs/<run-index entry runRef>` (normally `runs/<iteration_id>/<run_id>.json`), raw-file SHA-256 `run_sha256`, the full immutable `p2a.run.v1` `run_snapshot` with deterministic `run_snapshot_sha256`, `run_finished_at`, `workspace_ref` copied exactly from `run_snapshot.workspaceRef`, the run's complete `changed_files` list, and its complete verification summary. At least one verification item per completed task must be an executed `config` or `command` check that passed with exit code 0.
+- The project's approved `.plan2agent/constitution.json` contents when present, including style guidance and prohibitions; otherwise legacy `.plan2agent/style.md` contents when present.
+- An owner-built evidence envelope for every `done` task. Each entry must include artifact-root-relative `run_ref` formed as `runs/<run-index entry runRef>` (normally `runs/<iteration_id>/<run_id>.json`), raw-file SHA-256 `run_sha256`, and the full immutable `p2a.run.v1` `run_snapshot` with deterministic `run_snapshot_sha256`. Read task identity, run identity, finish time, workspace, changed files, and verification from `run_snapshot`. At least one `run_snapshot.verification` item per completed task must be an executed `config` or `command` check that passed with exit code 0.
 - The task-count snapshot and remaining task ids from the same task-graph snapshot as the evidence envelope.
 - A checkpoint label of `midpoint` or `pre_close`.
 
-If any completed task is missing its run, raw or snapshot hash, full run snapshot, finished timestamp, workspace reference, changed-file list, or verification summary, return the same JSON result shape with empty finding arrays and a `note` beginning `INPUT_ERROR:` instead of attempting a partial review. Apply the same response when neither the named workspace/worktree nor its immutable isolation branch can be inspected. Do not infer or manufacture missing run evidence. The owner must not promote that response as a milestone artifact.
+If any completed task is missing its `run_ref`, raw or snapshot hash, full `run_snapshot`, `run_snapshot.finishedAt`, `run_snapshot.workspaceRef`, `run_snapshot.changedFiles`, or `run_snapshot.verification`, return the same JSON result shape with empty finding arrays and a `note` beginning `INPUT_ERROR:` instead of attempting a partial review. Apply the same response when neither the named workspace/worktree nor its immutable isolation branch can be inspected. Do not infer or manufacture missing run evidence. The owner must not promote that response as a milestone artifact.
 
 Review rules:
 - Review only the scope of completed tasks.
@@ -31,7 +31,7 @@ Review rules:
 - Cite concrete files, task ids, run ids, verification commands, or spec sections as structured evidence. Every evidence entry must identify its `kind`, exact `reference`, and why it supports the finding in `detail`.
 - Recommend a maintenance task only for a confirmed defect that is not already covered by remaining planned work.
 - For planned work that is not a finding, identify the remaining task ids that cover it and cite the task or spec evidence.
-- Treat style guidance as context; style-only findings belong to `p2a-style-rater` unless they expose a real integration defect.
+- Treat constitution style guidance as context; style-only findings belong to `p2a-style-rater` unless they expose a real integration defect. Validator-enforced prohibitions should already have been rejected during artifact validation; report any observed validation gap as an integration defect.
 
 Return only this JSON object shape:
 
@@ -76,5 +76,5 @@ Boundaries:
 - Do not edit files or run state-changing commands. Use only read-only file, search, and git inspection needed to resolve the owner-provided workspaces, branches, and evidence.
 - Do not implement fixes or modify planning artifacts.
 - Treat the owner-provided completed-task evidence envelope as immutable and do not claim evidence that is absent from it.
-- Do not decide task `done`/`block`, run status, iteration close readiness, or Gate D state.
+- Do not decide task `done`/`block`, run status, or iteration close readiness.
 - Keep the result informational and return it to the `p2a-dev-execution` owner for maintenance-task handling.

@@ -2,6 +2,7 @@ package com.github.silbaram.plan2agent.memory.application.usecase
 
 import com.github.silbaram.plan2agent.memory.application.port.`in`.RegisterIterationUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.RegisterProjectUseCase
+import com.github.silbaram.plan2agent.memory.application.port.`in`.SaveChunkedDocumentSnapshotUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.SaveDocumentChunksUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.SaveArtifactGraphSnapshotUseCase
 import com.github.silbaram.plan2agent.memory.application.port.`in`.SaveDocumentSnapshotUseCase
@@ -63,11 +64,13 @@ class WriteUseCaseService(
 ) : RegisterProjectUseCase,
     RegisterIterationUseCase,
     SaveDocumentSnapshotUseCase,
+    SaveChunkedDocumentSnapshotUseCase,
     SaveTaskGraphUseCase,
     SaveTasksUseCase,
     SaveRunRecordUseCase,
     SaveDocumentChunksUseCase,
     SaveArtifactGraphSnapshotUseCase {
+    private val paragraph2000DocumentChunker = Paragraph2000DocumentChunker()
 
     @Transactional
     override fun registerProject(command: RegisterProjectCommand): Project =
@@ -108,6 +111,32 @@ class WriteUseCaseService(
 
     @Transactional
     override fun saveDocumentSnapshot(command: SaveDocumentSnapshotCommand): DocumentSnapshot {
+        return saveDocumentSnapshotInternal(command)
+    }
+
+    @Transactional
+    override fun saveChunkedDocumentSnapshot(
+        snapshotCommand: SaveDocumentSnapshotCommand,
+        strategy: DocumentChunkingStrategy,
+    ): SaveChunkedDocumentSnapshotResult {
+        val snapshot = saveDocumentSnapshotInternal(snapshotCommand)
+        val generatedChunks = when (strategy) {
+            DocumentChunkingStrategy.PARAGRAPH_2000 -> paragraph2000DocumentChunker.chunk(snapshot)
+        }
+        val persistedChunks = saveDocumentChunks(
+            SaveDocumentChunksCommand(
+                documentId = snapshot.id,
+                chunks = generatedChunks.map(::DocumentChunkWrite),
+            ),
+        )
+        return SaveChunkedDocumentSnapshotResult(
+            snapshot = snapshot,
+            strategy = strategy,
+            chunks = persistedChunks,
+        )
+    }
+
+    private fun saveDocumentSnapshotInternal(command: SaveDocumentSnapshotCommand): DocumentSnapshot {
         requireProjectExists(command.projectId)
         command.iterationId?.let { requireIterationBelongsToProject(it, command.projectId) }
 

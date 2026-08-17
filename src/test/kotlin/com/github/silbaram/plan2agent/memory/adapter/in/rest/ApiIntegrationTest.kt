@@ -209,6 +209,90 @@ class ApiIntegrationTest {
             .andExpect(jsonPath("$.name").value("p2a.memory.search.calls"))
     }
 
+    @Test
+    fun `snapshot chunking opt-in backfills canonical chunks and jobs with acknowledgment`() {
+        val fixture = ApiFixture("server-owned-chunking")
+        postJson("/api/projects", fixture.projectBody()).andExpect(status().isCreated())
+        postJson("/api/projects/${fixture.projectId}/iterations", fixture.iterationBody()).andExpect(status().isCreated())
+
+        val snapshotOnly = postJson("/api/documents/snapshots", fixture.documentBody()).expectCreatedJson()
+        assertThat(snapshotOnly.has("chunking")).isFalse()
+        assertThat(rowCount("documents")).isEqualTo(1)
+        assertThat(rowCount("document_chunks")).isZero()
+        assertThat(rowCount("embedding_jobs")).isZero()
+
+        val differentRequestedId = uuid("server-owned-chunking-retry-document")
+        val optInBody = fixture.documentBody() + mapOf(
+            "documentId" to differentRequestedId,
+            "sourceReference" to sourceReference(differentRequestedId, fixture.sourcePath),
+            "metadata" to mapOf(
+                "kind" to "spec",
+                "sourceChunkId" to "client-value",
+                "parentDocumentId" to "client-value",
+                "chunkStrategy" to "client-value",
+            ),
+            "chunking" to mapOf("strategy" to "paragraph-2000"),
+        )
+        val first = postJson("/api/documents/snapshots", optInBody).expectCreatedJson()
+        val repeated = postJson("/api/documents/snapshots", optInBody).expectCreatedJson()
+
+        assertThat(first["documentId"].asText()).isEqualTo(fixture.documentId)
+        assertThat(first["chunking"]["strategy"].asText()).isEqualTo("paragraph-2000")
+        assertThat(first["chunking"]["chunkCount"].asInt()).isEqualTo(1)
+        assertThat(repeated["documentId"].asText()).isEqualTo(fixture.documentId)
+        assertThat(repeated["chunking"]["chunkCount"].asInt()).isEqualTo(1)
+        assertThat(rowCount("documents")).isEqualTo(1)
+        assertThat(rowCount("document_chunks")).isEqualTo(1)
+        assertThat(rowCount("embedding_sets")).isEqualTo(1)
+        assertThat(rowCount("embedding_jobs")).isEqualTo(1)
+
+        val storedChunk = jdbc.queryForMap(
+            """
+            SELECT document_id::text AS document_id, chunk_index, content, token_estimate,
+                   metadata ->> 'sourceChunkId' AS source_chunk_id,
+                   metadata ->> 'parentDocumentId' AS parent_document_id,
+                   metadata ->> 'chunkStrategy' AS chunk_strategy,
+                   metadata ->> 'p2a.sourceReference.uri' AS source_uri,
+                   metadata ->> 'p2a.sourceReference.fragment' AS source_fragment
+            FROM document_chunks
+            """.trimIndent(),
+        )
+        assertThat(storedChunk["document_id"]).isEqualTo(fixture.documentId)
+        assertThat(storedChunk["chunk_index"]).isEqualTo(0)
+        assertThat(storedChunk["content"]).isEqualTo("Document content for ${fixture.scope} with API integration context.")
+        assertThat(storedChunk["source_chunk_id"]).isEqualTo("${fixture.sourceDocumentId}:chunk-0")
+        assertThat(storedChunk["parent_document_id"]).isEqualTo(fixture.documentId)
+        assertThat(storedChunk["chunk_strategy"]).isEqualTo("paragraph-2000")
+        assertThat(storedChunk["source_uri"]).isEqualTo("file:///repo/${fixture.sourcePath}")
+        assertThat(storedChunk["source_fragment"]).isEqualTo("chunk-0")
+    }
+
+    @Test
+    fun `malformed or unknown snapshot chunking is rejected before writes`() {
+        val fixture = ApiFixture("invalid-server-owned-chunking")
+        postJson("/api/projects", fixture.projectBody()).andExpect(status().isCreated())
+        postJson("/api/projects/${fixture.projectId}/iterations", fixture.iterationBody()).andExpect(status().isCreated())
+
+        val invalidChunkingValues = listOf<Any?>(
+            emptyMap<String, String>(),
+            mapOf("strategy" to "paragraph-1000"),
+            mapOf("strategy" to "paragraph-2000", "overlap" to 0),
+            mapOf("strategy" to 2000),
+            "paragraph-2000",
+            null,
+        )
+        invalidChunkingValues.forEach { invalidChunking ->
+            postJson(
+                "/api/documents/snapshots",
+                fixture.documentBody() + mapOf("chunking" to invalidChunking),
+            ).andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("validation_error"))
+            assertThat(rowCount("documents")).isZero()
+            assertThat(rowCount("document_chunks")).isZero()
+            assertThat(rowCount("embedding_jobs")).isZero()
+        }
+    }
+
 
     @Test
     fun `task graph source identities remain distinct for equal content and reject canonical id conflicts`() {

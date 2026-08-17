@@ -54,11 +54,24 @@ val onnxVerificationTest by sourceSets.creating {
     runtimeClasspath += output + compileClasspath
 }
 
+val p2aCliIntegrationTest by sourceSets.creating {
+    compileClasspath += sourceSets.main.get().output
+    runtimeClasspath += output + compileClasspath
+}
+
 configurations.named(onnxVerificationTest.implementationConfigurationName) {
     extendsFrom(configurations.testImplementation.get())
 }
 
 configurations.named(onnxVerificationTest.runtimeOnlyConfigurationName) {
+    extendsFrom(configurations.testRuntimeOnly.get())
+}
+
+configurations.named(p2aCliIntegrationTest.implementationConfigurationName) {
+    extendsFrom(configurations.testImplementation.get())
+}
+
+configurations.named(p2aCliIntegrationTest.runtimeOnlyConfigurationName) {
     extendsFrom(configurations.testRuntimeOnly.get())
 }
 
@@ -93,6 +106,49 @@ tasks.register<Test>("onnxVerificationTest") {
                     "Set P2A_ONNX_MODEL_URI=file:///path/model.onnx and " +
                     "P2A_ONNX_TOKENIZER_URI=file:///path/tokenizer.json; " +
                     "the task validates both against the pinned V2 SHA-256 checksums.",
+            )
+        }
+    }
+}
+
+tasks.register<Test>("p2aCliIntegrationTest") {
+    group = LifecycleBasePlugin.VERIFICATION_GROUP
+    description = "Runs the actual Plan2Agent CLI against a RANDOM_PORT Memory server and PostgreSQL Testcontainer."
+    testClassesDirs = p2aCliIntegrationTest.output.classesDirs
+    classpath = p2aCliIntegrationTest.runtimeClasspath
+    shouldRunAfter(tasks.named<Test>("test"))
+    useJUnitPlatform()
+    doNotTrackState("Executes an external P2A CLI against a Docker-backed Memory server.")
+    doFirst {
+        val scriptPath = System.getenv("P2A_CLI_SCRIPT")?.trim().orEmpty()
+        if (scriptPath.isEmpty()) {
+            throw GradleException(
+                "p2aCliIntegrationTest requires P2A_CLI_SCRIPT to point to the actual Plan2Agent scripts/p2a.mjs file.",
+            )
+        }
+        val scriptFile = file(scriptPath)
+        if (!scriptFile.isFile) {
+            throw GradleException(
+                "p2aCliIntegrationTest requires P2A_CLI_SCRIPT to be a file: ${scriptFile.absolutePath}",
+            )
+        }
+
+        val nodeVersion = try {
+            val process = ProcessBuilder("node", "--version")
+                .redirectErrorStream(true)
+                .start()
+            val output = process.inputStream.bufferedReader().use { it.readText() }.trim()
+            if (process.waitFor() != 0) {
+                throw GradleException("Node.js version check failed: $output")
+            }
+            output
+        } catch (error: java.io.IOException) {
+            throw GradleException("p2aCliIntegrationTest requires Node.js 22 or newer on PATH.", error)
+        }
+        val nodeMajor = Regex("^v?(\\d+)").find(nodeVersion)?.groupValues?.get(1)?.toIntOrNull()
+        if (nodeMajor == null || nodeMajor < 22) {
+            throw GradleException(
+                "p2aCliIntegrationTest requires Node.js 22 or newer; found ${nodeVersion.ifEmpty { "unknown" }}.",
             )
         }
     }

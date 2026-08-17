@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import type { ComponentProps } from 'react'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -149,6 +149,40 @@ describe('ArtifactTree', () => {
     expect(iterationAttempts).toBe(2)
   })
 
+  it.each([
+    {
+      name: 'loading',
+      response: () => new Promise<Response>(() => {}),
+      role: 'status',
+      statusName: '프로젝트 목록을 불러오는 중',
+    },
+    {
+      name: 'empty',
+      response: () => HttpResponse.json(page([])),
+      role: 'status',
+      statusName: '표시할 프로젝트가 없습니다.',
+    },
+    {
+      name: 'error',
+      response: () => new HttpResponse(null, { status: 503 }),
+      role: 'alert',
+      statusName: '프로젝트 목록을 불러올 수 없습니다',
+    },
+  ] as const)('keeps its root $name message outside the tree', async ({ response, role, statusName }) => {
+    server.use(http.get('/api/projects', response))
+
+    renderArtifactTree()
+
+    const messageText = await screen.findByText(statusName)
+    const message = messageText.closest<HTMLElement>(`[role="${role}"]`)
+    if (message === null) {
+      throw new Error(`Expected the ${role} message container.`)
+    }
+    const tree = screen.getByRole('tree', { name: '산출물 계층' })
+    expect(tree.contains(message)).toBe(false)
+    expect(tree.querySelector('[role="status"], [role="alert"]')).toBeNull()
+  })
+
   it('supports keyboard expand, collapse, focus movement, and an accessible current selection', async () => {
     const selections: ArtifactTreeSelection[] = []
     server.use(
@@ -165,6 +199,7 @@ describe('ArtifactTree', () => {
 
     const projectItem = await screen.findByRole('treeitem', { name: '프로젝트 Atlas' })
     projectItem.focus()
+    expectSingleRovingTabstop(projectItem)
     fireEvent.keyDown(projectItem, { key: 'ArrowRight' })
     expect(projectItem.getAttribute('aria-expanded')).toBe('true')
 
@@ -173,6 +208,11 @@ describe('ArtifactTree', () => {
     expect(document.activeElement).toBe(iterationItem)
 
     fireEvent.keyDown(iterationItem, { key: 'ArrowRight' })
+    expect(iterationItem.getAttribute('aria-expanded')).toBe('true')
+
+    fireEvent.keyDown(iterationItem, { key: ' ' })
+    expect(iterationItem.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.keyDown(iterationItem, { key: ' ' })
     expect(iterationItem.getAttribute('aria-expanded')).toBe('true')
 
     const artifactItem = await screen.findByRole('treeitem', { name: '작업 Gate D 승인' })
@@ -186,12 +226,133 @@ describe('ArtifactTree', () => {
       artifactType: 'TASK',
       iterationId,
       projectId,
+      sourceIterationId: `source-${iterationId}`,
     }])
 
     fireEvent.keyDown(artifactItem, { key: 'ArrowLeft' })
     expect(document.activeElement).toBe(iterationItem)
     fireEvent.keyDown(iterationItem, { key: 'ArrowLeft' })
     expect(iterationItem.getAttribute('aria-expanded')).toBe('false')
+    expectSingleRovingTabstop(iterationItem)
+  })
+
+  it('keeps one roving tabstop while Arrow, Home, and End move at tree boundaries', async () => {
+    server.use(
+      http.get('/api/projects', () => HttpResponse.json(page([
+        project('Atlas'),
+        project('Beacon', '33333333-3333-4333-8333-333333333333'),
+      ]))),
+    )
+
+    renderArtifactTree()
+
+    const atlasItem = await screen.findByRole('treeitem', { name: '프로젝트 Atlas' })
+    const beaconItem = await screen.findByRole('treeitem', { name: '프로젝트 Beacon' })
+    expectSingleRovingTabstop(atlasItem)
+
+    atlasItem.focus()
+    fireEvent.keyDown(atlasItem, { key: 'ArrowUp' })
+    expect(document.activeElement).toBe(atlasItem)
+
+    fireEvent.keyDown(atlasItem, { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(beaconItem)
+    expectSingleRovingTabstop(beaconItem)
+
+    fireEvent.keyDown(beaconItem, { key: 'End' })
+    expect(document.activeElement).toBe(beaconItem)
+    fireEvent.keyDown(beaconItem, { key: 'Home' })
+    expect(document.activeElement).toBe(atlasItem)
+    expectSingleRovingTabstop(atlasItem)
+  })
+
+  it('restores focus to the collapsed branch when a pointer closes the focused descendant', async () => {
+    server.use(
+      http.get('/api/projects', () => HttpResponse.json(page([project('Atlas')]))),
+      http.get(`/api/projects/${projectId}/iterations`, () => HttpResponse.json(page([iteration('Iteration one')]))),
+    )
+
+    renderArtifactTree()
+
+    const projectItem = await screen.findByRole('treeitem', { name: '프로젝트 Atlas' })
+    fireEvent.click(projectItem)
+    const iterationItem = await screen.findByRole('treeitem', { name: '이터레이션 Iteration one' })
+    iterationItem.focus()
+    await waitFor(() => {
+      expectSingleRovingTabstop(iterationItem)
+    })
+
+    fireEvent.click(projectItem)
+
+    await waitFor(() => {
+      expect(screen.queryByRole('treeitem', { name: '이터레이션 Iteration one' })).toBeNull()
+      expect(document.activeElement).toBe(projectItem)
+    })
+    expectSingleRovingTabstop(projectItem)
+  })
+
+  it('restores focus to the closest visible item when filtering removes the active artifact', async () => {
+    server.use(
+      http.get('/api/projects', () => HttpResponse.json(page([project('Atlas')]))),
+      http.get(`/api/projects/${projectId}/iterations`, () => HttpResponse.json(page([iteration('Iteration one')]))),
+      http.get('/api/artifacts', () => HttpResponse.json(page([artifact('TASK', 'approval-task', 'Gate D 승인')]))),
+    )
+
+    const { queryClient } = renderArtifactTree()
+    const projectItem = await screen.findByRole('treeitem', { name: '프로젝트 Atlas' })
+    fireEvent.click(projectItem)
+    const iterationItem = await screen.findByRole('treeitem', { name: '이터레이션 Iteration one' })
+    fireEvent.click(iterationItem)
+    const artifactItem = await screen.findByRole('treeitem', { name: '작업 Gate D 승인' })
+    artifactItem.focus()
+    await waitFor(() => {
+      expectSingleRovingTabstop(artifactItem)
+    })
+
+    queryClient.setQueryData(
+      ['artifact-tree', 'projects', projectId, 'iterations', iterationId, 'artifacts', 50],
+      { pages: [page([artifact('DOCUMENT_CHUNK', 'hidden-chunk', '숨겨진 청크')])], pageParams: [undefined] },
+    )
+
+    await waitFor(() => {
+      expect(screen.queryByRole('treeitem', { name: '작업 Gate D 승인' })).toBeNull()
+      expect(document.activeElement).toBe(iterationItem)
+    })
+    expectSingleRovingTabstop(iterationItem)
+  })
+
+  it('keeps focus on the same canonical artifact after a refresh reorders its page', async () => {
+    let artifactRequestCount = 0
+    server.use(
+      http.get('/api/projects', () => HttpResponse.json(page([project('Atlas')]))),
+      http.get(`/api/projects/${projectId}/iterations`, () => HttpResponse.json(page([iteration('Iteration one')]))),
+      http.get('/api/artifacts', () => {
+        artifactRequestCount += 1
+        return HttpResponse.json(page(
+          artifactRequestCount === 1
+            ? [artifact('TASK', 'approval-task', 'Gate D 승인')]
+            : [
+                artifact('PROPOSAL', 'fresh-proposal', '새 제안'),
+                artifact('TASK', 'approval-task', 'Gate D 승인'),
+              ],
+        ))
+      }),
+    )
+
+    const { queryClient } = renderArtifactTree()
+    const projectItem = await screen.findByRole('treeitem', { name: '프로젝트 Atlas' })
+    fireEvent.click(projectItem)
+    const iterationItem = await screen.findByRole('treeitem', { name: '이터레이션 Iteration one' })
+    fireEvent.click(iterationItem)
+    const artifactItem = await screen.findByRole('treeitem', { name: '작업 Gate D 승인' })
+    artifactItem.focus()
+
+    await queryClient.refetchQueries({
+      queryKey: ['artifact-tree', 'projects', projectId, 'iterations', iterationId, 'artifacts', 50],
+    })
+
+    await screen.findByRole('treeitem', { name: '제안 새 제안' })
+    expect(document.activeElement).toBe(artifactItem)
+    expectSingleRovingTabstop(artifactItem)
   })
 })
 
@@ -206,11 +367,19 @@ function renderArtifactTree(props: Partial<ComponentProps<typeof ArtifactTree>> 
   })
   const apiClient = createDashboardApiClient(browserFetch)
 
-  return render(
+  const rendered = render(
     <QueryClientProvider client={queryClient}>
       <ArtifactTree apiClient={apiClient} {...props} />
     </QueryClientProvider>,
   )
+
+  return { queryClient, ...rendered }
+}
+
+function expectSingleRovingTabstop(expectedItem: HTMLElement) {
+  const tabstops = screen.getAllByRole('treeitem').filter((item) => item.getAttribute('tabindex') === '0')
+  expect(tabstops).toEqual([expectedItem])
+  expect(expectedItem.getAttribute('data-roving-tabstop')).toBe('true')
 }
 
 function page<T>(items: readonly T[], nextCursor: string | null = null) {

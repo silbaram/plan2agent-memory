@@ -29,6 +29,78 @@ describe('App', () => {
     expect(screen.getByRole('link', { name: '본문으로 건너뛰기' }).getAttribute('href')).toBe('#main-content')
   })
 
+  it('keeps the approved wide-workbench regions and Gate progress in the shell', () => {
+    render(<App />)
+
+    const gateProgress = screen.getByRole('navigation', { name: 'Gate 진행 상태' })
+    expect(gateProgress).toBeTruthy()
+    expect(within(gateProgress).getByText('Task graph').closest('li')?.getAttribute('aria-current')).toBe('step')
+    expect(screen.getByTestId('dashboard-workbench')).toBeTruthy()
+    expect(screen.getByTestId('workbench-library')).toBeTruthy()
+    expect(screen.getByTestId('workbench-content')).toBeTruthy()
+    expect(screen.getByTestId('workbench-context')).toBeTruthy()
+    expect(screen.getByRole('complementary', { name: '문서 탐색' })).toBeTruthy()
+    expect(screen.getByRole('complementary', { name: '실행 맥락' })).toBeTruthy()
+  })
+
+  it('keeps the Gate progress strip keyboard-focusable when it scrolls on narrow screens', () => {
+    render(<App />)
+
+    const gateProgress = screen.getByRole('navigation', { name: 'Gate 진행 상태' })
+    gateProgress.focus()
+
+    expect(gateProgress.getAttribute('tabindex')).toBe('0')
+    expect(document.activeElement).toBe(gateProgress)
+  })
+
+  it('uses a progressive context disclosure below the wide workbench without changing route state', () => {
+    const defaultMatchMedia = window.matchMedia
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: (query: string) => ({
+        addEventListener: () => {},
+        addListener: () => {},
+        dispatchEvent: () => false,
+        matches: query === '(max-width: 70rem)',
+        media: query,
+        onchange: null,
+        removeEventListener: () => {},
+        removeListener: () => {},
+      }),
+      writable: true,
+    })
+    setLocation('/browse?projectId=project-1&iterationId=iteration-1&cursor=page-2')
+
+    try {
+      render(<App />)
+
+      const workbench = screen.getByTestId('dashboard-workbench')
+      expect(Array.from(workbench.children).map((child) => child.getAttribute('data-testid'))).toEqual([
+        'workbench-library',
+        'workbench-content',
+        'workbench-context',
+      ])
+
+      const context = screen.getByTestId('workbench-context')
+      const toggle = screen.getByRole('button', { name: '맥락 펼치기' })
+      expect(context.getAttribute('data-context-layout')).toBe('disclosure')
+      expect(toggle.getAttribute('aria-expanded')).toBe('false')
+      expect(document.getElementById('workbench-context-content')?.hidden).toBe(true)
+
+      fireEvent.click(toggle)
+
+      expect(screen.getByRole('button', { name: '맥락 접기' }).getAttribute('aria-expanded')).toBe('true')
+      expect(document.getElementById('workbench-context-content')?.hidden).toBe(false)
+      expect(window.location.search).toBe('?projectId=project-1&iterationId=iteration-1&cursor=page-2')
+    } finally {
+      Object.defineProperty(window, 'matchMedia', {
+        configurable: true,
+        value: defaultMatchMedia,
+        writable: true,
+      })
+    }
+  })
+
   it('keeps route navigation keyboard focusable and opens the search slot', () => {
     render(<App />)
 
@@ -144,6 +216,7 @@ describe('App', () => {
 
     expect(window.location.search).toContain('selectedArtifactType=TASK')
     expect(window.location.search).toContain('selectedArtifactId=task-1')
+    expect(window.location.search).toContain('sourceIterationId=source-iteration-1')
     expect(screen.getByRole('treeitem', { current: true, name: '작업 Gate D 승인' })).toBeTruthy()
 
     browse.unmount()
@@ -157,7 +230,10 @@ describe('App', () => {
     )
 
     expect(await screen.findByRole('heading', { name: 'Gate D 승인' })).toBeTruthy()
-    expect(selections).toEqual([{ artifactId: 'task-1', artifactType: 'TASK' }])
+    expect(selections).toEqual([
+      { artifactId: 'task-1', artifactType: 'TASK' },
+      { artifactId: 'task-1', artifactType: 'TASK' },
+    ])
   })
 })
 

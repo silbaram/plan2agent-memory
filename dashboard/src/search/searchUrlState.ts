@@ -33,6 +33,8 @@ export interface SearchFormState {
   readonly iterationId: string
 }
 
+export type SearchFormFieldName = 'q' | 'projectId' | 'iterationId' | 'candidateLimit' | 'rrfK'
+
 const DEFAULT_PAGE = 1
 const SEARCH_PAGE_SIZE = 20
 const MAX_CURSOR_LENGTH = 4096
@@ -177,18 +179,46 @@ export function searchUrlFromForm(form: SearchFormState): SearchUrlState | null 
 }
 
 export function validationMessageForForm(form: SearchFormState): string | null {
-  if (parseText(form.q) === null) {
+  const invalidFields = validationFieldsForForm(form)
+  if (invalidFields.includes('q')) {
     return '검색어를 입력하세요.'
   }
-  if (scopeFromForm(form) === null) {
+  if (invalidFields.includes('projectId') || invalidFields.includes('iterationId')) {
     return form.scopeKind === 'iteration'
       ? '이터레이션 범위에는 프로젝트와 이터레이션 ID가 모두 필요합니다.'
       : '프로젝트 범위에는 프로젝트 ID가 필요합니다.'
   }
-  if (form.mode === 'hybrid' && fusionFromForm(form.candidateLimit, form.rrfK) === undefined) {
+  if (invalidFields.includes('candidateLimit') || invalidFields.includes('rrfK')) {
     return `혼합 검색의 후보 수는 ${SEARCH_PAGE_SIZE} 이상인 정수이고 RRF k는 양의 정수여야 합니다.`
   }
   return null
+}
+
+export function validationFieldsForForm(form: SearchFormState): readonly SearchFormFieldName[] {
+  if (parseText(form.q) === null) {
+    return ['q']
+  }
+
+  const projectId = parseText(form.projectId)
+  const iterationId = parseText(form.iterationId)
+  if (form.scopeKind === 'project' && projectId === null) {
+    return ['projectId']
+  }
+  if (form.scopeKind === 'iteration' && (projectId === null || iterationId === null)) {
+    return [
+      ...(projectId === null ? ['projectId'] as const : []),
+      ...(iterationId === null ? ['iterationId'] as const : []),
+    ]
+  }
+
+  if (form.mode !== 'hybrid' || fusionFromForm(form.candidateLimit, form.rrfK) !== undefined) {
+    return []
+  }
+
+  return [
+    ...(isValidCandidateLimitText(form.candidateLimit) ? [] : ['candidateLimit'] as const),
+    ...(isValidRrfKText(form.rrfK) ? [] : ['rrfK'] as const),
+  ]
 }
 
 function parseMode(value: string | null): SearchMode {
@@ -264,6 +294,16 @@ function fusionFromForm(candidateLimitText: string, rrfKText: string): FusionSet
   return isValidFusion(candidateLimitValue, rrfKValue)
     ? { candidateLimit: candidateLimitValue, rrfK: rrfKValue }
     : undefined
+}
+
+function isValidCandidateLimitText(value: string) {
+  const normalized = value.trim()
+  return /^\d+$/.test(normalized) && isValidFusion(Number(normalized), 1)
+}
+
+function isValidRrfKText(value: string) {
+  const normalized = value.trim()
+  return /^\d+$/.test(normalized) && Number.isSafeInteger(Number(normalized)) && Number(normalized) > 0
 }
 
 function isValidFusion(candidateLimit: number, rrfK: number) {

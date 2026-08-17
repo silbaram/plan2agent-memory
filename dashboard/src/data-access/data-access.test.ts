@@ -6,7 +6,11 @@ import {
   DashboardApiError,
   isDashboardApiError,
 } from './api'
-import { createDashboardQueries, dashboardQueryKeys } from './queries'
+import {
+  createDashboardQueries,
+  dashboardQueryKeys,
+  priorityDocumentLookupPageLimit,
+} from './queries'
 import { server } from '../test/mswServer'
 
 const projectId = '11111111-1111-4111-8111-111111111111'
@@ -193,6 +197,67 @@ describe('dashboard data access', () => {
     expect(received.graphTrace?.url.search).toBe(`?projectId=${projectId}&naturalKey=task%3Asource-task-1&iterationId=iteration-1&direction=UPSTREAM&maxDepth=2`)
   })
 
+  it('preserves keyword scores and citations from the API response', async () => {
+    const citation = {
+      lineage: {
+        chunkId: 'citation-chunk',
+        chunkIndex: 4,
+        documentId: artifactId,
+        iterationId: 'iteration-1',
+        projectId,
+        sourcePath: 'docs/citation.md',
+      },
+      sourceIds: {
+        sourceChunkId: 'source-chunk-4',
+        sourceDocumentId: 'source-document-1',
+        sourceIterationId: 'source-iteration-1',
+        sourceProjectId: 'source-project-1',
+        sourceRunId: 'source-run-1',
+        sourceTaskGraphId: 'source-graph-1',
+        sourceTaskId: 'source-task-1',
+      },
+      sourceReference: {
+        canonicalServerId: 'server-1',
+        endLine: 27,
+        fragment: 'evidence',
+        path: 'docs/citation.md',
+        startLine: 20,
+        uri: 'p2a://memory/artifacts/citation',
+      },
+    }
+    server.use(
+      http.get('/api/search/keyword', () => HttpResponse.json({
+        items: [{
+          artifactType: 'DOCUMENT_CHUNK',
+          chunkId: 'citation-chunk',
+          chunkIndex: 4,
+          citation,
+          content: 'Citation-preserving search result',
+          documentId: artifactId,
+          iterationId: 'iteration-1',
+          lineage: citation.lineage,
+          matchReason: 'content',
+          metadata: { phase: 'verification' },
+          projectId,
+          score: 0.991,
+          sourceIds: citation.sourceIds,
+          sourcePath: 'docs/citation.md',
+          sourceReference: citation.sourceReference,
+        }],
+        nextCursor: 'citation-next-page',
+      })),
+    )
+
+    const result = await createClient().keywordSearch({ q: 'citation' })
+
+    expect(result.nextCursor).toBe('citation-next-page')
+    expect(result.items).toHaveLength(1)
+    expect(result.items[0]).toMatchObject({
+      citation,
+      score: 0.991,
+    })
+  })
+
   it('isolates TanStack Query cache entries by scope, search mode, filters, fusion, root, depth, and cursor', async () => {
     let semanticRequests = 0
     let hybridRequests = 0
@@ -251,6 +316,36 @@ describe('dashboard data access', () => {
     expect(dashboardQueryKeys.keywordSearch({ cursor: 'page-one', projectId, q: 'decision' })).not.toEqual(
       dashboardQueryKeys.keywordSearch({ cursor: 'page-two', projectId, q: 'decision' }),
     )
+
+    queryClient.clear()
+  })
+
+  it('loads only the first bounded page for each exact current-iteration priority source path', async () => {
+    const priorityRequests: URL[] = []
+    const priorityScope = {
+      iterationId: '44444444-4444-4444-8444-444444444444',
+      projectId,
+      sourceIterationId: 'v4-dashboard-refresh',
+    }
+    server.use(
+      http.get('/api/artifacts', ({ request }) => {
+        priorityRequests.push(new URL(request.url))
+        return HttpResponse.json({ items: [], nextCursor: 'next-page-must-not-be-requested' })
+      }),
+    )
+
+    const queryClient = new QueryClient()
+    const query = createDashboardQueries(createClient()).priorityDocumentLookup(priorityScope)
+    await queryClient.fetchQuery({ ...query, staleTime: Infinity })
+
+    expect(priorityRequests).toHaveLength(5)
+    expect(priorityRequests.map((url) => url.search)).toEqual([
+      `?projectId=${projectId}&iterationId=${priorityScope.iterationId}&artifactType=DOCUMENT_SNAPSHOT&sourcePath=iterations%2Fv4-dashboard-refresh%2Fgate-b-spec%2Fproduct-spec.md&limit=${priorityDocumentLookupPageLimit}`,
+      `?projectId=${projectId}&iterationId=${priorityScope.iterationId}&artifactType=DOCUMENT_SNAPSHOT&sourcePath=iterations%2Fv4-dashboard-refresh%2Fgate-b-spec%2Fimplementation-plan.md&limit=${priorityDocumentLookupPageLimit}`,
+      `?projectId=${projectId}&iterationId=${priorityScope.iterationId}&artifactType=TASK_GRAPH&sourcePath=iterations%2Fv4-dashboard-refresh%2Fgate-c-task-graph%2Ftask-graph.json&limit=${priorityDocumentLookupPageLimit}`,
+      `?projectId=${projectId}&iterationId=${priorityScope.iterationId}&artifactType=DOCUMENT_SNAPSHOT&sourcePath=iterations%2Fv4-dashboard-refresh%2Fgate-b-spec%2Fexperience-spec.json&limit=${priorityDocumentLookupPageLimit}`,
+      `?projectId=${projectId}&iterationId=${priorityScope.iterationId}&artifactType=DOCUMENT_SNAPSHOT&sourcePath=iterations%2Fv4-dashboard-refresh%2Fgate-d-review%2Freview.json&limit=${priorityDocumentLookupPageLimit}`,
+    ])
 
     queryClient.clear()
   })

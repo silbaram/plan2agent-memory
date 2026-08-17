@@ -1,0 +1,7 @@
+{
+  "schema_version": "p2a.current_spec.v1",
+  "project_id": "webhook-api-service",
+  "active_iteration": "v1",
+  "effective_spec_ref": "iterations/v1/gate-b-spec/spec.json",
+  "closed_iterations": []
+}

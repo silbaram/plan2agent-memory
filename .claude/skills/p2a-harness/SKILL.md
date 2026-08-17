@@ -1,223 +1,281 @@
 ---
 name: p2a-harness
-description: Use when turning a one-sentence product idea into a gated Plan2Agent intake, spec, implementation plan, task graph, and review report.
+description: Use when turning a concise product document into a gated Plan2Agent scope, specification, validated task graph, and execution-ready iteration.
 ---
 
 # Plan2Agent Harness
 
-Use this workflow to convert an early product idea into development-ready planning artifacts. The harness is an orchestrator, not a checklist: it decides which Plan2Agent role owns each stage, enforces approval gates, and resumes from the latest completed artifact.
+Turn an entry document into durable planning artifacts. The harness is a decision ledger: agents propose and validate artifacts, while humans approve product scope, the persistent project constitution, and the product/implementation specification.
 
 ## Inputs
 
-- A one-sentence product or feature idea.
-- Optional clarification answers, constraints, audience, or existing artifacts.
-- Optional Feature Radar preflight research under `.plan2agent/artifacts/<project_id>/preflight-research/`.
-- Optional resume point such as `resume_from: intake`, `resume_from: spec`, or answered decision ids like `ND-1`.
+Require a readable entry document supplied through `node .plan2agent/scripts/p2a.mjs next --entry <path>` or an equivalent explicit file reference. Do not initialize a new harness from chat text alone.
 
-## Stage to Role Mapping
+The entry document should identify the problem, intended users, desired outcome, important constraints, and any known exclusions. Missing detail may be recorded as an assumption or open decision; it must not trigger a separate conversational workflow.
 
-| Stage | Skill | Subagent owner | Input artifact | Output artifact |
-| --- | --- | --- | --- | --- |
-| 1. Intake | `p2a-intake` | `p2a-requirements` | raw idea and notes | `intake_json` (`p2a.intake.v1`) |
-| 2. Product spec | `p2a-spec` | `p2a-spec-author` | intake plus answered decisions | `spec_json.product` (`p2a.spec.v1`) |
-| 3. Implementation plan | `p2a-spec` | `p2a-implementation-planner` | product spec draft plus Gate A constraints | `spec_json.implementation` (`p2a.spec.v1`) |
-| 4. Task graph | `p2a-task-breakdown` | `p2a-task-graph` | approved implementation spec | `task_graph_json` (`p2a.task_graph.v1`) |
-| 5. Review | `p2a-review` | `p2a-quality-reviewer` | spec and task graph | `review_json` (`p2a.review.v1`) |
+On resume, inspect canonical artifacts first:
 
-If the CLI cannot spawn subagents automatically, run the matching skill locally and preserve the same input/output contracts.
+- `status.md`
+- `.plan2agent/constitution.json`
+- `current-spec.json`
+- `iterations/<id>/iteration.json`
+- `iterations/<id>/gate-a-intake/intake.json`
+- `iterations/<id>/gate-b-spec/spec.json`
+- `iterations/<id>/gate-c-task-graph/task-graph.json`
 
-## Approval Gates
+Continue from the earliest incomplete or invalid artifact. Never rebuild later artifacts over an unapproved earlier decision.
 
-- **Gate A — Intake decisions:** If any `needs_user_decision.status` is `open` or `deferred`, stop after intake and ask only those decisions. Do not produce a product spec except as a clearly labeled sketch.
-- **Gate B — Spec approval:** If any intake `CQ-n` is not disposed in `spec_json.clarifying_question_disposition`, `spec_json.approval` is not `approved`, `spec_json.approval_audit` is missing, or `spec_json.open_decisions` is non-empty, stop before task graph generation. When Gate B selects or recommends libraries, frameworks, runtimes, protocols, packages, databases, cloud services, external APIs, or external services, apply the `p2a-spec` Technology Reconnaissance rules before approval and record material sources in `spec_json.evidence`. Missing Technology Reconnaissance evidence for a material Gate B technology choice is a blocking Gate B issue. When Gate B is approved, record the Gate B approval audit in `spec_json.approval_audit`.
-- **Gate C — Task graph validation:** Before final output, check that every dependency references a task id in the same graph, the graph is acyclic, and every task has acceptance criteria. Repository validation also requires each task to carry source spec references. Inspect `context.planning_memory` before decomposition. When retrieved history changes a task boundary, dependency, acceptance criterion, or failure mitigation, add a `memory:<report path or source reference>` ref and any applicable `decision:ND-n` ref alongside at least one real effective-spec field.
-- **Gate D — Review blockers:** The canonical Gate D artifact is `review_json` persisted as `gate-d-review/review.json`; `review_report` / `review-report.md` is an optional Markdown rendering of the same findings. Gate D passes only when `review.json.blocking_issues` is `[]`. Validate claimed Memory report/citation integrity and confirm that tasks address any material prior failure carried into Gate C. Memory being disabled, unavailable, or irrelevant is not itself a blocker; an invalid claim of use or an ignored material failure is. If review finds blocking issues, return the blockers and the artifact section that must be revised instead of claiming the plan is ready.
+## Roles and stages
 
-Each gate is a review checkpoint, not a one-shot hand-off. At every gate: (1) persist the stage's canonical JSON artifact files and optionally refresh generated Markdown views, (2) present a readable summary with per-item rationale and recommendations, (3) explicitly invite both open-ended feedback and structured answers or approval, (4) revise the JSON artifacts and re-present them when the user responds, and (5) advance only after the user explicitly approves. Never infer approval from silence.
+| Stage | Skill or agent | Input | Canonical result |
+|---|---|---|---|
+| Entry confirmation and scope | `p2a-harness` | entry document, optional baseline | `intake.json` (`p2a.intake.v1`) |
+| Project shape (Gate ②) | `p2a-harness` | approved intake, repository evidence, legacy style | `.plan2agent/constitution.json` |
+| Product and implementation specification | `p2a-spec` with `p2a-spec-author` and `p2a-implementation-planner` | approved intake, evidence, optional baseline | `spec.json` plus readable spec documents |
+| Visual experience, when required | `p2a-visual-experience` | approved visual scope | experience spec, prototypes, visual approval evidence |
+| Task decomposition | `p2a-task-author` or `p2a-task-breakdown` with `p2a-task-graph` | approved spec and planning memory | `task-graph.json` after `node .plan2agent/scripts/p2a.mjs validate` |
 
-## Clarifying Question Disposition
+Development execution begins only after the canonical task graph validates. Milestone and final execution reviews remain execution evidence; they are not planning approval gates.
 
-The canonical `CQ-n` disposition statuses and required fields are owned by `.agents/skills/p2a-spec/SKILL.md` under "Clarifying Question Disposition Contract". Harness Gate B blocks unless every intake `CQ-n` is disposed there, no raw `CQ-n` appears in `spec_json.open_decisions`, and unresolved blocking clarifying questions are promoted to `ND-n` decisions that keep the spec in `draft`.
+## Human approval gates
 
-## Gate A/B Technology Boundary
+There are three human gates.
 
-Gate A identifies product scope, hard constraints, and architecture-changing choices; it does not design the full stack. If a technology choice changes the product boundary or major implementation model, such as runtime, deployment shape, persistence requirement, protocol compatibility, cloud dependency, or library-vs-service posture, ask it as a Gate A `needs_user_decision`.
+### Scope approval
 
-Gate B chooses or recommends the concrete stack within the approved Gate A constraints. Use read-only technology reconnaissance in Gate B when current ecosystem knowledge matters, compare viable options, record material sources in `spec_json.evidence`, and leave high-impact unresolved choices in `spec_json.open_decisions` instead of silently deciding.
+Before specification work, present a concise understanding summary containing:
 
-## Planning Memory Recall
+- problem and users;
+- in-scope outcome and exclusions;
+- assumptions and unresolved decisions;
+- evidence or baseline used;
+- a clear statement that approval authorizes specification work.
 
-For an iterative artifact root with at least one closed iteration, use Memory recall only when `.plan2agent/project.config.json` has `memory.enabled: true` and the configured server URL or `serverUrlEnv` value is available. Do not read `.env` files to discover connection values. Record recall state as `not_configured`, `pending`, `succeeded`, `fallback`, `failed`, or `skipped` in `iteration.json`; Memory being optional never permits a false claim that history was checked.
+After explicit approval, run `node .plan2agent/scripts/p2a.mjs decide --quote "<exact user utterance>" --artifacts <artifact-root>`. The command appends `gate.what.approved` to `decisions.jsonl` and updates `gate-a-intake/intake.json` with `status: "ready_for_spec"` plus an `approval_audit` copy. Without that decision, keep `status: "blocked_on_user"` and stop before Gate ②.
 
-Before writing the Gate A analysis:
+### Project-shape approval (Gate ②)
 
-1. Run one same-project hybrid search using the change idea and save the report under the new iteration:
+After Gate A and before a first Gate B specification, establish the project-wide constitution at `.plan2agent/constitution.json`. Keep this discussion compact: architecture, stack, prohibitions, and style should each express durable project constraints, not restate feature requirements. Inspect the repository and current authoritative technical sources before proposing a material stack choice.
 
-   ```bash
-   node .plan2agent/scripts/p2a.mjs memory search \
-     --project <project_id> \
-     --mode hybrid \
-     --query "<change idea>" \
-     --output .plan2agent/artifacts/<project_id>/iterations/<iteration_id>/gate-a-intake/memory-recall.json
-   ```
+Present one reviewable Gate ② proposal containing:
 
-2. If the idea touches a reusable architecture, protocol, migration, authentication/security, external integration, data/storage, queue, performance, reliability, incident, or failure-handling concern, run a second cross-project search. Exclude the current project and persist a separate report:
+- up to 10 architecture rules, each with a stable `ARCH-n` id, scope, rationale, and the practical trade-off it creates;
+- up to 10 stack choices, each with a stable `STACK-n` id, rationale, and evidence ids for any current external choice;
+- up to 10 prohibitions, each with a stable `NO-n` id, rationale, and enforcement level;
+- the project coding-style contract, importing a substantive legacy `.plan2agent/style.md` into `style.contract_markdown` when present.
 
-   ```bash
-   node .plan2agent/scripts/p2a.mjs memory search \
-     --global \
-     --exclude-project <project_id> \
-     --mode hybrid \
-     --query "<change idea>" \
-     --output .plan2agent/artifacts/<project_id>/iterations/<iteration_id>/gate-a-intake/memory-recall-cross-project.json
-   ```
+Use `advisory` when a prohibition omits `enforcement`. Use `review` for judgment-based constraints. Use `validator` only when the prohibition also declares `targets` (`spec` and/or `task_graph`) and concrete `forbidden_terms`; positive selections or introduction work containing those terms are mechanically rejected by `node .plan2agent/scripts/p2a.mjs validate`, while declarative negated constraints and removal work remain valid. Do not label an unenforceable natural-language preference as validator-enforced.
 
-   Skip this layer for ordinary project-local wording; do not run global recall mechanically.
-3. Inspect relevant matches instead of treating retrieval as approval or fact. When a result identifies a decision natural key, use project-scoped `memory precedent`, `memory impact`, or `memory trace` to inspect its downstream outcomes and lineage.
-4. Consume the saved reports before drafting Gate A/B. Add each consumed report as `LOCAL-n` evidence and record the query, requested/effective mode, fallback, and actual source path, source reference, or natural key in `used_for`. A report may be retained as `context` without adopting its recommendation.
+Explain the important alternatives and trade-offs, then ask the user to approve the complete constitution. First write a schema-valid draft without `approval_audit` and run:
 
-Before Gate B technology reconnaissance, run one additional targeted hybrid search only when architecture, dependencies, protocols, or external integrations need historical grounding and the Gate A report does not already answer the question. Preserve the same report-and-citation contract; do not repeat an equivalent query merely to satisfy the procedure.
-
-Treat Memory as optional supporting evidence:
-
-- If semantic or hybrid retrieval falls back to keyword successfully, continue and record the fallback shown in the report.
-- If the configured Memory server is unavailable and keyword fallback also fails, preserve the failure report, tell the user that historical Memory evidence was not consulted, and continue without claiming that no prior history exists.
-- If a pending report was not produced before drafting, record `skipped` rather than silently treating recall as successful.
-- Stop for recovery only when the user explicitly requires Memory history before planning. On resume, restart at recall and preserve already-written upstream artifacts instead of regenerating them.
-
-`iteration close` automatically runs a bounded, read-only `memory status --output <closed-iteration>/memory-status.json` check when Memory is configured. Preserve archive completion if the server is unavailable, but emit a prominent warning that sync was not verified, persist `unavailable`, and never claim historical coverage. Also present a non-mutating `memory push --dry-run` preview. Actual push remains an explicit external write requiring user approval and `--yes`; after an approved push, rerun the recorded status command. On the next `iteration open`, carry `fresh`, `stale`, `unavailable`, or `unchecked` into `planning_memory.baseline_freshness`.
-
-## Analysis and Decision Presentation
-
-Before asking the user to decide anything, present a written analysis — do not jump straight to a list of options.
-
-The analysis must include:
-
-- A restatement of the idea and the scope you inferred, separating what is clear from what is unknown.
-- Each assumption with its risk level and the reasoning behind it.
-- For every `needs_user_decision`: the question, why it matters, each option with its concrete trade-offs, a recommended option with explicit rationale grounded in the stated goals, constraints, and any prior art, and which downstream artifacts or decisions it blocks.
-
-Write this analysis into the conversation and the structured `intake_json` fields. Generate `intake.md` only as an optional view/export when the user or UI needs a Markdown document. Treat decision-making as a dialogue: invite the user to correct your understanding and give free-form feedback, not only to pick options. Do not collapse several distinct high-impact decisions into a single multi-select that hides their individual rationale; ask in small, clearly explained batches.
-
-If `intake.md` is generated, it should follow this recommended soft template, mapping each narrative section to the matching `intake_json` field without changing JSON field names:
-
-1. **Understanding** — restate the idea and inferred scope from `known_facts`, separating what is clear from what remains unknown.
-2. **Assumptions** — cover `assumptions` using each item's `id`, `statement`, `risk`, reasoning, and `confirmation_needed`.
-3. **Decisions** — cover `needs_user_decision` with the question, why it matters, options and concrete trade-offs, recommended option and rationale, downstream artifacts or decisions it blocks, and current status (`open`, `answered`, or `deferred`). If status is `answered`, explicitly show the selected option/answer, for example `선택: <option label>` or `Selected: <option label>`.
-4. **Clarifying questions** — cover `clarifying_questions` with each `id`, question, and current handling or default.
-5. **Next** — state `status` and what is needed from the user.
-
-This is a narrative-first recommended structure, not a blank form. Preserve the existing requirements for explanation, evidence, trade-off analysis, and recommendations. Tables may help scan the content, but they are supplemental and must not replace the written explanation. Render section headings and labels in the user's language when appropriate (for example Korean: `1. 이해`, `2. 가정`, `3. 결정`, `4. 소프트 질문`, `5. 다음`), while preserving the English JSON field names such as `assumptions` and the label meaning of **Assumptions/가정**; do not rename it to a different concept such as "proposal."
-
-## Resume Rules
-
-- When the user answers decisions such as `ND-1` or `ND-4`, merge the answers into `intake_json.needs_user_decision[*].answer`, set those decisions to `answered`, and recompute `intake_json.status`. If a generated `gate-a-intake/intake.md` view exists, refresh it from JSON instead of editing it as a second source of truth.
-- Resume from the earliest stage whose input changed. For example, changed intake answers invalidate spec, implementation plan, task graph, and review.
-- Carry forward stable artifact ids (`project_id`, `source_intake`, `sourceSpec`) so later stages can trace their source. Use the gate-folder paths for cross-artifact references, for example `.plan2agent/artifacts/<project_id>/gate-a-intake/intake.json` for `source_intake` and `.plan2agent/artifacts/<project_id>/gate-b-spec/spec.json` for `sourceSpec`.
-- If an artifact is pasted in Markdown only, reconstruct the matching JSON contract before advancing to the next gate.
-
-## Starting From Existing Documents
-
-Rich input documents make gates faster, not skippable. Classify document input before
-the first gate:
-
-1. **General design or plan documents** (for example `DESIGN.md`, `PLAN.md`, or files
-   under `docs/`) are `LOCAL-n` input evidence. Run the full pipeline from Gate A: use
-   the documents to populate `known_facts`, reduce open questions, and cite them in
-   rationale. Present the Gate A analysis and stop for approval even when no decision
-   remains open.
-2. **Prior Plan2Agent artifacts available only as Markdown** must be reconstructed into
-   their JSON contracts first. Approval state still governs: a reconstructed spec
-   without a recorded user `approval_audit` is `draft` and stops at Gate B.
-3. **Canonical artifacts under `.plan2agent/artifacts/<project_id>/` with recorded
-   approvals** are the only input that justifies resuming past a gate, and only up to
-   the last recorded approval.
-
-## State Passing Contract
-
-Return intermediate artifacts in fenced code blocks named exactly:
-
-- `intake_json`
-- `spec_json`
-- `task_graph_json`
-- `review_json`
-
-`intake_json`, `spec_json`, `task_graph_json`, and `review_json` must conform to `.plan2agent/schemas/intake.schema.json`, `.plan2agent/schemas/spec.schema.json`, `.plan2agent/schemas/task-graph.schema.json`, and `.plan2agent/schemas/review.schema.json` respectively. `intake_json.evidence` and `spec_json.evidence` carry all user, local, and web sources used by the run.
-
-## Artifact Persistence
-
-In addition to the inline state sections, the harness orchestrator writes canonical JSON artifacts to files so the user and tools can review them before any gate. In a scaffold project, use `.plan2agent/project.config.json.projectId` as the canonical `project_id`; if it is missing, fall back to `.plan2agent/manifest.json.projectId`, then an existing artifact/spec/task graph project id, then the target/project root basename normalized to kebab-case. Treat the directory basename as a fresh-scaffold seed, not the source of truth. Only derive a kebab-case id from the idea when no scaffold config, manifest, or existing artifact id exists. Keep all files for one run under `.plan2agent/artifacts/<project_id>/` using gate-specific folders:
-
-- `gate-a-intake/intake.json` — the `intake_json` artifact
-- `gate-b-spec/spec.json` — the `spec_json` artifact
-- `gate-c-task-graph/task-graph.json` — the `task_graph_json` artifact
-- `gate-d-review/review.json` — the `review_json` artifact
-- `preflight-research/` — optional copied Feature Radar artifacts. Treat these as read-only input evidence, not gate state.
-
-Optional/generated Markdown views may be written beside the JSON files when needed for export, sharing, or a UI preview: `status.md`, `gate-a-intake/intake.md`, `gate-b-spec/product-spec.md`, `gate-b-spec/implementation-plan.md`, and `gate-d-review/review-report.md`. These Markdown files are never the source of truth; regenerate them from JSON rather than preserving independent edits. Only the harness orchestrator writes files; subagents stay read-only and return their content for the orchestrator to persist. Continue to surface the inline named JSON sections as well so resume and paste-in still work.
-
-### Generated `status.md` View
-
-`status.md` is a generated readable view, not a control-plane artifact. `current-spec.json`, `iteration.json`, `spec.json`, `task-graph.json`, and `review.json` carry canonical gate state, active iteration pointers, and approval audits. If `status.md` is generated, keep it valid for `.plan2agent/scripts/validate_artifacts.mjs --status`: it must include a literal `Progress:` line, Gate A, Gate B, Gate C, and Gate D sections, plus numbered `## 1.` through `## 5.` sections. Use this standard skeleton:
-
-1. **Progress line** — show the current gate marker across `[A] → [B] → [C] → [D]`, indicating which gates are complete, current, blocked, or pending.
-2. **Per-gate sections** — summarize each gate's latest state and point to the canonical artifact files for that gate.
-3. **Open decisions / questions** — preserve the former cross-gate question-index content here, including unresolved decisions, answered decisions that affect downstream work, and follow-up questions.
-4. **Next** — state exactly one next action needed from the user or orchestrator.
-5. **Change log** — append dated bullets for each gate transition or decision/status update.
-
-When Gate B is approved, record this object in `spec_json.approval_audit`:
-
-```json
-{
-  "approved_by": "user",
-  "approved_at": "YYYY-MM-DD",
-  "approved_artifacts": ["gate-b-spec/spec.json"],
-  "approval_note": "<short note describing the decision/resolution basis for approval>"
-}
+```bash
+node .plan2agent/scripts/p2a.mjs validate --constitution .plan2agent/constitution.json
 ```
 
-Use the actual approver label and date available in the conversation. If the exact person is unknown, use `user`; do not invent names.
+Approval must preserve the user's verbatim utterance. After explicit approval, run:
 
-Record `approval: approved` and `approval_audit` only in direct response to an explicit
-user approval message in the current conversation, and make `approval_note` quote or
-reference that message. Never set `approval: approved` on your own judgment, even when
-input documents or context imply consent.
+```bash
+node .plan2agent/scripts/p2a.mjs shape approve --quote "<exact user utterance>"
+```
 
-### Facts From Tools
+Never fabricate, summarize, or omit the quote. `node .plan2agent/scripts/p2a.mjs shape approve` appends `gate.how.approved` to the decision ledger, writes the user/date/artifact audit copy, and rejects a missing quote. Confirm the approved result with `node .plan2agent/scripts/p2a.mjs validate --constitution .plan2agent/constitution.json --require-approved-constitution` and `node .plan2agent/scripts/p2a.mjs validate --decisions --artifacts <artifact-root>` before Gate B.
 
-Do not retype gate status facts from memory. Pull gate status, task counts, `ready` / `in_progress` state, approval state, and blocking counts from the artifacts and tools: `spec.json` (`approval`, `open_decisions`), `task-graph.json`, `p2a_tasks` (`list` / `ready`), `validate_artifacts`, and `review.json.blocking_issues`. If a fact cannot be derived from those sources, mark it as unknown or pending rather than inventing it.
+An approved constitution is project-level state, not iteration state. Reuse it across later iterations. Reopen Gate ② only when the newly approved Gate A scope materially changes architecture, foundational stack, a project-wide prohibition, or coding-style policy. A normal feature or maintenance iteration must not re-ask for shape approval. To amend it, present a focused diff and trade-offs, replace it with a draft that omits the old `approval_audit`, and require a new quoted approval before Gate B.
 
-## Evidence and Citation Contract
+Legacy projects may continue with `.plan2agent/style.md` and no constitution. Do not block their existing Gate B or execution path. Offer `node .plan2agent/scripts/p2a.mjs shape migrate-style` as an explicit migration that creates an unapproved draft; migration is optional and never implies approval.
 
-- Use `USER-n` for user-provided source material, `LOCAL-n` for repository/local artifacts, and `WEB-n` for web lookup sources.
-- Every `WEB-n` evidence item must include an `https://` or `http://` URL, title, and short `used_for` rationale.
-- If web lookup materially affects a question, assumption, product decision, or integration choice, include the source in `evidence` and refer to its `source_id` in nearby rationale text.
-- If Feature Radar preflight research is present, import its Markdown/JSON files as `LOCAL-n` evidence and any discovered URLs as `WEB-n` evidence. Add Radar recommendations as `reference_reconnaissance.candidates` with `decision: "context"` and `origin: "feature_radar_preflight"` until Gate B changes them to `selected`, `rejected`, or `deferred`.
-- Feature Radar recommendations are candidates, not approved scope. Gate B must state which recommendations are selected, deferred, or rejected before Gate C task generation.
-- Do not use web lookup for implementation execution; it is only allowed for read-only prior-art or domain grounding.
+### Specification approval
 
-## Output Modes
+Before task decomposition, present the complete product specification and implementation plan together. Highlight consequential choices, trade-offs, open decisions, selected or rejected external recommendations, and verification strategy.
 
-- **Blocked intake:** Write `gate-a-intake/intake.json`, optionally generate `gate-a-intake/intake.md`, present the analysis narrative and per-decision recommendations, invite feedback and answers, and stop at Gate A.
-- **Draft spec:** Write `gate-b-spec/spec.json` with `approval: draft`, optionally generate product/implementation Markdown views, present it for review, and stop at Gate B before the task graph.
-- **Approved planning output:** Write all canonical JSON artifact files, optionally refresh generated Markdown views, and return the state sections after gates pass. In a co-located scaffold project, make the next action `node .plan2agent/scripts/p2a_iteration.mjs init --artifacts .plan2agent/artifacts/<project_id> --iteration-id v1-mvp` and explicitly state that development must not start from the root `gate-c-task-graph/task-graph.json`.
-- **Resume output:** Regenerate only the downstream JSON artifacts and optional generated views, plus a short changelog of which decisions were applied.
+After explicit approval, run `node .plan2agent/scripts/p2a.mjs decide --quote "<exact user utterance>" --artifacts <artifact-root>`. It appends the Gate ① specification decision and persists the `approval: "approved"` plus `approval_audit` copy in `gate-b-spec/spec.json`. An approved spec must have no open decisions. Visual work that is required for the current iteration must also have explicit selected-prototype approval before decomposition.
+
+Task decomposition has no separate human approval state. The authoring agent writes a complete draft, `node .plan2agent/scripts/p2a.mjs validate` checks its schema, source references, dependencies, acyclicity, acceptance criteria, and execution contracts, and only a valid graph becomes canonical.
+
+## Entry Document Confirmation Dialogue
+
+Use this only when `node .plan2agent/scripts/p2a.mjs next` reports `gate_what` with a validated `--entry` document and no canonical planning artifacts. If the document and canonical planning artifacts coexist, compare the document metadata with recorded evidence and resume the earliest affected stage instead of restarting.
+
+1. Run `node .plan2agent/scripts/p2a.mjs validate --entry <path>`, read the entire primary document, and preserve its relative path, SHA-256, type, size, and preview in the command context. For a Feature Radar document, also inspect the sibling `handoff-manifest.md` for provenance.
+2. Present one compact interpretation of what will be built, who it serves, the intended outcome, included and excluded scope, hard constraints, material assumptions, and any conflict with an existing baseline. The entry file is evidence, not the control plane; do not dump or rewrite it.
+3. Ask only for information or decisions that cannot be inferred safely and would materially change the scope. There is no fixed question count or conversation-turn limit. Stop asking as soon as the scope is confirmable, and do not introduce a replacement workflow state machine, mandatory identifier inventory, or progress counter.
+4. Present the revised scope and explicitly ask the user to confirm that interpretation. Corrections update the summary and repeat this confirmation step. Silence, document presence, or a broad request to develop is not approval.
+5. When Feature Radar supplied recommendations, list every promoted candidate with exactly one `selected`, `rejected`, or `deferred` disposition and a short rationale. Those candidates remain unapproved until the user confirms the scope containing their dispositions.
+6. After explicit confirmation, persist `intake.json` as the draft intake evidence and run `node .plan2agent/scripts/p2a.mjs decide --quote "<exact user utterance>" --artifacts <artifact-root>` so the decision ledger and Gate A audit copy are written together. Then establish or reuse Gate ② before continuing through the normal Gate B contract.
+
+If the user rejects the source document, stop and request a different path. Canonical state begins with the approved intake artifact, not with chat history or the source file alone.
+
+## Scope artifact contract
+
+`intake.json` records:
+
+- `idea` and `summary` derived from the confirmed document;
+- stable known facts and explicit assumptions;
+- optional clarifying questions and user decisions when they are genuinely needed;
+- `baseline_context` when an existing approved specification is reused;
+- `evidence`, including the entry document and any tool-derived facts;
+- `status` and, when ready, `approval_audit`.
+
+Question IDs and decision IDs are allowed for traceability but are not mandatory workflow states. A blocked intake may have no structured questions when the blocker is simply missing confirmation or a replacement document.
+
+Existing intake files may contain legacy fields. Preserve them when reading or copying historical artifacts, but do not generate, interpret, or route workflow state from them.
+
+## Technology boundary
+
+Gate A concerns product scope. Do not force architecture, framework, storage, provider, API shape, or package choices into scope approval unless the user explicitly supplied them as constraints.
+
+Gate ② owns durable architecture, foundational stack, prohibitions, and style. Gate B owns iteration-specific implementation choices within that approved constitution. For a material technology choice not already fixed by the constitution:
+
+1. inspect the repository and applicable official documentation;
+2. compare viable options and constraints;
+3. state the selected option and trade-offs;
+4. cite current authoritative evidence in `spec.evidence`;
+5. leave a truly consequential unresolved choice in `open_decisions` and do not approve the spec.
+
+## Planning memory
+
+Planning memory is advisory context, never an approval substitute.
+
+- Read the active iteration's `planning_memory` before specification and task decomposition.
+- Reuse only reports whose project, scope, and evidence remain relevant.
+- Record the actual query, requested/effective mode, fallback, and report reference when memory affects an artifact.
+- Cite consumed local reports as `LOCAL-n` evidence.
+- If prior failure evidence changes a task boundary, dependency, acceptance criterion, or mitigation, include a `memory:<reference>` source ref alongside a real specification field.
+- Disabled, unavailable, empty, or irrelevant memory is not a blocker. A false claim of memory use or an ignored material prior failure is.
+
+## Existing documents and baselines
+
+When the entry points to an existing PRD, design, implementation plan, or approved Plan2Agent artifact:
+
+- use it as evidence and preserve its locator;
+- distinguish facts in the document from new assumptions;
+- validate any reused canonical baseline and its hash;
+- preserve unresolved decisions rather than silently filling them;
+- avoid duplicating an approved iteration merely to change prose.
+
+For delta work, keep baseline provenance in `baseline_context` and in the current-spec source composition. The new spec must be complete enough to execute and validate even when it references a baseline.
+
+## State passing
+
+Pass explicit JSON between stages. Do not rely on hidden conversational state.
+
+Minimum handoff information:
+
+- project and iteration identifiers;
+- approved constitution contents and `.plan2agent/constitution.json` reference, or explicit legacy-style fallback;
+- validated `decisions.jsonl` decision chain and the active Gate ①/② decision sequence ids when present;
+- artifact root and canonical relative paths;
+- entry evidence and approved intake;
+- active or baseline spec references and hashes;
+- approval audits for scope and specification;
+- planning memory status and references;
+- visual contract when applicable.
+
+Downstream stages must validate incoming files before using them. If a referenced file is missing, outside the artifact root, stale, or inconsistent with its recorded hash, stop at that stage and report the exact contract failure.
+
+## Artifact persistence
+
+Persist canonical artifacts before claiming a stage is complete. Chat summaries are not durable state.
+
+Use these locations:
+
+```text
+.plan2agent/constitution.json
+<artifact-root>/
+├── status.md
+├── current-spec.json
+├── iterations/
+│   └── <iteration-id>/
+│       ├── iteration.json
+│       ├── gate-a-intake/
+│       │   ├── intake.json
+│       │   └── intake.md
+│       ├── gate-b-spec/
+│       │   ├── spec.json
+│       │   ├── product-spec.md
+│       │   └── implementation-plan.md
+│       └── gate-c-task-graph/
+│           ├── task-graph.json
+│           └── task-graph.md
+└── runs/
+```
+
+Write atomically where supported. Validate JSON immediately after writing. Do not promote a draft by merely renaming an unvalidated file. Preserve run lineage and task history when replacing a graph; if execution has started, open a new iteration or use the maintenance lane.
+
+For a greenfield co-located project, generate the approved scope, approved spec, and validated task graph, then run `node .plan2agent/scripts/p2a.mjs iteration init` to create the iterative layout. Do not point project configuration at a transient root-level task graph.
+
+## Generated status view
+
+`status.md` is a readable projection, not canonical state. Generate it from current artifacts and keep it valid for `node .plan2agent/scripts/p2a.mjs validate --status`.
+
+It should show:
+
+- a literal `Progress:` line;
+- active iteration and current next action;
+- Scope, Project Shape, and Specification approval states;
+- Planning Validation state;
+- numbered sections for understanding, decisions, specification, tasks, and execution readiness.
+
+Do not infer approval from prose in `status.md`. Approval comes from canonical JSON audit records.
+
+## Evidence and citations
+
+Use stable source IDs:
+
+- `USER-n` for user-provided documents or decisions;
+- `LOCAL-n` for repository files, commands, or planning-memory reports;
+- `WEB-n` for current web evidence.
+
+Every evidence item must say what it was used for. Web evidence requires an HTTP(S) URL. Repository facts should include a path or command in the title or locator. Never cite a source that was not actually inspected.
+
+Feature Radar output is candidate evidence. Gate A records the user's scope disposition for every promoted candidate; Gate B may refine implementation choices but must not silently change that approved scope before task generation.
+
+## Output modes
+
+During an approval request, return a compact readable summary and the exact decision requested. Do not bury the approval question inside raw JSON.
+
+After a stage completes, report:
+
+- the resulting state;
+- files written or validated;
+- approval that was recorded, if any;
+- the single next command or skill.
+
+When blocked, report the earliest failed contract and the smallest user action that unblocks it. Do not continue into later stages.
+
+## Validation
+
+Use repository commands as the source of truth:
+
+```bash
+node .plan2agent/scripts/p2a.mjs next --entry <document>
+node .plan2agent/scripts/p2a.mjs shape
+node .plan2agent/scripts/p2a.mjs validate --constitution .plan2agent/constitution.json --require-approved-constitution
+node .plan2agent/scripts/p2a.mjs validate --artifact-root <artifact-root>
+node .plan2agent/scripts/p2a.mjs iteration validate --artifacts <artifact-root>
+```
+
+Before handing off to execution, ensure:
+
+- the entry document was confirmed and recorded;
+- Gate ② is approved for a new project, or a legacy style-only project is intentionally continuing under compatibility;
+- validator-enforced constitution prohibitions pass against the spec and task graph;
+- scope and specification approvals are present and match their artifacts;
+- required visual approval evidence is valid;
+- the canonical task graph references the approved spec;
+- every task has valid dependencies, source refs, acceptance criteria, and verification commands;
+- no planning artifact depends on a removed approval stage.
 
 ## Rules
 
-- You MAY create or update Plan2Agent planning artifacts (`.md` / `.json`) under `.plan2agent/artifacts/<project_id>/`.
-- Do NOT edit application or source code, install dependencies, run shell commands for implementation, or perform git operations.
-- Subagents remain strictly read-only; only the harness orchestrator persists artifact files.
-- Treat JSON as canonical. Markdown files are generated views/exports and must not be used as independent state.
-- Do not claim that implementation happened.
-- Mark unresolved decisions as `needs_user_decision`.
-- Existing design or plan documents in the target repository, however complete, are
-  `LOCAL-n` input evidence only. They never justify skipping a gate, producing more than
-  one gate's artifacts, or treating any gate as approved.
-- Broad instructions such as "let's develop this" authorize starting at the earliest
-  applicable gate only; they are not approval for later gates or for implementation.
-- Never produce artifacts for more than one gate in a single turn. After presenting a
-  gate, stop and wait for the user's explicit response.
-- Keep tasks small enough for one agent or developer to complete independently.
-- After Gate D passes in a co-located scaffold project, stop before development execution and direct the user to convert the greenfield gate bundle with `p2a_iteration init`; do not set or recommend `.plan2agent/project.config.json.taskGraph` to the root `gate-c-task-graph/task-graph.json`.
+- Never initialize a fresh harness without a document.
+- Never infer user approval from silence or from an agent's recommendation.
+- Never write, edit, reorder, or delete existing `decisions.jsonl` lines directly; use `node .plan2agent/scripts/p2a.mjs decide` and `node .plan2agent/scripts/p2a.mjs shape approve|revoke` append operations.
+- Never advance past blocked scope or an unapproved specification.
+- Never create a first Gate B specification before a required Gate ② constitution is approved.
+- Reuse an approved constitution across iterations unless Gate A introduces an architecture-level change.
+- Keep implementation choices out of scope approval unless explicitly constrained by the user.
+- Do not create a replacement workflow state machine around questions, rounds, or agent reviews.
+- Treat validators as enforcement, not as authors of product decisions.
+- Preserve canonical paths, hashes, approval quotes, and run evidence.
+- Prefer one state-based next action over a menu of possible actions.

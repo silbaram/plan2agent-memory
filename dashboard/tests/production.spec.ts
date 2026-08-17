@@ -1,8 +1,10 @@
 import { expect, test } from '@playwright/test'
 import {
   artifactId,
+  completedRunArtifactId,
   mockDashboardApi,
   projectId,
+  taskArtifactId,
   type DashboardApiRequest,
 } from './dashboardFixtures'
 
@@ -22,7 +24,7 @@ const dashboardCsp = [
   "worker-src 'self'",
 ].join('; ')
 
-test('production Fastify dashboard supports browse, detail, search, navigation, and trace without console errors', async ({ page }) => {
+test('production Fastify dashboard preserves browse, viewer, search, and trace data contracts without console errors', async ({ page }) => {
   const requests: DashboardApiRequest[] = []
   const consoleErrors: string[] = []
   await mockDashboardApi(page, requests)
@@ -41,15 +43,36 @@ test('production Fastify dashboard supports browse, detail, search, navigation, 
   await page.getByRole('treeitem', { name: '이터레이션 대시보드 검증' }).click()
   await expect(page.getByRole('treeitem', { name: '작업 프로덕션 대시보드 검증' })).toBeVisible()
   await page.getByRole('treeitem', { name: '작업 프로덕션 대시보드 검증' }).click()
-  await expect(page).toHaveURL(new RegExp(`selectedArtifactId=${artifactId}`))
+  await expect(page).toHaveURL(new RegExp(`selectedArtifactId=${taskArtifactId}`))
+  await expect(page.getByRole('heading', { level: 2, name: '프로덕션 대시보드 검증' })).toBeVisible()
+  await expect(page.getByRole('heading', { level: 3, name: '연결된 작업' })).toBeVisible()
+  await expect(page.getByRole('link', { name: '완료된 검증 실행' })).toHaveAttribute(
+    'href',
+    `/artifact/RUN_RECORD/${completedRunArtifactId}`,
+  )
+  await expect(page.getByRole('link', { name: '실패한 검증 실행' })).toBeVisible()
+
+  await page.getByRole('link', { name: '완료된 검증 실행' }).click()
+  await expect(page).toHaveURL(`/artifact/RUN_RECORD/${completedRunArtifactId}`)
+  await expect(page.getByRole('heading', { level: 2, name: '완료된 검증 실행' })).toBeVisible()
 
   await page.getByRole('link', { exact: true, name: '검색' }).first().click()
   await page.getByLabel('검색어').fill('프로덕션 검증')
   await page.getByRole('button', { name: '검색' }).click()
+  await expect(page.getByText('점수 0.987')).toBeVisible()
   await expect(page.getByRole('link', { name: '부모 산출물 열기' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '다음 페이지' })).toBeVisible()
+  await page.getByRole('button', { name: '다음 페이지' }).click()
+  await expect(page).toHaveURL(/cursor=search-next-page/)
+  await expect.poll(() => requestUrls(requests, '/api/search/keyword').some((url) => (
+    url.searchParams.get('cursor') === 'search-next-page'
+    && url.searchParams.get('q') === '프로덕션 검증'
+    && url.searchParams.get('limit') === '20'
+  ))).toBe(true)
   await page.getByRole('link', { name: '부모 산출물 열기' }).click()
+  await expect(page).toHaveURL(`/artifact/DOCUMENT_SNAPSHOT/${artifactId}`)
   await expect(page.getByRole('heading', { level: 1, name: '산출물 상세' })).toBeVisible()
-  await expect(page.getByRole('heading', { level: 1, name: '안전한 미리보기' })).toBeVisible()
+  await expect(page.getByRole('heading', { level: 4, name: '안전한 미리보기' })).toBeVisible()
   await expect(page.getByRole('link', { name: '공개 문서' })).toHaveAttribute('href', 'https://example.com/docs')
   await expect(page.locator('script')).toHaveCount(1)
   await page.getByRole('tab', { name: '원문' }).click()
@@ -59,11 +82,29 @@ test('production Fastify dashboard supports browse, detail, search, navigation, 
   await page.getByLabel('추적 시작 노드').selectOption('node-task-024')
   await expect(page.getByRole('region', { name: '계보 결과' })).toBeVisible()
   await expect(page.getByRole('region', { name: '계보 그래프' })).toBeVisible()
+  const accessibleTrace = page.getByRole('region', { name: '계보 노드와 간선 목록' })
+  await expect(accessibleTrace).toContainText('간선 ID: edge-task-document')
+  await expect(accessibleTrace).toContainText('간선 ID: edge-task-completed-run')
+  await expect(accessibleTrace).not.toContainText('fabricated-edge')
+  await expect(page.getByRole('link', { name: 'RUN 완료된 검증 실행 산출물 열기' })).toHaveAttribute(
+    'href',
+    `/artifact/RUN_RECORD/${completedRunArtifactId}`,
+  )
   await page.getByLabel('방향').selectOption('UPSTREAM')
   await page.getByLabel('최대 깊이').selectOption('5')
   await expect(page).toHaveURL(/direction=UPSTREAM/)
   await expect(page).toHaveURL(/maxDepth=5/)
   await expect(page.locator('.react-flow__node').first()).toBeVisible()
+  await expect.poll(() => requestUrls(requests, '/api/graph/trace').some((url) => (
+    url.searchParams.get('projectId') === projectId
+    && url.searchParams.get('naturalKey') === 'task:task-024'
+    && url.searchParams.get('direction') === 'UPSTREAM'
+    && url.searchParams.get('maxDepth') === '5'
+  ))).toBe(true)
+
+  await page.getByRole('link', { name: 'RUN 완료된 검증 실행 산출물 열기' }).click()
+  await expect(page).toHaveURL(`/artifact/RUN_RECORD/${completedRunArtifactId}`)
+  await expect(page.getByRole('heading', { level: 2, name: '완료된 검증 실행' })).toBeVisible()
 
   expect(consoleErrors).toEqual([])
   expect(requests).not.toHaveLength(0)
@@ -72,6 +113,21 @@ test('production Fastify dashboard supports browse, detail, search, navigation, 
   expect(requests.every((request) => !request.path.includes('playwright-server-only-token'))).toBe(true)
   expect(await page.content()).not.toContain('playwright-server-only-token')
   expect(requests.some((request) => request.path.startsWith(`/api/projects/${projectId}/iterations`))).toBe(true)
+})
+
+test('production Fastify dashboard exposes semantic provider failures without a keyword fallback', async ({ page }) => {
+  const requests: DashboardApiRequest[] = []
+  await mockDashboardApi(page, requests, { semanticSearchFailure: 'embedding_provider_not_configured' })
+
+  await page.goto('/search?q=프로덕션&mode=semantic')
+
+  const alert = page.getByRole('alert')
+  await expect(alert).toContainText('의미 검색 제공자가 구성되지 않았습니다')
+  await expect(alert).toContainText('키워드 검색으로 자동 전환하지 않았습니다')
+  await expect(page).toHaveURL(/mode=semantic/)
+  expect(requests.filter((request) => request.path.startsWith('/api/search/semantic'))).toHaveLength(1)
+  expect(requests.filter((request) => request.path.startsWith('/api/search/keyword'))).toHaveLength(0)
+  expect(requests.find((request) => request.path.startsWith('/api/search/semantic'))?.method).toBe('POST')
 })
 
 test('production CSP blocks inline elements and external resources while allowing React Flow style attributes', async ({ page }) => {
@@ -127,3 +183,9 @@ test('production CSP blocks inline elements and external resources while allowin
     'style-src-elem',
   ]))
 })
+
+function requestUrls(requests: readonly DashboardApiRequest[], pathname: string) {
+  return requests
+    .filter((request) => request.path.startsWith(pathname))
+    .map((request) => new URL(request.path, 'http://dashboard.test'))
+}

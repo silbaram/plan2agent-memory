@@ -4,6 +4,7 @@ import { BrowserRouter } from 'react-router-dom'
 import type { DashboardApiClient, GraphNode, GraphTrace, GraphTraceRequest } from '../data-access'
 import { TraceRoute } from './TraceRoute'
 import { layoutTraceGraph } from './traceGraphLayout'
+import { deriveTraceCompletionContext, deriveTracePresentation } from './tracePresentation'
 import { DEFAULT_TRACE_DIRECTION, DEFAULT_TRACE_MAX_DEPTH, parseTraceUrl, serializeTraceUrl } from './traceUrlState'
 
 const projectId = '11111111-1111-4111-8111-111111111111'
@@ -55,7 +56,134 @@ describe('trace graph layout', () => {
       { id: 'edge-task-document', source: 'node-task', target: 'node-document' },
       { id: 'edge-task-run', source: 'node-task', target: 'node-run' },
     ])
+    expect(layout.flowEdges.map((edge) => ({ id: edge.id, hierarchy: edge.data?.hierarchy }))).toEqual([
+      { id: 'edge-task-document', hierarchy: 'primary' },
+      { id: 'edge-task-run', hierarchy: 'primary' },
+    ])
+    expect(layout.flowNodes.map((node) => ({ id: node.id, hierarchy: node.data.hierarchy }))).toEqual([
+      { id: 'node-task', hierarchy: 'primary' },
+      { id: 'node-document', hierarchy: 'primary' },
+      { id: 'node-run', hierarchy: 'primary' },
+    ])
     expect(layout.danglingEdges.map((edge) => edge.edgeId)).toEqual(['edge-dangling'])
+  })
+
+  it('keeps secondary relationships tied to their returned edge instead of inferring a primary lineage', () => {
+    const trace = {
+      ...traceFixture(),
+      edges: [{
+        edgeId: 'edge-secondary',
+        edgeType: 'DEPENDS_ON',
+        fromNodeId: 'node-task',
+        metadata: {},
+        projectId,
+        sourceReference: null,
+        toNodeId: 'node-document',
+      }],
+    } satisfies GraphTrace
+
+    const layout = layoutTraceGraph(trace)
+
+    expect(layout.flowEdges).toHaveLength(1)
+    expect(layout.flowEdges[0]?.data?.hierarchy).toBe('secondary')
+    expect(layout.flowNodes.map((node) => node.data.hierarchy)).toEqual(['secondary', 'secondary', 'unrelated'])
+  })
+
+  it('shows completed task context only for an explicitly completed task with canonical identity and a returned edge', () => {
+    const completedTask = graphNode({
+      content: 'Implement trace presentation',
+      label: 'Trace implementation',
+      metadata: {
+        completedAt: '2026-08-11T09:00:00Z',
+        result: 'Focused tests passed',
+        status: 'done',
+      },
+      naturalKey: 'task:task-011',
+      nodeId: 'node-completed-task',
+      nodeKind: 'TASK',
+      taskId: 'task-011',
+    })
+    const trace = {
+      edges: [{
+        edgeId: 'edge-completed-task',
+        edgeType: 'DERIVED_FROM',
+        fromNodeId: 'node-completed-task',
+        metadata: {},
+        projectId,
+        sourceReference: null,
+        toNodeId: 'node-document',
+      }],
+      nodes: [{ depth: 0, node: completedTask }, { depth: 1, node: documentNode() }],
+      root: completedTask,
+      truncated: false,
+    } satisfies GraphTrace
+
+    const completionContext = deriveTraceCompletionContext(trace, layoutTraceGraph(trace).edgeEntries)
+
+    expect(completionContext).toEqual({
+      availability: 'available',
+      completedTasks: [{
+        completedAt: '2026-08-11T09:00:00Z',
+        content: 'Implement trace presentation',
+        edgeTypes: ['DERIVED_FROM'],
+        label: 'Trace implementation',
+        result: 'Focused tests passed',
+        taskId: 'task-011',
+      }],
+    })
+  })
+
+  it('marks a root-only graph empty and completion context unavailable without inventing a lineage edge', () => {
+    const completedButUnconnectedTask = graphNode({
+      metadata: { status: 'done' },
+      nodeId: 'node-completed-task',
+      nodeKind: 'TASK',
+      taskId: 'task-011',
+    })
+    const trace = {
+      edges: [],
+      nodes: [{ depth: 0, node: completedButUnconnectedTask }],
+      root: completedButUnconnectedTask,
+      truncated: false,
+    } satisfies GraphTrace
+
+    const layout = layoutTraceGraph(trace)
+
+    expect(deriveTracePresentation(trace, layout)).toMatchObject({
+      completionContext: { availability: 'unavailable', reason: 'missing_canonical_lineage' },
+      isEmpty: true,
+      primaryEdgeCount: 0,
+      secondaryEdgeCount: 0,
+    })
+  })
+
+  it('does not treat a secondary edge as canonical completion lineage', () => {
+    const completedTask = graphNode({
+      metadata: { status: 'done' },
+      nodeId: 'node-completed-task',
+      nodeKind: 'TASK',
+      taskId: 'task-011',
+    })
+    const trace = {
+      edges: [{
+        edgeId: 'edge-secondary-task',
+        edgeType: 'DEPENDS_ON',
+        fromNodeId: 'node-completed-task',
+        metadata: {},
+        projectId,
+        sourceReference: null,
+        toNodeId: 'node-document',
+      }],
+      nodes: [{ depth: 0, node: completedTask }, { depth: 1, node: documentNode() }],
+      root: completedTask,
+      truncated: false,
+    } satisfies GraphTrace
+
+    expect(deriveTraceCompletionContext(trace, layoutTraceGraph(trace).edgeEntries)).toEqual({
+      availability: 'unavailable',
+      completedTasks: [],
+      reason: 'missing_canonical_lineage',
+    })
   })
 })
 
@@ -83,9 +211,9 @@ describe('TraceRoute', () => {
       naturalKey: 'task:task-1',
       projectId,
     }])
-    expect(screen.getByRole('link', { name: 'Task one 산출물 열기' }).getAttribute('href')).toBe('/artifact/TASK/task-1')
-    expect(screen.getByRole('link', { name: 'Document one 산출물 열기' }).getAttribute('href')).toBe('/artifact/DOCUMENT_SNAPSHOT/document-1')
-    expect(screen.getByRole('link', { name: 'Run one 산출물 열기' }).getAttribute('href')).toBe('/artifact/RUN_RECORD/run-1')
+    expect(screen.getByRole('link', { name: 'TASK Task one 산출물 열기' }).getAttribute('href')).toBe('/artifact/TASK/task-1')
+    expect(screen.getByRole('link', { name: 'DOCUMENT Document one 산출물 열기' }).getAttribute('href')).toBe('/artifact/DOCUMENT_SNAPSHOT/document-1')
+    expect(screen.getByRole('link', { name: 'RUN Run one 산출물 열기' }).getAttribute('href')).toBe('/artifact/RUN_RECORD/run-1')
     expect(window.location.search).toContain('direction=BOTH')
     expect(window.location.search).toContain('maxDepth=3')
   })
@@ -175,6 +303,27 @@ describe('TraceRoute', () => {
     expect(await screen.findByRole('region', { name: '추적할 노드가 없습니다' })).toBeTruthy()
   })
 
+  it('announces ready state before root selection and exposes an explicit empty result without fabricating relationships', async () => {
+    const root = taskNode()
+    setLocation('/trace')
+    renderTrace(createClient({
+      nodes: [root],
+      trace: async () => ({
+        edges: [],
+        nodes: [{ depth: 0, node: root }],
+        root,
+        truncated: false,
+      }),
+    }))
+
+    expect(await screen.findByText('준비됨: 시작 노드를 선택하면 방향과 최대 깊이를 지정해 읽기 전용 계보를 확인할 수 있습니다.')).toBeTruthy()
+    fireEvent.change(await screen.findByLabelText('추적 시작 노드'), { target: { value: 'node-task' } })
+
+    expect(await screen.findByRole('status', { name: '빈 계보 결과' })).toBeTruthy()
+    expect(screen.getByText('실제 graph edge와 canonical taskId가 함께 반환되지 않아 완료 작업 맥락을 표시할 수 없습니다.')).toBeTruthy()
+    expect(screen.getByText('표시할 간선이 없습니다.')).toBeTruthy()
+  })
+
   it('recovers an invalid URL visibly and does not send its unsafe values to traceGraph', async () => {
     let traceRequestCount = 0
     setLocation('/trace?projectId=invalid%2Fproject&naturalKey=task%2Funsafe&direction=OTHER&maxDepth=40')
@@ -204,6 +353,47 @@ describe('TraceRoute', () => {
     expect(screen.getByRole('status', { name: '연결할 수 없는 간선' }).textContent).toContain('1개의 간선')
     expect(screen.getByText('간선 ID: edge-dangling')).toBeTruthy()
     expect(screen.getByText('이 간선은 응답에 없는 노드를 참조합니다.')).toBeTruthy()
+    expect(screen.getByText('이 목록은 잘린 trace 응답과 동일한 node·edge만 포함합니다.')).toBeTruthy()
+  })
+
+  it('renders only returned edge facts in the accessible list and completion context', async () => {
+    const completedTask = graphNode({
+      content: 'Deliver the bounded trace graph',
+      label: 'Trace task',
+      metadata: {
+        completedAt: '2026-08-11T09:00:00Z',
+        result: 'Verified',
+        status: 'finished',
+      },
+      naturalKey: 'task:task-011',
+      nodeId: 'node-completed-task',
+      nodeKind: 'TASK',
+      taskId: 'task-011',
+    })
+    const trace = {
+      edges: [{
+        edgeId: 'edge-completed-task',
+        edgeType: 'EXECUTED_FOR',
+        fromNodeId: 'node-completed-task',
+        metadata: {},
+        projectId,
+        sourceReference: null,
+        toNodeId: 'node-run',
+      }],
+      nodes: [{ depth: 0, node: completedTask }, { depth: 1, node: runNode() }],
+      root: completedTask,
+      truncated: false,
+    } satisfies GraphTrace
+    setLocation('/trace?projectId=11111111-1111-4111-8111-111111111111&iterationId=22222222-2222-4222-8222-222222222222&naturalKey=task%3Atask-011&direction=BOTH&maxDepth=3')
+    renderTrace(createClient({ nodes: [completedTask], trace: async () => trace }))
+
+    expect(await screen.findByText('canonical lineage의 완료 작업')).toBeTruthy()
+    expect(screen.getByText('작업 ID: task-011')).toBeTruthy()
+    expect(screen.getByText('근거 edge 유형: EXECUTED_FOR')).toBeTruthy()
+    expect(screen.getByText('수행 내용: Deliver the bounded trace graph')).toBeTruthy()
+    expect(screen.getByText('결과: Verified')).toBeTruthy()
+    expect(screen.getByText('계보 구분: 주 관계')).toBeTruthy()
+    expect(screen.queryByText('간선 ID: fabricated-edge')).toBeNull()
   })
 
   it('shows a safe retryable error when the trace API fails', async () => {
@@ -321,7 +511,7 @@ function traceFixture(): GraphTrace {
     edges: [
       {
         edgeId: 'edge-task-run',
-        edgeType: 'AFFECTS',
+        edgeType: 'EXECUTED_FOR',
         fromNodeId: 'node-task',
         metadata: {},
         projectId,
@@ -330,7 +520,7 @@ function traceFixture(): GraphTrace {
       },
       {
         edgeId: 'edge-dangling',
-        edgeType: 'SUPPORTS',
+        edgeType: 'EVIDENCED_BY',
         fromNodeId: 'node-run',
         metadata: {},
         projectId,
