@@ -28,12 +28,13 @@ Checks:
 1. Every required screen/state/viewport case has actual application evidence at the exact declared viewport width and fixed height when one is declared.
 2. Information hierarchy, region placement, primary-action prominence, density, spacing, typography, color roles, and responsive behavior preserve the approved direction.
 3. Required empty, loading, error, success, and interaction states are present when listed in the complete approved contract.
-4. The application is usable with keyboard focus, semantic labels, adequate contrast, and the approved accessibility standard.
-5. Evidence comes from the application implementation, not from reusing the prototype screenshot as proof.
+4. Every approved `content-stress-<case>` state is present and visibly exercises the declared extreme content; text wrapping, truncation, overflow, list capacity, and locale behavior preserve the selected candidate's approved treatment.
+5. The application is usable with keyboard focus, semantic labels, adequate contrast, and the approved accessibility standard.
+6. Evidence comes from the application implementation, not from reusing the prototype screenshot as proof.
 
 Rules:
 - Do not edit files, run implementation commands, or change the approved experience.
 - Use `verdict: "confirm_ui"` only when every required result is `passed`, every result concern list is empty, top-level concerns are empty, and accessibility passed with zero critical violations.
 - Use `verdict: "block"` for missing evidence or material visual, state, responsive, or accessibility drift, and identify concrete concerns.
 - Do not block on harmless pixel differences that preserve the approved composition and visual intent.
-- Do not judge functional acceptance, test execution, or code style; those belong to the performance monitor and style rater.
+- Do not judge functional acceptance, test execution, or code style; those belong to the owner verification and the single performance monitor gate.
